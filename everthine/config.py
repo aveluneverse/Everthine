@@ -16,8 +16,15 @@ class ConfigError(Exception):
 
 
 def _get_bool(env: Mapping, key: str, default: bool) -> bool:
-    raw = str(env.get(key, str(default))).strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    raw = env.get(key)
+    if raw is None or str(raw).strip() == "":
+        return default
+    value = str(raw).strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(f"{key} must be a boolean (true/false/yes/no/on/off/1/0), got: {raw!r}")
 
 
 def _get_int(env: Mapping, key: str, default: int) -> int:
@@ -82,7 +89,11 @@ def load_config(env: Mapping | None = None) -> Config:
         raise ConfigError(f"AUTHORIZED_USER_ID must be an integer, got: {raw_uid!r}") from exc
 
     model = str(env.get("CLAUDE_MODEL", "")).strip() or None
-    cmd = shlex.split(str(env.get("CLAUDE_CMD", "claude")).strip() or "claude")
+    raw_cmd = str(env.get("CLAUDE_CMD", "claude")).strip() or "claude"
+    try:
+        cmd = shlex.split(raw_cmd)
+    except ValueError as exc:
+        raise ConfigError(f"CLAUDE_CMD must be a valid command line, got: {raw_cmd!r}") from exc
 
     return Config(
         bot_token=token,

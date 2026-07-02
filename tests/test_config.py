@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from everthine.config import Config, ConfigError, load_config
 
@@ -32,6 +33,36 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(cfg.command_timeout_s, 120)
         self.assertEqual(cfg.claude_cmd, ["claude-custom", "--flag"])
         self.assertFalse(cfg.injection_enabled)
+
+    def test_bool_true_variants(self):
+        for raw in ("1", "true", "YES", "On"):
+            with self.subTest(raw=raw):
+                cfg = load_config({**BASE, "INJECTION_ENABLED": raw})
+                self.assertTrue(cfg.injection_enabled)
+
+    def test_bool_false_variants(self):
+        for raw in ("0", "false", "no", "OFF"):
+            with self.subTest(raw=raw):
+                cfg = load_config({**BASE, "INJECTION_ENABLED": raw})
+                self.assertFalse(cfg.injection_enabled)
+
+    def test_bool_absent_or_empty_uses_default(self):
+        self.assertTrue(load_config(BASE).injection_enabled)
+        self.assertTrue(load_config({**BASE, "INJECTION_ENABLED": ""}).injection_enabled)
+
+    def test_bool_garbage_raises(self):
+        with self.assertRaises(ConfigError):
+            load_config({**BASE, "INJECTION_ENABLED": "enabled"})
+
+    def test_bad_claude_cmd_raises(self):
+        with self.assertRaises(ConfigError):
+            load_config({**BASE, "CLAUDE_CMD": 'claude "unbalanced'})
+
+    def test_derived_paths(self):
+        cfg = load_config({**BASE, "DATA_DIR": "companion-data"})
+        self.assertEqual(cfg.engine_home, Path("companion-data") / "engine")
+        self.assertEqual(cfg.archive_dir, Path("companion-data") / "archive")
+        self.assertEqual(cfg.session_path, Path("companion-data") / "session.json")
 
 
 if __name__ == "__main__":
