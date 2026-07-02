@@ -88,6 +88,8 @@ def _run_attempt(cfg: Config, prompt: str, session_id: str | None,
 
     try:
         data = json.loads(stdout)
+        if not isinstance(data, dict):
+            raise TypeError("engine output is not a JSON object")
         return EngineReply(str(data.get("result", "")).strip() or stdout.strip(),
                            data.get("session_id", session_id), ok=True)
     except (json.JSONDecodeError, TypeError):

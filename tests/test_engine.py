@@ -71,6 +71,13 @@ class TestRunOnce(unittest.TestCase):
         self.assertTrue(r.ok)
         self.assertIn("not json", r.text)
 
+    def test_valid_json_non_object_falls_back_to_raw(self):
+        set_mode("nonobject")
+        r = engine.run_once(cfg(), "hi")
+        self.assertTrue(r.ok)
+        self.assertIn("[1, 2, 3]", r.text)
+        self.assertIsNone(r.error_kind)
+
     def test_auth_retry_succeeds_second_try(self):
         with tempfile.TemporaryDirectory() as td:
             os.environ["FAKE_CLAUDE_STATE"] = str(Path(td) / "state")
