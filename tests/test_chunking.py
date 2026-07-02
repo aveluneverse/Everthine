@@ -31,6 +31,25 @@ class TestChunking(unittest.TestCase):
         self.assertTrue(all(len(p) <= 4096 for p in parts))
         self.assertEqual("".join(parts), text)
 
+    def test_fenced_monster_line_stays_within_limit(self):
+        text = "```python\n" + "z" * 9000 + "\n```"
+        parts = split_message(text, max_len=4096)
+        self.assertTrue(all(len(p) <= 4096 for p in parts), [len(p) for p in parts])
+        for p in parts:
+            self.assertEqual(p.count("```") % 2, 0, "unbalanced fence in a part")
+        for p in parts[1:]:
+            self.assertTrue(p.startswith("```"), f"continuation lost fence: {p[:20]!r}")
+        self.assertEqual(sum(p.count("z") for p in parts), 9000)
+
+    def test_fenced_near_budget_lines_stay_within_limit(self):
+        text = "```python\n" + "a" * 96 + "\n" + "b" * 96 + "\n```"
+        parts = split_message(text, max_len=100)
+        self.assertTrue(all(len(p) <= 100 for p in parts), [len(p) for p in parts])
+        for p in parts:
+            self.assertEqual(p.count("```") % 2, 0)
+        self.assertEqual(sum(p.count("a") for p in parts), 96)
+        self.assertEqual(sum(p.count("b") for p in parts), 96)
+
 
 if __name__ == "__main__":
     unittest.main()
