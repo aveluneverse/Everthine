@@ -56,6 +56,15 @@ class TestSessionStore(unittest.TestCase):
         self.assertIsNone(data["session_id"])
         self.assertEqual(data["recent_context_floor"], NOW.isoformat())
 
+    def test_warm_restart_preserves_clean_floor(self):
+        self.store.clean_start(NOW)
+        self.store.stamp_session_started("s3", NOW.replace(hour=13))
+        self.store.warm_restart()
+        data = self.store.load()
+        self.assertIsNone(data["session_id"])
+        self.assertIsNone(data["session_started_at"])
+        self.assertEqual(data["recent_context_floor"], NOW.isoformat())
+
     def test_hostname_written(self):
         self.store.save(session_id="abc")
         raw = json.loads(self.path.read_text(encoding="utf-8"))

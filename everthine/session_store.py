@@ -65,8 +65,9 @@ class SessionStore:
                 os.unlink(tmp)
 
     def warm_restart(self) -> None:
-        """New notebook, keep the warmth: injection window stays open."""
-        self.save(session_id=None, session_started_at=None, recent_context_floor=None)
+        """New notebook, keep the warmth: the injection window stays open,
+        and any explicit clean-start floor is preserved."""
+        self.save(session_id=None, session_started_at=None)
 
     def clean_start(self, now: datetime) -> None:
         """New notebook AND slam the injection floor: a true blank page."""
