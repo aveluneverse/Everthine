@@ -1,0 +1,76 @@
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+from everthine import archive, bot
+from everthine.config import Config
+from everthine.engine import EngineReply
+from everthine.session_store import SessionStore
+
+NOW = datetime(2026, 7, 3, 12, 0, tzinfo=timezone.utc)
+
+
+class FakeEngineOK:
+    def __init__(self):
+        self.calls = []
+
+    def run_once(self, cfg, prompt, session_id=None, system_prompt=None):
+        self.calls.append({"prompt": prompt, "session_id": session_id,
+                           "system_prompt": system_prompt})
+        return EngineReply("nice to hear from you", "sess-new", ok=True)
+
+
+class FakeEngineFail:
+    def run_once(self, cfg, prompt, session_id=None, system_prompt=None):
+        return EngineReply("", session_id, ok=False, error_kind="timeout")
+
+
+class TestProduceReply(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        root = Path(self._td.name)
+        self.cfg = Config(bot_token="x", authorized_user_id=1, data_dir=root / "data")
+        self.store = SessionStore(self.cfg.session_path)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_happy_path_replies_and_stamps(self):
+        eng = FakeEngineOK()
+        chunks = bot.produce_reply(self.cfg, self.store, "hello", now=NOW, engine_mod=eng)
+        self.assertEqual(chunks, ["nice to hear from you"])
+        self.assertEqual(self.store.load()["session_id"], "sess-new")
+        self.assertTrue(eng.calls[0]["system_prompt"])
+
+    def test_archive_written_both_sides(self):
+        bot.produce_reply(self.cfg, self.store, "hello", now=NOW, engine_mod=FakeEngineOK())
+        texts = [e["text"] for e in archive.iter_entries(self.cfg.archive_dir)]
+        self.assertIn("hello", texts)
+        self.assertIn("nice to hear from you", texts)
+
+    def test_injection_prefix_reaches_engine_on_new_session(self):
+        archive.write_entry(self.cfg.archive_dir, "user", "we talked about stars",
+                            ts=NOW.replace(hour=10))
+        eng = FakeEngineOK()
+        bot.produce_reply(self.cfg, self.store, "good morning", now=NOW, engine_mod=eng)
+        self.assertIn("we talked about stars", eng.calls[0]["prompt"])
+        self.assertTrue(eng.calls[0]["prompt"].endswith("good morning"))
+
+    def test_engine_failure_returns_friendly_error(self):
+        chunks = bot.produce_reply(self.cfg, self.store, "hello", now=NOW,
+                                   engine_mod=FakeEngineFail())
+        self.assertEqual(len(chunks), 1)
+        self.assertNotEqual(chunks[0].strip(), "")
+        self.assertIsNone(self.store.load()["session_id"])
+
+
+class TestHelpers(unittest.TestCase):
+    def test_start_buttons(self):
+        self.assertEqual(bot.decide_start_buttons(False), ["btn_clean"])
+        self.assertEqual(bot.decide_start_buttons(True),
+                         ["btn_resume", "btn_warm", "btn_clean"])
+
+
+if __name__ == "__main__":
+    unittest.main()
