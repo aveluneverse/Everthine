@@ -6,8 +6,8 @@ the first replies still carry yesterday's warmth. The window decays to
 nothing as the current session accumulates its own native memory.
 
 Window: since = max(now - lookback, floor);  entries with ts >= upper
-(the current session's start) are skipped - the CLI already remembers
-those natively.
+are skipped, where upper = min(session start, now) - the CLI already
+remembers in-session turns natively, and the live turn is not memory.
 """
 from __future__ import annotations
 
@@ -39,6 +39,8 @@ def build_block(cfg: Config, store_data: dict, archive_dir: Path,
     if floor is not None and floor > since:
         since = floor
     upper = _parse(store_data.get("session_started_at"))
+    if upper is None or upper > now:
+        upper = now
 
     lines = []
     for entry in archive.iter_entries(archive_dir, since=since):

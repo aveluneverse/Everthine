@@ -64,6 +64,15 @@ class TestInjection(unittest.TestCase):
             self.assertIn("before-session", block)
             self.assertNotIn("inside-session", block)
 
+    def test_live_turn_excluded_on_fresh_session(self):
+        td, d = self._dir_with(("user", "earlier today", NOW - timedelta(hours=2)),
+                               ("user", "the live message", NOW))
+        with td:
+            block = recent_context.build_block(CFG, {"session_started_at": None,
+                                                     "recent_context_floor": None}, d, NOW)
+            self.assertIn("earlier today", block)
+            self.assertNotIn("the live message", block)
+
     def test_floor_clamps_window(self):
         floor = (NOW - timedelta(hours=1)).isoformat()
         td, d = self._dir_with(("user", "pre-floor", NOW - timedelta(hours=2)))
