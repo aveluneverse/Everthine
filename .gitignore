@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime user data & secrets (each user's companion data stays local)
+.env
+*.env
+data/
+
+# OS noise
+Thumbs.db
+.DS_Store
