@@ -172,7 +172,7 @@ class StreamingDisplay:
             return False
 
     async def _do_edit(self) -> None:
-        if len(self._current_buffer) >= _SPLIT_THRESHOLD:
+        if len(self._current_buffer) > _SPLIT_THRESHOLD:
             await self._split_and_continue()
             return
         if await self._edit_current(self._current_buffer, with_markup=True):
@@ -193,6 +193,24 @@ class StreamingDisplay:
         if self._current_msg not in self._messages:
             self._messages.append(self._current_msg)
             self._message_texts.append(first_part)
+
+        # A flood backlog can pile far past the threshold between edits;
+        # peel closed messages off the front until the tail fits one message.
+        while len(remainder) > _SPLIT_THRESHOLD:
+            pos = find_split_point(remainder)
+            head = remainder[:pos]
+            remainder = remainder[pos:]
+            if head.count("```") % 2 == 1:
+                remainder = "```\n" + remainder
+            try:
+                closed = await self._send_new(
+                    sanitize_markdown(head) if self._markdown_ok else head,
+                    parse_mode="Markdown" if self._markdown_ok else None)
+            except BadRequest:
+                self._markdown_ok = False
+                closed = await self._send_new(head)
+            self._messages.append(closed)
+            self._message_texts.append(head)
 
         try:
             new_msg = await self._send_new(

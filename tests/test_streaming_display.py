@@ -115,6 +115,27 @@ class TestDisplay(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sender.sent), 1)
         self.assertTrue(sender.sent[0]["text"].startswith("```"))
 
+    async def test_exact_threshold_does_not_split(self):
+        d, msg0, sender = make_display()
+        text = "x" * 3798 + ". "
+        await d.append(text)
+        self.assertEqual(sender.sent, [])
+        self.assertEqual(len(msg0.edits), 1)
+        messages = await d.finalize()
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(d.message_texts, [text])
+
+    async def test_flood_backlog_peels_into_multiple_messages(self):
+        d, _, sender = make_display()
+        text = "Sentence number one. " * 450
+        await d.append(text)
+        await d.finalize()
+        self.assertGreaterEqual(len(sender.sent), 2)
+        for part in d.message_texts:
+            self.assertTrue(part)
+            self.assertLessEqual(len(part), 4096)
+        self.assertEqual("".join(d.message_texts), text)
+
     async def test_cancel_before_first_edit_deletes_placeholder(self):
         d, msg0, _ = make_display()
         await d.append("no boundary yet")
