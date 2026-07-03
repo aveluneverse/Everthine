@@ -52,7 +52,6 @@ class Config:
     injection_max_chars: int = 12000
     session_bloat_mb: float = 1.5
     session_bloat_lines: int = 700
-    session_bloat_days: int = 3
 
     @property
     def engine_home(self) -> Path:

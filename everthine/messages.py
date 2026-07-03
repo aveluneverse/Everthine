@@ -7,8 +7,6 @@ editing this file (or, later milestones, via persona-level overrides).
 _MESSAGES = {
     "busy": "One moment - I'm still finishing my previous thought.",
     "generic_glitch": "Something glitched on my side. Please say that again.",
-    "auth_stuck": "My connection to Claude needs a re-login. Try again in a minute.",
-    "brain_stuck": "I lost my train of thought there. Please send that once more.",
     "timeout": "That took me too long and I stopped myself. Please try again.",
     "cli_missing": "I can't find the Claude Code CLI on this machine.",
     "auth": "My connection to Claude needs a re-login. Try again in a minute.",

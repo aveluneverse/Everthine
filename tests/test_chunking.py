@@ -50,6 +50,10 @@ class TestChunking(unittest.TestCase):
         self.assertEqual(sum(p.count("a") for p in parts), 96)
         self.assertEqual(sum(p.count("b") for p in parts), 96)
 
+    def test_tiny_max_len_rejected(self):
+        with self.assertRaises(ValueError):
+            split_message("anything", max_len=4)
+
 
 if __name__ == "__main__":
     unittest.main()

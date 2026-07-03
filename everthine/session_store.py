@@ -78,6 +78,8 @@ class SessionStore:
         if not new_id:
             return
         data = self.load()
+        # The CLI's -p --resume keeps the same session id across turns (verified
+        # empirically), so "id changed" reliably means "a new conversation began".
         if data.get("session_id") == new_id:
             return
         self.save(session_id=new_id, session_started_at=now.isoformat())

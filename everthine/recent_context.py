@@ -44,7 +44,7 @@ def build_block(cfg: Config, store_data: dict, archive_dir: Path,
 
     lines = []
     for entry in archive.iter_entries(archive_dir, since=since):
-        if upper is not None and entry["timestamp"] >= upper:
+        if entry["timestamp"] >= upper:
             continue
         lines.append(f'{entry["speaker"]}: {entry["text"]}')
     if not lines:

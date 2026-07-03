@@ -107,4 +107,3 @@ def run_once(cfg: Config, prompt: str, session_id: str | None = None,
                 time.sleep(1.5)
                 continue
             return reply
-    return reply

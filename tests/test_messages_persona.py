@@ -10,7 +10,7 @@ CFG = Config(bot_token="x", authorized_user_id=1, persona_path=Path("does/not/ex
 
 class TestMessages(unittest.TestCase):
     def test_known_keys_exist(self):
-        for key in ("busy", "generic_glitch", "auth_stuck", "brain_stuck", "timeout",
+        for key in ("busy", "generic_glitch", "timeout",
                     "cli_missing", "auth", "nonzero", "notebook_full",
                     "btn_resume", "btn_warm", "btn_clean",
                     "start_fresh", "start_has_session", "warm_ack", "clean_ack", "resume_ack"):

@@ -10,6 +10,8 @@ _FENCE = "```"
 
 
 def split_message(text: str, max_len: int = 4096) -> list:
+    if max_len <= len(_FENCE) + 1:
+        raise ValueError("max_len must be greater than 4")
     if not text:
         return []
     if len(text) <= max_len:

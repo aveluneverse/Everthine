@@ -114,6 +114,12 @@ def make_app(cfg: Config):
                                              update.message.text)
             for chunk in chunks:
                 await update.message.reply_text(chunk)
+        except Exception:
+            logger.error("reply pipeline failed unexpectedly", exc_info=True)
+            try:
+                await update.message.reply_text(msg("generic_glitch"))
+            except Exception:
+                logger.error("could not deliver the error notice", exc_info=True)
         finally:
             _busy = False
 
