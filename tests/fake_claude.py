@@ -1,6 +1,6 @@
 """A stand-in for the Claude Code CLI, driven by FAKE_CLAUDE_MODE.
 
-Modes: ok | malformed | nonobject | auth_once | slow | exit1
+Modes: ok | malformed | nonobject | result_error | auth_once | slow | exit1
 auth_once uses FAKE_CLAUDE_STATE (a file path) to fail with a 401 fingerprint
 on the first call and succeed on the second - exercising the retry loop.
 """
@@ -37,6 +37,12 @@ def main() -> None:
 
     if mode == "nonobject":
         sys.stdout.write("[1, 2, 3]")
+        return
+
+    if mode == "result_error":
+        sys.stdout.write(json.dumps({"result": "API Error: 500 internal",
+                                     "is_error": True,
+                                     "session_id": "fake-session-err"}))
         return
 
     reply = {"result": f"echo:{prompt.strip()[:60]}", "session_id": "fake-session-123"}

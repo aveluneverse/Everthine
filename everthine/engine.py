@@ -73,6 +73,8 @@ def _run_attempt(cfg: Config, prompt: str, session_id: str | None,
                                 errors="ignore", env=make_env(), cwd=str(cfg.engine_home))
     except FileNotFoundError:
         return EngineReply("", session_id, ok=False, error_kind="cli_missing")
+    except OSError:
+        return EngineReply("", session_id, ok=False, error_kind="nonzero")
 
     try:
         stdout, stderr = proc.communicate(input=prompt, timeout=cfg.command_timeout_s)
@@ -90,6 +92,10 @@ def _run_attempt(cfg: Config, prompt: str, session_id: str | None,
         data = json.loads(stdout)
         if not isinstance(data, dict):
             raise TypeError("engine output is not a JSON object")
+        if data.get("is_error"):
+            blob = str(data.get("result", ""))
+            kind = "auth" if _looks_like_auth_error(blob) else "nonzero"
+            return EngineReply("", session_id, ok=False, error_kind=kind)
         return EngineReply(str(data.get("result", "")).strip() or stdout.strip(),
                            data.get("session_id", session_id), ok=True)
     except (json.JSONDecodeError, TypeError):
