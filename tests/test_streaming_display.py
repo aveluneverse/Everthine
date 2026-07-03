@@ -132,6 +132,15 @@ class TestDisplay(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Shown.", d.message_texts[0])
         self.assertNotIn("hidden tail", d.message_texts[0])
 
+    async def test_cancel_right_after_split_keeps_both_messages(self):
+        d, msg0, sender = make_display()
+        await d.append("para one." + "a" * 3900 + "\n\n")
+        messages = await d.cancel()
+        self.assertFalse(msg0.deleted)
+        self.assertFalse(sender.sent[0]["msg"].deleted)
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(len(d.message_texts), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

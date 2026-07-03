@@ -207,3 +207,4 @@ class StreamingDisplay:
         self._current_buffer = remainder
         self._displayed_len = len(remainder)
         self._last_edit_time = time.monotonic()
+        self._is_first_update = False
