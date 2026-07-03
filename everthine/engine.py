@@ -136,78 +136,88 @@ def _stream_attempt(cfg: Config, prompt: str, session_id: str | None,
     except OSError:
         return EngineReply("", session_id, ok=False, error_kind="nonzero"), False, False
 
-    state = {"last_activity": time.monotonic(),
-             "deadline": time.monotonic() + cfg.command_timeout_s,
-             "timed_out": False, "cancelled": False}
-
-    def _guard():
-        while proc.poll() is None:
-            if cancel is not None and cancel.is_set():
-                state["cancelled"] = True
-                proc.kill()
-                return
-            now = time.monotonic()
-            if (now - state["last_activity"] > cfg.stream_stall_timeout_s
-                    or now > state["deadline"]):
-                state["timed_out"] = True
-                proc.kill()
-                return
-            time.sleep(0.25)
-
-    threading.Thread(target=_guard, daemon=True).start()
-
-    # The CLI reads the whole prompt before it starts generating, so writing
-    # then closing stdin up front cannot deadlock at our prompt sizes.
     try:
-        proc.stdin.write(prompt)
-        proc.stdin.close()
-    except OSError:
-        proc.kill()
-        proc.wait()
-        return EngineReply("", session_id, ok=False, error_kind="nonzero"), False, False
+        state = {"last_activity": time.monotonic(),
+                 "deadline": time.monotonic() + cfg.command_timeout_s,
+                 "timed_out": False, "cancelled": False}
 
-    text_parts = []
-    final_session = session_id
-    result_error = False
-    for line in proc.stdout:
-        state["last_activity"] = time.monotonic()
-        line = line.strip()
-        if not line:
-            continue
+        def _guard():
+            while proc.poll() is None:
+                if cancel is not None and cancel.is_set():
+                    state["cancelled"] = True
+                    proc.kill()
+                    return
+                now = time.monotonic()
+                if (now - state["last_activity"] > cfg.stream_stall_timeout_s
+                        or now > state["deadline"]):
+                    state["timed_out"] = True
+                    proc.kill()
+                    return
+                time.sleep(0.25)
+
+        threading.Thread(target=_guard, daemon=True).start()
+
+        # The CLI reads the whole prompt before it starts generating, so writing
+        # then closing stdin up front cannot deadlock at our prompt sizes.
         try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") == "stream_event":
-            inner = event.get("event") or {}
-            if inner.get("type") == "content_block_delta":
-                delta = inner.get("delta") or {}
-                if delta.get("type") == "text_delta" and delta.get("text"):
-                    text_parts.append(delta["text"])
-                    events.put({"type": "text", "text": delta["text"]})
-        elif event.get("type") == "result":
-            final_session = event.get("session_id", final_session)
-            if event.get("is_error"):
-                result_error = True
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+        except OSError:
+            proc.kill()
+            proc.wait()
+            return EngineReply("", session_id, ok=False, error_kind="nonzero"), False, False
 
-    stderr_tail = proc.stderr.read() if proc.stderr else ""
-    proc.wait()
-    emitted = bool(text_parts)
-    full = "".join(text_parts)
+        text_parts = []
+        final_session = session_id
+        result_error = False
+        for line in proc.stdout:
+            state["last_activity"] = time.monotonic()
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "stream_event":
+                inner = event.get("event") or {}
+                if inner.get("type") == "content_block_delta":
+                    delta = inner.get("delta") or {}
+                    if delta.get("type") == "text_delta" and delta.get("text"):
+                        text_parts.append(delta["text"])
+                        events.put({"type": "text", "text": delta["text"]})
+            elif event.get("type") == "result":
+                final_session = event.get("session_id", final_session)
+                if event.get("is_error"):
+                    result_error = True
 
-    if state["cancelled"]:
-        return EngineReply(full, session_id, ok=False, error_kind="nonzero"), emitted, False
-    if state["timed_out"]:
-        return EngineReply(full, session_id, ok=False, error_kind="timeout"), emitted, False
-    if proc.returncode != 0 or result_error:
-        auth = _looks_like_auth_error(full + (stderr_tail or ""))
-        kind = "auth" if auth else "nonzero"
-        return EngineReply(full, session_id, ok=False, error_kind=kind), emitted, auth
-    if not emitted:
-        return EngineReply("", session_id, ok=False, error_kind="nonzero"), False, False
-    return EngineReply(full, final_session, ok=True), True, False
+        stderr_tail = proc.stderr.read() if proc.stderr else ""
+        proc.wait()
+        emitted = bool(text_parts)
+        full = "".join(text_parts)
+
+        if state["cancelled"]:
+            return EngineReply(full, session_id, ok=False, error_kind="nonzero"), emitted, False
+        if state["timed_out"]:
+            return EngineReply(full, session_id, ok=False, error_kind="timeout"), emitted, False
+        if proc.returncode != 0 or result_error:
+            auth = _looks_like_auth_error(full + (stderr_tail or ""))
+            kind = "auth" if auth else "nonzero"
+            return EngineReply(full, session_id, ok=False, error_kind=kind), emitted, auth
+        if not emitted:
+            return EngineReply("", session_id, ok=False, error_kind="nonzero"), False, False
+        return EngineReply(full, final_session, ok=True), True, False
+    finally:
+        # Close the pipes deterministically on every exit path: a long-running
+        # process must not rely on GC to reclaim subprocess fds after kills.
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
 
 
 def stream_once(cfg: Config, prompt: str, session_id: str | None = None,
