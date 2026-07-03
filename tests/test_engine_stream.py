@@ -105,6 +105,21 @@ class TestStreamOnce(StreamTestBase):
         self.assertEqual(done.error_kind, "timeout")
         self.assertLess(elapsed, 15)
 
+    def test_unexpected_failure_still_emits_done(self):
+        # engine_home's parent is an existing FILE, so mkdir() raises before
+        # any subprocess exists; the consumer must still get its done event.
+        os.environ["FAKE_CLAUDE_MODE"] = "stream_ok"
+        occupied = Path(self._td.name) / "data-as-file"
+        occupied.write_text("not a directory", encoding="utf-8")
+        events = queue.Queue()
+        with self.assertLogs("everthine", level="ERROR"):
+            engine.stream_once(self.cfg(data_dir=occupied), "hi", events=events)
+        e = events.get(timeout=5)
+        self.assertEqual(e["type"], "done")
+        self.assertFalse(e["reply"].ok)
+        self.assertEqual(e["reply"].error_kind, "nonzero")
+        self.assertTrue(events.empty())
+
     def test_cancel_event_kills_promptly(self):
         os.environ["FAKE_CLAUDE_MODE"] = "stream_stall"
         cancel = threading.Event()

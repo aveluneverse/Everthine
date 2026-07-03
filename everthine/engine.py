@@ -8,6 +8,7 @@ stream_once() streams one reply as queue events for progressive display.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -15,6 +16,8 @@ import time
 from dataclasses import dataclass
 
 from .config import Config
+
+logger = logging.getLogger("everthine")
 
 _reply_lock = threading.Lock()
 
@@ -228,13 +231,20 @@ def stream_once(cfg: Config, prompt: str, session_id: str | None = None,
     Emits {"type": "text", "text": str} per text delta, then exactly one
     {"type": "done", "reply": EngineReply}. An auth failure is retried once,
     but only while no text has been emitted - the user never sees a rerun.
+    The done event is guaranteed even if an attempt crashes unexpectedly.
     """
-    with _reply_lock:
-        for attempt in range(2):
-            reply, emitted, saw_auth = _stream_attempt(
-                cfg, prompt, session_id, system_prompt, events, cancel)
-            if saw_auth and not emitted and attempt == 0:
-                time.sleep(1.5)
-                continue
-            break
+    try:
+        with _reply_lock:
+            for attempt in range(2):
+                reply, emitted, saw_auth = _stream_attempt(
+                    cfg, prompt, session_id, system_prompt, events, cancel)
+                if saw_auth and not emitted and attempt == 0:
+                    time.sleep(1.5)
+                    continue
+                break
+    except Exception:
+        # Never strand the consumer waiting on the queue: log the crash and
+        # still deliver the terminal event (same style as the bot's handler).
+        logger.error("streaming attempt crashed unexpectedly", exc_info=True)
+        reply = EngineReply("", session_id, ok=False, error_kind="nonzero")
     events.put({"type": "done", "reply": reply})
