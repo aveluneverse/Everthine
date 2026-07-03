@@ -199,9 +199,17 @@ class StreamingDisplay:
         while len(remainder) > _SPLIT_THRESHOLD:
             pos = find_split_point(remainder)
             head = remainder[:pos]
-            remainder = remainder[pos:]
+            rest = remainder[pos:]
             if head.count("```") % 2 == 1:
-                remainder = "```\n" + remainder
+                rest = "```\n" + rest
+            if len(rest) >= len(remainder):
+                # A tiny fenced head whose reopen regrows the tail would
+                # spin forever; hard-cut to guarantee forward progress.
+                head = remainder[:_SPLIT_THRESHOLD]
+                rest = remainder[_SPLIT_THRESHOLD:]
+                if head.count("```") % 2 == 1:
+                    rest = "```\n" + rest
+            remainder = rest
             try:
                 closed = await self._send_new(
                     sanitize_markdown(head) if self._markdown_ok else head,

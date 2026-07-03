@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from telegram.error import BadRequest
@@ -135,6 +136,29 @@ class TestDisplay(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(part)
             self.assertLessEqual(len(part), 4096)
         self.assertEqual("".join(d.message_texts), text)
+
+    async def test_peel_loop_terminates_on_boundaryless_fenced_run(self):
+        d, _, _ = make_display()
+        real_send = d._send_new
+
+        async def yielding_send(*args, **kwargs):
+            await asyncio.sleep(0)  # yield so the watchdog can fire on a spin
+            return await real_send(*args, **kwargs)
+
+        d._send_new = yielding_send
+        text = "```\n" + "x" * 8200
+
+        async def run():
+            await d.append(text)
+            return await d.finalize()
+
+        messages = await asyncio.wait_for(run(), timeout=5)
+        self.assertTrue(messages)
+        for part in d.message_texts:
+            self.assertTrue(part)
+            self.assertLessEqual(len(part), 4096)
+        self.assertEqual("".join(d.message_texts).replace("```\n", ""),
+                         text.replace("```\n", ""))
 
     async def test_cancel_before_first_edit_deletes_placeholder(self):
         d, msg0, _ = make_display()
