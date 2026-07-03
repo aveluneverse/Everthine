@@ -17,6 +17,11 @@ class TestMessages(unittest.TestCase):
                     "start_fresh", "start_has_session", "warm_ack", "clean_ack", "resume_ack"):
             self.assertTrue(messages.msg(key))
 
+    def test_streaming_strings_exact(self):
+        self.assertEqual(messages.msg("btn_cancel"), "Stop")
+        self.assertEqual(messages.msg("cancel_ack"), "Alright - never mind.")
+        self.assertEqual(messages.msg("thinking"), "...")
+
     def test_unauthorized_silence_is_intentionally_empty(self):
         self.assertEqual(messages.msg("unauthorized_silence"), "")
 
