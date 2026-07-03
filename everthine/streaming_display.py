@@ -171,6 +171,29 @@ class StreamingDisplay:
             logger.warning("streaming edit failed: %s", exc)
             return False
 
+    async def _send_paced(self, text: str, reply_markup=None) -> Message:
+        """Send a fresh message, honoring both the Markdown fallback and
+        Telegram's flood pacing. RetryAfter is authoritative: sleep the advised
+        interval and retry the *same* send until it lands - it converges,
+        because each RetryAfter names the real wait still owed. The pacing retry
+        wraps outside the Markdown/plain choice so a flood never drops a message
+        (an unwrapped RetryAfter here would kill the whole reply). BadRequest
+        still means the Markdown failed to parse: fall to plain text for this
+        send and every later one, exactly as before."""
+        while True:
+            try:
+                if self._markdown_ok:
+                    try:
+                        return await self._send_new(
+                            sanitize_markdown(text), parse_mode="Markdown",
+                            reply_markup=reply_markup)
+                    except BadRequest:
+                        self._markdown_ok = False
+                return await self._send_new(text, reply_markup=reply_markup)
+            except RetryAfter as exc:
+                self._edit_interval = _FLOOD_EDIT_INTERVAL
+                await asyncio.sleep(exc.retry_after)
+
     async def _do_edit(self) -> None:
         if len(self._current_buffer) > _SPLIT_THRESHOLD:
             await self._split_and_continue()
@@ -210,24 +233,11 @@ class StreamingDisplay:
                 if head.count("```") % 2 == 1:
                     rest = "```\n" + rest
             remainder = rest
-            try:
-                closed = await self._send_new(
-                    sanitize_markdown(head) if self._markdown_ok else head,
-                    parse_mode="Markdown" if self._markdown_ok else None)
-            except BadRequest:
-                self._markdown_ok = False
-                closed = await self._send_new(head)
+            closed = await self._send_paced(head)
             self._messages.append(closed)
             self._message_texts.append(head)
 
-        try:
-            new_msg = await self._send_new(
-                sanitize_markdown(remainder) if self._markdown_ok else remainder,
-                parse_mode="Markdown" if self._markdown_ok else None,
-                reply_markup=cancel_markup())
-        except BadRequest:
-            self._markdown_ok = False
-            new_msg = await self._send_new(remainder, reply_markup=cancel_markup())
+        new_msg = await self._send_paced(remainder, reply_markup=cancel_markup())
 
         self._current_msg = new_msg
         self._current_buffer = remainder

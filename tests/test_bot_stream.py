@@ -1,8 +1,12 @@
 import tempfile
 import threading
 import unittest
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+
+from telegram.error import RetryAfter
+from telegram.warnings import PTBDeprecationWarning
 
 from everthine import archive, bot
 from everthine.config import Config
@@ -140,12 +144,63 @@ class TestStreamReply(unittest.IsolatedAsyncioTestCase):
         texts = [e["text"] for e in archive.iter_entries(self.cfg.archive_dir)]
         self.assertNotIn("partial ", texts)
 
+    async def test_consumer_exception_reaps_worker(self):
+        # If the consumer side raises (e.g. RetryAfter bubbling from a peel
+        # burst), the live worker must be signalled to stop - otherwise it
+        # keeps generating for the full timeout holding the reply lock, and
+        # the next message's placeholder sits silent behind a zombie.
+        class RaisingDisplay(FakeDisplay):
+            async def append(self, chunk):
+                raise RetryAfter(1)
+
+        eng = ScriptedEngine(ok_script(["boom"]))
+        display = RaisingDisplay()
+        cancel = threading.Event()
+        with warnings.catch_warnings():
+            # PTB 22.6 deprecates an int retry_after in favour of timedelta; we
+            # exercise the still-supported int path on purpose, so hush that
+            # orthogonal library notice to keep the suite output clean.
+            warnings.simplefilter("ignore", PTBDeprecationWarning)
+            with self.assertRaises(RetryAfter):
+                await bot.stream_reply(self.cfg, self.store, "hello",
+                                       display, cancel, now=NOW, engine_mod=eng)
+        self.assertTrue(cancel.is_set())
+
 
 class TestButtons(unittest.TestCase):
     def test_start_buttons_unchanged(self):
         self.assertEqual(bot.decide_start_buttons(False), ["btn_clean"])
         self.assertEqual(bot.decide_start_buttons(True),
                          ["btn_resume", "btn_warm", "btn_clean"])
+
+
+class TestConcurrencyScope(unittest.TestCase):
+    """Concurrency (and the live busy gate + cancel callback it enables)
+    must exist only in streaming mode, so flag-off reproduces M1's
+    sequential update handling exactly.
+
+    PTB maps concurrent_updates(False) -> SimpleUpdateProcessor(1) and never
+    calling it also yields 1, so the two are byte-identical; concurrent_updates
+    is a positive int (0 is rejected by PTB), so the meaningful assertion is the
+    semantic one: 1 == one update at a time (M1), >1 == concurrent.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        self._root = Path(self._td.name)
+
+    def _app(self, streaming):
+        cfg = Config(bot_token="x", authorized_user_id=1,
+                     data_dir=self._root / "data",
+                     streaming_enabled=streaming)
+        return bot.make_app(cfg)
+
+    def test_streaming_off_is_sequential_like_m1(self):
+        self.assertEqual(self._app(False).concurrent_updates, 1)
+
+    def test_streaming_on_enables_concurrency(self):
+        self.assertGreater(self._app(True).concurrent_updates, 1)
 
 
 if __name__ == "__main__":

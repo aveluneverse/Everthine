@@ -92,19 +92,31 @@ async def stream_reply(cfg: Config, store: SessionStore, text: str,
     worker.start()
 
     reply = None
-    while True:
-        if cancel_flag.is_set():
-            break
-        try:
-            event = await asyncio.to_thread(events.get, True, 0.5)
-        except queue.Empty:
-            continue
-        if event["type"] == "text":
-            await display.append(event["text"])
-        elif event["type"] == "done":
-            reply = event["reply"]
-            break
-    await asyncio.to_thread(worker.join, 5)
+    try:
+        while True:
+            if cancel_flag.is_set():
+                break
+            try:
+                event = await asyncio.to_thread(events.get, True, 0.5)
+            except queue.Empty:
+                continue
+            if event["type"] == "text":
+                await display.append(event["text"])
+            elif event["type"] == "done":
+                reply = event["reply"]
+                break
+    except BaseException:
+        # A raising consumer (e.g. RetryAfter bubbling from a peel burst) or a
+        # task cancellation must reap the worker: signal it to stop so it drops
+        # the reply lock instead of generating for the full timeout behind the
+        # next message's placeholder. CancelledError takes this path too.
+        cancel_flag.set()
+        raise
+    finally:
+        # Join on every exit path exactly once. T4 guarantees a terminal event,
+        # so on the normal path the worker has already finished and this
+        # returns promptly.
+        await asyncio.to_thread(worker.join, 5)
 
     if cancel_flag.is_set():
         await display.cancel()
@@ -152,6 +164,17 @@ def make_app(cfg: Config):
         if not _authorized(cfg, update):
             return
         query = update.callback_query
+        # A warm/clean restart pressed mid-stream would rewrite the session
+        # store under the running turn; when the stream stamps the old session
+        # id back on success it silently undoes the user's "new notebook"
+        # request (and re-inflates warmth decay). Refuse while busy - a toast,
+        # no state change, no edit - so the buttons stay live for after the
+        # reply lands. btn_cancel must still fire (stopping the turn is its
+        # whole job); btn_resume only edits ack text and touches no state, so
+        # both stay unguarded. Only one query.answer() is allowed per callback.
+        if busy["active"] and query.data in ("btn_warm", "btn_clean"):
+            await query.answer(msg("busy"))
+            return
         await query.answer()
         if query.data == "btn_cancel":
             cancel_flag.set()
@@ -223,8 +246,12 @@ def make_app(cfg: Config):
             busy["active"] = False
             cancel_flag.clear()
 
+    # Flag off must reproduce M1's sequential update handling exactly: the
+    # busy gate and cancel callback only make sense once updates run
+    # concurrently, so scope concurrency to streaming mode. PTB maps False to
+    # one-update-at-a-time, byte-identical to M1 (which never enabled it).
     app = (ApplicationBuilder().token(cfg.bot_token)
-           .concurrent_updates(True).build())
+           .concurrent_updates(cfg.streaming_enabled).build())
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

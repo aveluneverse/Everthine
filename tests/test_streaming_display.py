@@ -1,7 +1,9 @@
 import asyncio
 import unittest
+import warnings
 
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
+from telegram.warnings import PTBDeprecationWarning
 
 from everthine.streaming_display import (StreamingDisplay, cancel_markup,
                                          find_split_point,
@@ -131,6 +133,40 @@ class TestDisplay(unittest.IsolatedAsyncioTestCase):
         text = "Sentence number one. " * 450
         await d.append(text)
         await d.finalize()
+        self.assertGreaterEqual(len(sender.sent), 2)
+        for part in d.message_texts:
+            self.assertTrue(part)
+            self.assertLessEqual(len(part), 4096)
+        self.assertEqual("".join(d.message_texts), text)
+
+    async def test_split_send_retries_on_flood(self):
+        # A peel/continuation send that floods (RetryAfter) must not lose the
+        # reply: the paced send sleeps the advised interval and retries the
+        # same send until it lands, so the whole backlog is delivered intact.
+        class FloodOnceSender(FakeSender):
+            def __init__(self):
+                super().__init__()
+                self.flooded = False
+
+            async def __call__(self, text, parse_mode=None, reply_markup=None):
+                if not self.flooded:
+                    self.flooded = True
+                    raise RetryAfter(0)
+                return await super().__call__(text, parse_mode=parse_mode,
+                                              reply_markup=reply_markup)
+
+        msg0 = FakeMessage()
+        sender = FloodOnceSender()
+        d = StreamingDisplay(msg0, sender)
+        d._edit_interval = 0.0  # deterministic tests: no wall-clock gating
+        text = "Sentence number one. " * 450
+        with warnings.catch_warnings():
+            # int retry_after is deprecated in PTB 22.6 (timedelta is coming);
+            # we test the still-supported int path, so hush that library notice.
+            warnings.simplefilter("ignore", PTBDeprecationWarning)
+            await d.append(text)
+            await d.finalize()
+        self.assertTrue(sender.flooded)
         self.assertGreaterEqual(len(sender.sent), 2)
         for part in d.message_texts:
             self.assertTrue(part)

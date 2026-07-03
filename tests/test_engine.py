@@ -1,5 +1,4 @@
 import os
-import queue
 import sys
 import tempfile
 import unittest
