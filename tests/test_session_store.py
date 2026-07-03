@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from everthine.config import Config
-from everthine.session_store import SessionStore, slug_for
+from everthine.session_store import SessionStore
 
 NOW = datetime(2026, 7, 3, 12, 0, tzinfo=timezone.utc)
 
@@ -72,25 +72,44 @@ class TestSessionStore(unittest.TestCase):
 
 
 class TestBloat(unittest.TestCase):
-    def test_slug(self):
-        self.assertEqual(slug_for(Path("C:/aaa/bbb")), "C--aaa-bbb")
-        self.assertEqual(slug_for(Path("C:/a b/c")), "C--a-b-c")
-        s = slug_for(Path("C:/aaa/bbb"))
-        self.assertNotIn("/", s)
-        self.assertNotIn("\\", s)
-        self.assertNotIn(" ", slug_for(Path("C:/Lair of X/y")))
+    def _home_with(self, td, session_id, lines=None, size=None):
+        home = Path(td) / "home"
+        proj = home / ".claude" / "projects" / "any-slug-name-here"
+        proj.mkdir(parents=True)
+        f = proj / f"{session_id}.jsonl"
+        if size is not None:
+            f.write_bytes(b"x" * size)
+        else:
+            f.write_text("{}\n" * (lines or 0), encoding="utf-8")
+        return home
 
     def test_detect_bloat_by_lines(self):
         with tempfile.TemporaryDirectory() as td:
-            cfg = Config(bot_token="x", authorized_user_id=1, data_dir=Path(td) / "data")
+            cfg = Config(bot_token="x", authorized_user_id=1)
             store = SessionStore(Path(td) / "session.json")
-            fake_home = Path(td) / "home"
-            proj = fake_home / ".claude" / "projects" / slug_for(cfg.engine_home.resolve())
-            proj.mkdir(parents=True)
-            (proj / "sess-1.jsonl").write_text("{}\n" * 800, encoding="utf-8")
-            self.assertTrue(store.detect_bloat(cfg, "sess-1", home=fake_home))
-            (proj / "sess-2.jsonl").write_text("{}\n" * 10, encoding="utf-8")
-            self.assertFalse(store.detect_bloat(cfg, "sess-2", home=fake_home))
+            home = self._home_with(td, "sess-1", lines=800)
+            self.assertTrue(store.detect_bloat(cfg, "sess-1", home=home))
+
+    def test_small_session_not_bloated(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(bot_token="x", authorized_user_id=1)
+            store = SessionStore(Path(td) / "session.json")
+            home = self._home_with(td, "sess-2", lines=10)
+            self.assertFalse(store.detect_bloat(cfg, "sess-2", home=home))
+
+    def test_detect_bloat_by_size(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(bot_token="x", authorized_user_id=1)
+            store = SessionStore(Path(td) / "session.json")
+            home = self._home_with(td, "sess-3", size=2 * 1024 * 1024)
+            self.assertTrue(store.detect_bloat(cfg, "sess-3", home=home))
+
+    def test_missing_transcript_or_home_is_calm(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(bot_token="x", authorized_user_id=1)
+            store = SessionStore(Path(td) / "session.json")
+            self.assertFalse(store.detect_bloat(cfg, "ghost", home=Path(td) / "nope"))
+            self.assertFalse(store.detect_bloat(cfg, None, home=Path(td)))
 
 
 if __name__ == "__main__":

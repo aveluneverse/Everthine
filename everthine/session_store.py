@@ -3,8 +3,11 @@
 The Claude Code CLI keeps the full transcript itself (under
 ~/.claude/projects/<slug>/<session_id>.jsonl); we only remember which
 session id is current, plus the two timestamps the warmth-injection
-window needs. Atomic writes; a hostname guard drops session ids that
-were minted on another machine (their transcripts do not exist here).
+window needs. The transcript is located by globbing
+~/.claude/projects/*/<session_id>.jsonl (session ids are UUIDs, so the
+match is unambiguous). Atomic writes; a hostname guard drops session
+ids that were minted on another machine (their transcripts do not
+exist here).
 """
 from __future__ import annotations
 
@@ -23,16 +26,6 @@ _DEFAULTS = {
     "session_started_at": None,
     "recent_context_floor": None,
 }
-
-
-def slug_for(path: Path) -> str:
-    """Mirror the Claude CLI project-slug convention (separators and spaces -> '-')."""
-    base = str(path)
-    slug = (base.replace(os.sep, "-").replace("/", "-")
-                .replace(":", "-").replace(" ", "-"))
-    if not slug.startswith("-") and not slug[0].isalnum():
-        slug = "-" + slug
-    return slug
 
 
 class SessionStore:
@@ -88,15 +81,10 @@ class SessionStore:
         if not session_id:
             return False
         home = home or Path.home()
-        slug = slug_for(cfg.engine_home.resolve())
-        # The CLI may lowercase the drive letter in its cwd string; try both.
-        candidates = [slug, slug[:1].lower() + slug[1:]] if slug else [slug]
-        jsonl = None
-        for cand in candidates:
-            probe = home / ".claude" / "projects" / cand / f"{session_id}.jsonl"
-            if probe.exists():
-                jsonl = probe
-                break
+        projects = home / ".claude" / "projects"
+        if not projects.is_dir():
+            return False
+        jsonl = next(iter(projects.glob(f"*/{session_id}.jsonl")), None)
         if jsonl is None:
             return False
         try:
