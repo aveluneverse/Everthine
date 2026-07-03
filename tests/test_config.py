@@ -64,6 +64,24 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(cfg.archive_dir, Path("companion-data") / "archive")
         self.assertEqual(cfg.session_path, Path("companion-data") / "session.json")
 
+    def test_streaming_defaults(self):
+        cfg = load_config(BASE)
+        self.assertTrue(cfg.streaming_enabled)
+        self.assertEqual(cfg.stream_stall_timeout_s, 60)
+
+    def test_streaming_overrides(self):
+        cfg = load_config({**BASE, "STREAMING_ENABLED": "false",
+                           "STREAM_STALL_TIMEOUT_S": "30"})
+        self.assertFalse(cfg.streaming_enabled)
+        self.assertEqual(cfg.stream_stall_timeout_s, 30)
+
+    def test_non_positive_ints_raise(self):
+        for key in ("COMMAND_TIMEOUT_S", "LOOKBACK_HOURS",
+                    "INJECTION_MAX_CHARS", "STREAM_STALL_TIMEOUT_S"):
+            for bad in ("0", "-5"):
+                with self.assertRaises(ConfigError, msg=f"{key}={bad}"):
+                    load_config({**BASE, key: bad})
+
 
 if __name__ == "__main__":
     unittest.main()

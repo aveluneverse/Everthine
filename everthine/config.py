@@ -37,6 +37,13 @@ def _get_int(env: Mapping, key: str, default: int) -> int:
         raise ConfigError(f"{key} must be an integer, got: {raw!r}") from exc
 
 
+def _get_positive_int(env: Mapping, key: str, default: int) -> int:
+    value = _get_int(env, key, default)
+    if value <= 0:
+        raise ConfigError(f"{key} must be a positive integer, got: {value}")
+    return value
+
+
 @dataclass(frozen=True)
 class Config:
     bot_token: str
@@ -50,6 +57,8 @@ class Config:
     injection_enabled: bool = True
     lookback_hours: int = 36
     injection_max_chars: int = 12000
+    streaming_enabled: bool = True
+    stream_stall_timeout_s: int = 60
     session_bloat_mb: float = 1.5
     session_bloat_lines: int = 700
 
@@ -99,11 +108,13 @@ def load_config(env: Mapping | None = None) -> Config:
         authorized_user_id=uid,
         claude_cmd=cmd,
         claude_model=model,
-        command_timeout_s=_get_int(env, "COMMAND_TIMEOUT_S", 300),
+        command_timeout_s=_get_positive_int(env, "COMMAND_TIMEOUT_S", 300),
         data_dir=Path(str(env.get("DATA_DIR", "data"))),
         persona_path=Path(str(env.get("PERSONA_PATH", "personas/default.md"))),
         archive_enabled=_get_bool(env, "ARCHIVE_ENABLED", True),
         injection_enabled=_get_bool(env, "INJECTION_ENABLED", True),
-        lookback_hours=_get_int(env, "LOOKBACK_HOURS", 36),
-        injection_max_chars=_get_int(env, "INJECTION_MAX_CHARS", 12000),
+        lookback_hours=_get_positive_int(env, "LOOKBACK_HOURS", 36),
+        injection_max_chars=_get_positive_int(env, "INJECTION_MAX_CHARS", 12000),
+        streaming_enabled=_get_bool(env, "STREAMING_ENABLED", True),
+        stream_stall_timeout_s=_get_positive_int(env, "STREAM_STALL_TIMEOUT_S", 60),
     )

@@ -13,6 +13,7 @@ class TestMessages(unittest.TestCase):
         for key in ("busy", "generic_glitch", "timeout",
                     "cli_missing", "auth", "nonzero", "notebook_full",
                     "btn_resume", "btn_warm", "btn_clean",
+                    "btn_cancel", "cancel_ack", "thinking",
                     "start_fresh", "start_has_session", "warm_ack", "clean_ack", "resume_ack"):
             self.assertTrue(messages.msg(key))
 
