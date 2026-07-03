@@ -119,6 +119,10 @@ class TestStreamReply(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(display.finalized)
         self.assertEqual(len(display.chunks), 1)
         self.assertTrue(display.chunks[0])
+        # The fallback apology reaches the display only; EngineReply.text
+        # stays the engine's ground truth so on_text can tell "no real
+        # output" apart from "real partial output".
+        self.assertEqual(reply.text, "")
         self.assertIsNone(self.store.load()["session_id"])
 
     async def test_partial_then_death_keeps_partial_no_stamp(self):

@@ -104,7 +104,7 @@ async def stream_reply(cfg: Config, store: SessionStore, text: str,
         elif event["type"] == "done":
             reply = event["reply"]
             break
-    worker.join(timeout=5)
+    await asyncio.to_thread(worker.join, 5)
 
     if cancel_flag.is_set():
         await display.cancel()
@@ -205,7 +205,10 @@ def make_app(cfg: Config):
                 if not display.message_texts:
                     await update.message.reply_text(msg("cancel_ack"))
                 return
-            if not reply.ok and display.full_text:
+            # reply.text, not display.full_text: the display may hold the
+            # injected fallback apology on text-less failures; reply.text is
+            # the engine's ground truth of real partial output.
+            if not reply.ok and reply.text:
                 await update.message.reply_text(
                     msg(reply.error_kind or "generic_glitch"))
             if reply.ok and store.detect_bloat(cfg, reply.session_id):
