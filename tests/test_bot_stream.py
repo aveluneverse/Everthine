@@ -5,7 +5,7 @@ import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
-from telegram.error import RetryAfter
+from telegram.error import NetworkError, RetryAfter
 from telegram.warnings import PTBDeprecationWarning
 
 from everthine import archive, bot, messages
@@ -202,6 +202,21 @@ class TestRegisterCommands(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(commands), 1)
         self.assertEqual(commands[0].command, "start")
         self.assertEqual(commands[0].description, messages.msg("cmd_start_desc"))
+
+    async def test_network_failure_is_logged_never_fatal(self):
+        # PTB 22.6 awaits post_init outside its bootstrap retry loop and
+        # outside any exception guard (only KeyboardInterrupt/SystemExit are
+        # caught), so anything escaping here would crash the whole process at
+        # startup. The menu is cosmetic; a transient network blip must not
+        # take the bot down before it serves a single reply.
+        class FailingCommandBot(FakeCommandBot):
+            async def set_my_commands(self, commands):
+                raise NetworkError("boom")
+
+        app = FakeCommandApp()
+        app.bot = FailingCommandBot()
+        with self.assertLogs("everthine", level="WARNING"):
+            await bot.register_commands(app)
 
 
 class TestConcurrencyScope(unittest.TestCase):

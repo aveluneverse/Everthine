@@ -148,8 +148,16 @@ def _keyboard(keys: list) -> InlineKeyboardMarkup:
 
 
 async def register_commands(app) -> None:
-    """Publish the command menu Telegram shows behind the Menu button."""
-    await app.bot.set_my_commands([BotCommand("start", msg("cmd_start_desc"))])
+    """Publish the command menu Telegram shows behind the Menu button.
+
+    The menu is cosmetic, so failures are logged and never fatal: PTB awaits
+    post_init outside its network retry loop, and an escaping exception here
+    would crash the whole bot at startup."""
+    try:
+        await app.bot.set_my_commands([BotCommand("start", msg("cmd_start_desc"))])
+    except Exception:
+        logger.warning("could not publish the command menu; continuing without it",
+                       exc_info=True)
 
 
 def make_app(cfg: Config):
