@@ -141,10 +141,16 @@ def _stream_attempt(cfg: Config, prompt: str, session_id: str | None,
 
     try:
         state = {"last_activity": time.monotonic(),
-                 "deadline": time.monotonic() + cfg.command_timeout_s,
+                 "deadline": time.monotonic() + cfg.stream_total_timeout_s,
                  "timed_out": False, "cancelled": False}
 
         def _guard():
+            # Two independent tripwires: the stall timeout catches a dead/hung
+            # process (no output at all for a while), while the deadline below
+            # only caps a truly runaway generation. It is deliberately generous
+            # (stream_total_timeout_s, not the blocking-path command_timeout_s)
+            # because long-form creative replies legitimately keep the CLI busy
+            # - thinking or writing - for many minutes without ever going stale.
             while proc.poll() is None:
                 if cancel is not None and cancel.is_set():
                     state["cancelled"] = True

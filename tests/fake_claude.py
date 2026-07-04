@@ -1,10 +1,13 @@
 """A stand-in for the Claude Code CLI, driven by FAKE_CLAUDE_MODE.
 
 Modes: ok | malformed | nonobject | result_error | auth_once | slow | exit1
-    | stream_ok | stream_die_mid | stream_result_error | stream_auth_once
-    | stream_stall
+    | stream_ok | stream_slow_ok | stream_die_mid | stream_result_error
+    | stream_auth_once | stream_stall
 auth_once uses FAKE_CLAUDE_STATE (a file path) to fail with a 401 fingerprint
 on the first call and succeed on the second - exercising the retry loop.
+stream_slow_ok mirrors stream_ok but sits silent (no text delta, like a long
+thinking phase) before replying - it exists to race a tiny total-timeout
+deadline against a generous one without ever tripping the stall guard.
 """
 import json
 import os
@@ -41,6 +44,14 @@ def main() -> None:
             mode = "stream_ok"
 
         if mode == "stream_ok":
+            for chunk in ("Hello ", "there, ", "friend."):
+                _delta(chunk)
+            _emit({"type": "result", "result": "Hello there, friend.",
+                   "session_id": session, "is_error": False})
+            return
+
+        if mode == "stream_slow_ok":
+            time.sleep(2.5)  # outlasts a tiny total-timeout, well under a stall
             for chunk in ("Hello ", "there, ", "friend."):
                 _delta(chunk)
             _emit({"type": "result", "result": "Hello there, friend.",

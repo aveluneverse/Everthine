@@ -59,6 +59,7 @@ class Config:
     injection_max_chars: int = 12000
     streaming_enabled: bool = True
     stream_stall_timeout_s: int = 60
+    stream_total_timeout_s: int = 1200
     session_bloat_mb: float = 1.5
     session_bloat_lines: int = 700
 
@@ -117,4 +118,5 @@ def load_config(env: Mapping | None = None) -> Config:
         injection_max_chars=_get_positive_int(env, "INJECTION_MAX_CHARS", 12000),
         streaming_enabled=_get_bool(env, "STREAMING_ENABLED", True),
         stream_stall_timeout_s=_get_positive_int(env, "STREAM_STALL_TIMEOUT_S", 60),
+        stream_total_timeout_s=_get_positive_int(env, "STREAM_TOTAL_TIMEOUT_S", 1200),
     )

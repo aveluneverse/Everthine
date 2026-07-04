@@ -98,12 +98,28 @@ class TestStreamOnce(StreamTestBase):
         os.environ["FAKE_CLAUDE_MODE"] = "stream_stall"
         start = time.monotonic()
         events = self.run_stream(self.cfg(stream_stall_timeout_s=1,
-                                          command_timeout_s=30), "hi")
+                                          stream_total_timeout_s=30), "hi")
         elapsed = time.monotonic() - start
         done = events[-1]["reply"]
         self.assertFalse(done.ok)
         self.assertEqual(done.error_kind, "timeout")
         self.assertLess(elapsed, 15)
+
+    def test_stream_deadline_uses_stream_total_timeout(self):
+        # command_timeout_s is the non-streaming (run_once) budget; a streaming
+        # reply must be governed only by stream_total_timeout_s. stream_slow_ok
+        # stays silent for 2.5s (like a long thinking phase, no text delta yet)
+        # before replying - longer than the tiny command_timeout_s below but
+        # comfortably inside stream_total_timeout_s and the default stall
+        # window. If the streaming deadline ever reads command_timeout_s again,
+        # the guard kills the process mid-thought and this goes back to timeout.
+        os.environ["FAKE_CLAUDE_MODE"] = "stream_slow_ok"
+        events = self.run_stream(self.cfg(command_timeout_s=1,
+                                          stream_total_timeout_s=60), "hi")
+        done = events[-1]["reply"]
+        self.assertTrue(done.ok)
+        self.assertEqual(done.error_kind, None)
+        self.assertEqual(done.text, "Hello there, friend.")
 
     def test_unexpected_failure_still_emits_done(self):
         # engine_home's parent is an existing FILE, so mkdir() raises before

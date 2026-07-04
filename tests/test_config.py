@@ -68,16 +68,20 @@ class TestConfig(unittest.TestCase):
         cfg = load_config(BASE)
         self.assertTrue(cfg.streaming_enabled)
         self.assertEqual(cfg.stream_stall_timeout_s, 60)
+        self.assertEqual(cfg.stream_total_timeout_s, 1200)
 
     def test_streaming_overrides(self):
         cfg = load_config({**BASE, "STREAMING_ENABLED": "false",
-                           "STREAM_STALL_TIMEOUT_S": "30"})
+                           "STREAM_STALL_TIMEOUT_S": "30",
+                           "STREAM_TOTAL_TIMEOUT_S": "45"})
         self.assertFalse(cfg.streaming_enabled)
         self.assertEqual(cfg.stream_stall_timeout_s, 30)
+        self.assertEqual(cfg.stream_total_timeout_s, 45)
 
     def test_non_positive_ints_raise(self):
         for key in ("COMMAND_TIMEOUT_S", "LOOKBACK_HOURS",
-                    "INJECTION_MAX_CHARS", "STREAM_STALL_TIMEOUT_S"):
+                    "INJECTION_MAX_CHARS", "STREAM_STALL_TIMEOUT_S",
+                    "STREAM_TOTAL_TIMEOUT_S"):
             for bad in ("0", "-5"):
                 with self.assertRaises(ConfigError, msg=f"{key}={bad}"):
                     load_config({**BASE, key: bad})
