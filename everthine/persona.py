@@ -4,21 +4,27 @@ M1 ships a minimal placeholder persona; build_system_prompt() reads a single
 file with a hardcoded fallback. Milestone M2 adds a persona-folder format on
 top of that: load_persona() detects folder vs. file mode and, for folders,
 validates a structured settings.yaml up front so a broken persona fails at
-startup instead of misbehaving silently later. build_system_prompt()'s
-signature and its current (file-only) behavior are untouched in this task;
-a later task wires load_persona()'s output into prompt assembly.
+startup instead of misbehaving silently later.
+
+This task wires the three persona layers into the live prompt path. In folder
+mode build_system_prompt() now composes Layer 1/2 (layers.compose_stable) with
+the per-turn Layer 3 block (dynamic_context.build_dynamic_context), feeding the
+latter contact signals derived from the conversation archive. A module-level
+cache (init/reset_persona_cache) loads the folder once. build_system_prompt()'s
+signature is frozen, and its FILE-mode behavior is pinned byte-for-byte -- that
+unchanged legacy path is the product's L1 rollback guarantee.
 """
 from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import yaml
 
-from . import messages
+from . import archive, messages
 from .config import Config, ConfigError
 
 logger = logging.getLogger("everthine")
@@ -33,11 +39,34 @@ DEFAULT_PERSONA = (
 
 
 def build_system_prompt(cfg: Config) -> str:
+    """Assemble the per-turn system prompt from cfg.persona_path.
+
+    Folder mode: compose the three layers (static Layer 1/2 + the dynamic
+    Layer 3 block, fed archive-derived contact signals) from the cached
+    persona. File mode: the untouched legacy path -- read the file, strip,
+    return it verbatim (or DEFAULT_PERSONA on any read/decode failure or an
+    empty file). The file-mode branch is the L1 rollback guarantee: flip
+    PERSONA_PATH back to a plain file and behavior is exactly as it was
+    before the layer system existed.
+    """
+    if cfg.persona_path.is_dir():
+        persona_obj = _cached_folder_persona(cfg)
+        now_aware = datetime.now().astimezone()
+        last_contact, first_today = contact_signals(cfg, now_aware)
+        now_naive = now_aware.astimezone().replace(tzinfo=None)
+        return assemble_folder_prompt(persona_obj, now_naive, last_contact, first_today)
+
+    # --- Legacy file mode: pinned byte-for-byte (do not "improve") ---------
+    # Per-call read, strip, non-empty -> return verbatim; otherwise fall back.
+    # UnicodeDecodeError is caught alongside OSError so undecodable bytes
+    # degrade to DEFAULT_PERSONA (matching _load_file_persona's tolerance)
+    # rather than crashing the reply -- see the task report for this one
+    # deliberate deviation from the original OSError-only guard.
     try:
         text = cfg.persona_path.read_text(encoding="utf-8").strip()
         if text:
             return text
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     return DEFAULT_PERSONA
 
@@ -308,3 +337,128 @@ def load_persona(cfg: Config) -> Persona:
     if cfg.persona_path.is_dir():
         return _load_folder_persona(cfg.persona_path)
     return _load_file_persona(cfg.persona_path)
+
+
+# --- M2 assembler wiring: cache, contact signals, prompt assembly --------
+
+# The just-archived live turn trap: the bot archives the incoming user message
+# BEFORE build_system_prompt() runs, so at prompt time that current message is
+# already in the archive with a timestamp ~milliseconds old. Left in, it would
+# make last_contact ~= now (gap ~0, reunion never fires) and first_today always
+# False. contact_signals() therefore drops entries within this many seconds of
+# `now`. The window must stay tiny: widen it to, say, 120s and it would also
+# swallow the PREVIOUS message during rapid back-and-forth chat, sending
+# last_contact hours back and misfiring a reunion line mid-conversation.
+CURRENT_TURN_EXCLUSION_S = 5
+
+# Module-level persona cache: a single slot (Persona + the path it came from).
+# init() populates it at startup; folder-mode build_system_prompt() falls back
+# to a one-time lazy load when it is still empty.
+_persona_cache: Persona | None = None
+_persona_cache_path: Path | None = None
+
+
+def init(cfg: Config) -> None:
+    """Load the folder-mode persona once into the module cache (fail-loud:
+    a broken folder raises ConfigError here). File mode clears the slot -- the
+    file path is re-read every turn and needs no cache. A later task calls this
+    at bot startup so a broken persona surfaces at boot rather than mid-chat.
+    """
+    global _persona_cache, _persona_cache_path
+    if cfg.persona_path.is_dir():
+        _persona_cache = load_persona(cfg)
+        _persona_cache_path = cfg.persona_path
+    else:
+        _persona_cache = None
+        _persona_cache_path = None
+
+
+def reset_persona_cache() -> None:
+    """Clear the module cache. Test hook (and a clean-slate reset for anyone
+    swapping personas between runs)."""
+    global _persona_cache, _persona_cache_path
+    _persona_cache = None
+    _persona_cache_path = None
+
+
+def _cached_folder_persona(cfg: Config) -> Persona:
+    """Return the cached folder Persona, loading it once if the slot is empty
+    or the configured path changed. The cache is keyed on persona_path only:
+    editing files INSIDE the same folder is not re-read -- persona edits require
+    a restart by design. The lazy load here keeps folder mode working before
+    init() is wired into startup; once it is, the slot is already warm and this
+    never hits disk.
+    """
+    global _persona_cache, _persona_cache_path
+    if _persona_cache is None or _persona_cache_path != cfg.persona_path:
+        _persona_cache = load_persona(cfg)
+        _persona_cache_path = cfg.persona_path
+    return _persona_cache
+
+
+def _to_naive_local(ts: datetime) -> datetime:
+    """Collapse a timestamp to naive LOCAL so every comparison happens in one
+    space (mixing naive and aware datetimes raises TypeError). Aware -> convert
+    to the machine's local zone, then drop tzinfo. Naive -> assume it is already
+    local and use as-is.
+    """
+    if ts.tzinfo is not None and ts.tzinfo.utcoffset(ts) is not None:
+        return ts.astimezone().replace(tzinfo=None)
+    return ts
+
+
+def contact_signals(cfg: Config, now: datetime) -> tuple[datetime | None, bool]:
+    """Derive Layer 3's (last_contact, first_today) from the conversation
+    archive. `now` is timezone-aware local (as the bot supplies); last_contact
+    comes back NAIVE local (ready for build_dynamic_context) or None.
+
+    last_contact is the MAXIMUM normalized timestamp among "user" entries (max,
+    not last-seen, so minor clock skew cannot pick a stale line). first_today is
+    True iff no entry of ANY speaker falls on `now`'s local date. Both ignore
+    the just-archived current turn via CURRENT_TURN_EXCLUSION_S (see above).
+
+    Any archive trouble degrades Layer 3 to "no prior contact, first of the day"
+    rather than breaking the reply.
+    """
+    try:
+        now_naive = _to_naive_local(now)
+        exclusion = timedelta(seconds=CURRENT_TURN_EXCLUSION_S)
+        today = now_naive.date()
+        last_contact: datetime | None = None
+        seen_today = False
+        # Whole archive, no `since` cap: one small file per local day, so
+        # correctness beats premature optimization. [future milestone] window
+        # this if daily volume ever grows enough to matter.
+        for entry in archive.iter_entries(cfg.archive_dir):
+            ts = _to_naive_local(entry["timestamp"])
+            if abs(now_naive - ts) <= exclusion:
+                continue  # the current turn, archived moments ago
+            if ts.date() == today:
+                seen_today = True
+            if entry["speaker"] == "user" and (last_contact is None or ts > last_contact):
+                last_contact = ts
+        return last_contact, not seen_today
+    except Exception:
+        logger.warning("contact_signals failed; treating as no prior contact",
+                       exc_info=True)
+        return None, True
+
+
+def assemble_folder_prompt(
+    persona: Persona,
+    now_naive: datetime,
+    last_contact: datetime | None,
+    first_today: bool,
+) -> str:
+    """Join the static Layer 1/2 composition and the dynamic Layer 3 block with
+    a single blank line. Pure and deterministic given its arguments -- directly
+    testable without a clock or filesystem.
+    """
+    # layers and dynamic_context both import from persona at module load, so a
+    # top-level import here would be circular; import them lazily at call time,
+    # once every module is fully initialized.
+    from .dynamic_context import build_dynamic_context
+    from .layers import compose_stable
+
+    return (compose_stable(persona) + "\n\n"
+            + build_dynamic_context(persona.settings, now_naive, last_contact, first_today))
