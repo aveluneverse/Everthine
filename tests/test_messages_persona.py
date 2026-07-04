@@ -14,13 +14,16 @@ class TestMessages(unittest.TestCase):
                     "cli_missing", "auth", "nonzero", "notebook_full",
                     "btn_resume", "btn_warm", "btn_clean",
                     "btn_cancel", "cancel_ack", "thinking",
-                    "start_fresh", "start_has_session", "warm_ack", "clean_ack", "resume_ack"):
+                    "start_fresh", "start_has_session", "warm_ack", "clean_ack", "resume_ack",
+                    "cmd_start_desc"):
             self.assertTrue(messages.msg(key))
 
     def test_streaming_strings_exact(self):
         self.assertEqual(messages.msg("btn_cancel"), "Stop")
         self.assertEqual(messages.msg("cancel_ack"), "Alright - never mind.")
         self.assertEqual(messages.msg("thinking"), "...")
+        self.assertEqual(messages.msg("cmd_start_desc"),
+                         "New chat - or pick up where we left off")
 
     def test_unauthorized_silence_is_intentionally_empty(self):
         self.assertEqual(messages.msg("unauthorized_silence"), "")

@@ -8,7 +8,7 @@ from pathlib import Path
 from telegram.error import RetryAfter
 from telegram.warnings import PTBDeprecationWarning
 
-from everthine import archive, bot
+from everthine import archive, bot, messages
 from everthine.config import Config
 from everthine.engine import EngineReply
 from everthine.session_store import SessionStore
@@ -174,6 +174,36 @@ class TestButtons(unittest.TestCase):
                          ["btn_resume", "btn_warm", "btn_clean"])
 
 
+class FakeCommandBot:
+    """Records set_my_commands calls; the seam register_commands drives."""
+
+    def __init__(self):
+        self.set_my_commands_calls = []
+
+    async def set_my_commands(self, commands):
+        self.set_my_commands_calls.append(commands)
+
+
+class FakeCommandApp:
+    def __init__(self):
+        self.bot = FakeCommandBot()
+
+
+class TestRegisterCommands(unittest.IsolatedAsyncioTestCase):
+    """register_commands publishes the menu Telegram shows behind the
+    Menu button (Bot API set_my_commands)."""
+
+    async def test_publishes_start_command_with_catalog_description(self):
+        app = FakeCommandApp()
+        await bot.register_commands(app)
+
+        self.assertEqual(len(app.bot.set_my_commands_calls), 1)
+        commands = app.bot.set_my_commands_calls[0]
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0].command, "start")
+        self.assertEqual(commands[0].description, messages.msg("cmd_start_desc"))
+
+
 class TestConcurrencyScope(unittest.TestCase):
     """Concurrency (and the live busy gate + cancel callback it enables)
     must exist only in streaming mode, so flag-off reproduces M1's
@@ -201,6 +231,12 @@ class TestConcurrencyScope(unittest.TestCase):
 
     def test_streaming_on_enables_concurrency(self):
         self.assertGreater(self._app(True).concurrent_updates, 1)
+
+    def test_post_init_registers_command_menu(self):
+        # Application (PTB 22.6) stores the builder's .post_init(...) callback
+        # verbatim on this public attribute - confirmed by reading
+        # telegram.ext.Application.__init__ in the installed package.
+        self.assertIs(self._app(False).post_init, bot.register_commands)
 
 
 if __name__ == "__main__":

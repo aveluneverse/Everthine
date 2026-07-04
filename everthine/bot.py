@@ -16,7 +16,7 @@ import queue
 import threading
 from datetime import datetime
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.error import BadRequest
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
@@ -147,6 +147,11 @@ def _keyboard(keys: list) -> InlineKeyboardMarkup:
                                  for k in keys])
 
 
+async def register_commands(app) -> None:
+    """Publish the command menu Telegram shows behind the Menu button."""
+    await app.bot.set_my_commands([BotCommand("start", msg("cmd_start_desc"))])
+
+
 def make_app(cfg: Config):
     store = SessionStore(cfg.session_path)
     busy = {"active": False}
@@ -251,7 +256,8 @@ def make_app(cfg: Config):
     # concurrently, so scope concurrency to streaming mode. PTB maps False to
     # one-update-at-a-time, byte-identical to M1 (which never enabled it).
     app = (ApplicationBuilder().token(cfg.bot_token)
-           .concurrent_updates(cfg.streaming_enabled).build())
+           .concurrent_updates(cfg.streaming_enabled)
+           .post_init(register_commands).build())
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

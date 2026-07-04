@@ -12,6 +12,7 @@ _MESSAGES = {
     "auth": "My connection to Claude needs a re-login. Try again in a minute.",
     "nonzero": "I lost my train of thought there. Please send that once more.",
     "notebook_full": "Our current notebook is getting heavy. Use /start to open a fresh one - I'll keep the warmth.",
+    "cmd_start_desc": "New chat - or pick up where we left off",
     "btn_resume": "Continue where we left off",
     "btn_warm": "Fresh page, keep the warmth",
     "btn_clean": "Start completely clean",
