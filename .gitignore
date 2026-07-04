@@ -12,3 +12,9 @@ data/
 # OS noise
 Thumbs.db
 .DS_Store
+
+# User personas are private; only the shipped demos are tracked.
+personas/*
+!personas/default.md
+!personas/default/
+!personas/default-zh/

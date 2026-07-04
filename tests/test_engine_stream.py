@@ -142,8 +142,7 @@ class TestStreamOnce(StreamTestBase):
         events = queue.Queue()
         worker = threading.Thread(
             target=engine.stream_once,
-            kwargs=dict(cfg=self.cfg(stream_stall_timeout_s=60,
-                                     command_timeout_s=60),
+            kwargs=dict(cfg=self.cfg(stream_stall_timeout_s=60),
                         prompt="hi", events=events, cancel=cancel),
             daemon=True)
         start = time.monotonic()
