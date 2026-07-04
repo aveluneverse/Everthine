@@ -217,9 +217,29 @@ class TestEnums(unittest.TestCase):
                 load_persona(_cfg(root))
             self.assertIn("relationship.living", str(cm.exception))
 
+    def test_living_as_list_raises_configerror(self):
+        settings = ("companion:\n  name: Alex\npartner:\n  name: Sam\n"
+                    "relationship:\n  living:\n    - together\n    - long_distance\n")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=settings)
+            with self.assertRaises(ConfigError) as cm:
+                load_persona(_cfg(root))
+            self.assertIn("relationship.living", str(cm.exception))
+
     def test_reunion_response_invalid_raises(self):
         settings = ("companion:\n  name: Alex\npartner:\n  name: Sam\n"
                     "relationship:\n  reunion_response: ecstatic\n")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=settings)
+            with self.assertRaises(ConfigError) as cm:
+                load_persona(_cfg(root))
+            self.assertIn("relationship.reunion_response", str(cm.exception))
+
+    def test_reunion_response_as_list_raises_configerror(self):
+        settings = ("companion:\n  name: Alex\npartner:\n  name: Sam\n"
+                    "relationship:\n  reunion_response:\n    - gentle\n    - expressive\n")
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _write_folder(root, settings=settings)

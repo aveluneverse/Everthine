@@ -248,13 +248,13 @@ def _load_settings(path: Path) -> PersonaSettings:
     anniversary = _parse_optional_date(relationship.get("anniversary"), "relationship.anniversary")
 
     living = relationship.get("living", "together")
-    if living not in _LIVING_VALUES:
+    if not isinstance(living, str) or living not in _LIVING_VALUES:
         raise ConfigError(
             f"settings.yaml: relationship.living must be one of "
             f"{sorted(_LIVING_VALUES)}, got: {living!r}")
 
     reunion_response = relationship.get("reunion_response", "gentle")
-    if reunion_response not in _REUNION_VALUES:
+    if not isinstance(reunion_response, str) or reunion_response not in _REUNION_VALUES:
         raise ConfigError(
             f"settings.yaml: relationship.reunion_response must be one of "
             f"{sorted(_REUNION_VALUES)}, got: {reunion_response!r}")
