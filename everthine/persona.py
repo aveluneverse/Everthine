@@ -381,6 +381,21 @@ def reset_persona_cache() -> None:
     _persona_cache_path = None
 
 
+def line_overrides(cfg: Config) -> tuple[dict, list | None]:
+    """Return this persona's message re-voicing as (lines, thinking), the
+    exact shape messages.load_overrides() takes as *args. Folder mode reads
+    from the cached/lazy-loaded Persona (settings.lines, settings.thinking);
+    file mode always returns ({}, None) -- a single-file persona has no
+    settings.yaml to carry line overrides. Folder mode may raise ConfigError
+    (the same fail-loud path init() and build_system_prompt() share); file
+    mode never raises.
+    """
+    if cfg.persona_path.is_dir():
+        settings = _cached_folder_persona(cfg).settings
+        return settings.lines, settings.thinking
+    return {}, None
+
+
 def _cached_folder_persona(cfg: Config) -> Persona:
     """Return the cached folder Persona, loading it once if the slot is empty
     or the configured path changed. The cache is keyed on persona_path only:

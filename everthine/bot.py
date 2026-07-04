@@ -22,7 +22,7 @@ from telegram.error import BadRequest
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, ContextTypes, MessageHandler, filters)
 
-from . import archive, chunking, engine, persona, recent_context
+from . import archive, chunking, engine, messages, persona, recent_context
 from .config import Config, load_config
 from .engine import EngineReply
 from .messages import msg
@@ -161,6 +161,17 @@ async def register_commands(app) -> None:
 
 
 def make_app(cfg: Config):
+    # Persona startup wiring: the common path for both main() (which calls
+    # make_app at the bottom of this file) and tests (which build an app
+    # directly, without main()). persona.init(cfg) loads+caches a folder
+    # persona fail-loud, so a broken persona folder raises ConfigError right
+    # here at app-build time -- i.e. at boot -- instead of surfacing mid-reply
+    # on the first turn. File mode: init() is a no-op (clears the cache slot)
+    # and line_overrides() returns ({}, None), so load_overrides() below
+    # leaves every message and the thinking placeholder at their defaults.
+    persona.init(cfg)
+    messages.load_overrides(*persona.line_overrides(cfg))
+
     store = SessionStore(cfg.session_path)
     busy = {"active": False}
     cancel_flag = threading.Event()
@@ -228,7 +239,7 @@ def make_app(cfg: Config):
                 return
 
             placeholder = await update.message.reply_text(
-                msg("thinking"), reply_markup=cancel_markup())
+                messages.thinking_line(), reply_markup=cancel_markup())
 
             async def send_new(text, parse_mode=None, reply_markup=None):
                 return await update.message.reply_text(

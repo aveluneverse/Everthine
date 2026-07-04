@@ -1,8 +1,16 @@
 """Single source of user-visible strings.
 
-Neutral English defaults. Users localize or re-voice their companion by
-editing this file (or, later milestones, via persona-level overrides).
+Neutral English defaults. Users localize or re-voice their companion either
+by editing this file directly, or -- with a folder-mode persona -- by
+setting `lines.<key>` (and `lines.thinking`) in settings.yaml; persona.py's
+loader validates those and messages.load_overrides() activates them at bot
+startup. Everything below _MESSAGES is that override layer: dumb storage
+plus one belt-and-braces security check (the loader is the real gate; see
+load_overrides' docstring).
 """
+import logging
+
+logger = logging.getLogger("everthine")
 
 _MESSAGES = {
     "busy": "One moment - I'm still finishing my previous thought.",
@@ -28,5 +36,85 @@ _MESSAGES = {
 }
 
 
+# --- M2 override layer: persona-voiced lines + rotating thinking placeholder
+
+# Security/ops keys a persona must never re-voice. This mirrors
+# persona._FORBIDDEN_LINE_KEYS, duplicated rather than imported: persona.py
+# already imports this module (`from . import archive, messages`), so an
+# import the other way would be circular. The loader is the primary gate
+# (ConfigError on any settings.yaml that names either key); this is a second,
+# independent gate in case a future caller ever feeds load_overrides() a
+# dict that bypassed the loader.
+_FORBIDDEN_OVERRIDE_KEYS = frozenset({"unauthorized_silence", "cli_missing"})
+
+_line_overrides: dict[str, str] = {}
+_thinking_overrides: list[str] | None = None
+_thinking_counter: int = 0
+
+
 def msg(key: str) -> str:
-    return _MESSAGES.get(key, _MESSAGES["generic_glitch"])
+    if key in _line_overrides:
+        return _line_overrides[key]
+    return _MESSAGES.get(key, _MESSAGES["generic_glitch"])  # unknown -> generic_glitch, unchanged
+
+
+def load_overrides(lines: dict, thinking: list[str] | None = None) -> None:
+    """Replace the active persona overrides (bot-startup wiring / test hook).
+
+    Always calls reset_overrides() first, so a second load *replaces* the
+    previous one rather than merging with it -- no stale key from an earlier
+    persona (or an earlier test) survives a fresh load. Stores independent
+    copies of `lines` and `thinking`, so later mutation of the caller's own
+    dict/list can never reach back into this module's state.
+
+    `unauthorized_silence` and `cli_missing` are dropped on sight (with a
+    logged warning) even though persona.py's loader already guarantees a
+    settings.yaml naming either raises ConfigError before this function ever
+    sees them -- see _FORBIDDEN_OVERRIDE_KEYS above.
+
+    `thinking` travels only as this separate list, consumed solely by
+    thinking_line()'s rotation below -- `lines` never carries a "thinking"
+    entry in practice (the loader splits it out before building
+    PersonaSettings.lines), so msg("thinking") is untouched by this
+    mechanism and keeps returning the built-in "..." unless the rotation
+    path is active.
+    """
+    reset_overrides()
+    global _line_overrides, _thinking_overrides
+    clean = dict(lines)
+    for key in _FORBIDDEN_OVERRIDE_KEYS:
+        if key in clean:
+            logger.warning(
+                "messages.load_overrides: dropping forbidden override key %r "
+                "(security/ops line, a persona must never re-voice it)", key)
+            del clean[key]
+    _line_overrides = clean
+    _thinking_overrides = list(thinking) if thinking else None
+
+
+def reset_overrides() -> None:
+    """Clear the active overrides and rewind the thinking rotation back to
+    its first item. Test hook; also called internally at the top of
+    load_overrides so repeated loads replace rather than merge."""
+    global _line_overrides, _thinking_overrides, _thinking_counter
+    _line_overrides = {}
+    _thinking_overrides = None
+    _thinking_counter = 0
+
+
+def thinking_line() -> str:
+    """The "deep in thought" placeholder shown while a reply streams in.
+
+    No persona thinking-list loaded -> msg("thinking") (the built-in "...").
+    List loaded -> the next line in a deterministic cycle through it (item 0,
+    then 1, ..., wrapping back to 0), so consecutive replies show different
+    phrasing instead of repeating the same line. The counter is process-
+    global and rewinds only on reset_overrides()/load_overrides(), matching
+    persona.py's own module-cache pattern.
+    """
+    global _thinking_counter
+    if not _thinking_overrides:
+        return msg("thinking")
+    line = _thinking_overrides[_thinking_counter % len(_thinking_overrides)]
+    _thinking_counter += 1
+    return line
