@@ -38,7 +38,7 @@ DEFAULT_PERSONA = (
 )
 
 
-def build_system_prompt(cfg: Config) -> str:
+def build_system_prompt(cfg: Config, memory_block: str | None = None) -> str:
     """Assemble the per-turn system prompt from cfg.persona_path.
 
     Folder mode: compose the three layers (static Layer 1/2 + the dynamic
@@ -47,14 +47,19 @@ def build_system_prompt(cfg: Config) -> str:
     return it verbatim (or DEFAULT_PERSONA on any read/decode failure or an
     empty file). The file-mode branch is the L1 rollback guarantee: flip
     PERSONA_PATH back to a plain file and behavior is exactly as it was
-    before the layer system existed.
+    before the layer system existed. `memory_block` (optional, default
+    None) is the M3 recall seam: folder mode threads it straight through to
+    assemble_folder_prompt; file mode is the L1 rollback target (the
+    pre-memory behavior) and carries no recall block by design, so it
+    ignores the argument entirely.
     """
     if cfg.persona_path.is_dir():
         persona_obj = _cached_folder_persona(cfg)
         now_aware = datetime.now().astimezone()
         last_contact, first_today = contact_signals(cfg, now_aware)
         now_naive = now_aware.astimezone().replace(tzinfo=None)
-        return assemble_folder_prompt(persona_obj, now_naive, last_contact, first_today)
+        return assemble_folder_prompt(
+            persona_obj, now_naive, last_contact, first_today, memory_block)
 
     # --- Legacy file mode: pinned byte-for-byte (do not "improve") ---------
     # Per-call read, strip, non-empty -> return verbatim; otherwise fall back.
@@ -411,6 +416,20 @@ def _cached_folder_persona(cfg: Config) -> Persona:
     return _persona_cache
 
 
+def current_settings(cfg: Config) -> PersonaSettings | None:
+    """The active persona's settings, or None in file mode.
+
+    Folder mode returns the cached (or lazily loaded) Persona's settings --
+    the same fail-loud path init() and build_system_prompt() share. File
+    mode returns None: a single-file persona has no settings.yaml. The
+    memory-recall module uses this to voice speaker names without ever
+    touching this module's cache internals.
+    """
+    if cfg.persona_path.is_dir():
+        return _cached_folder_persona(cfg).settings
+    return None
+
+
 def _to_naive_local(ts: datetime) -> datetime:
     """Collapse a timestamp to naive LOCAL so every comparison happens in one
     space (mixing naive and aware datetimes raises TypeError). Aware -> convert
@@ -460,14 +479,17 @@ def contact_signals(cfg: Config, now: datetime) -> tuple[datetime | None, bool]:
 
 
 def assemble_folder_prompt(
-    persona: Persona,
+    persona_obj: Persona,
     now_naive: datetime,
     last_contact: datetime | None,
     first_today: bool,
+    memory_block: str | None = None,
 ) -> str:
     """Join the static Layer 1/2 composition and the dynamic Layer 3 block with
     a single blank line. Pure and deterministic given its arguments -- directly
-    testable without a clock or filesystem.
+    testable without a clock or filesystem. `memory_block` (optional, default
+    None) threads straight through to build_dynamic_context(); see that
+    function's docstring for where it lands and its None/empty no-op contract.
     """
     # layers and dynamic_context both import from persona at module load, so a
     # top-level import here would be circular; import them lazily at call time,
@@ -475,5 +497,6 @@ def assemble_folder_prompt(
     from .dynamic_context import build_dynamic_context
     from .layers import compose_stable
 
-    return (compose_stable(persona) + "\n\n"
-            + build_dynamic_context(persona.settings, now_naive, last_contact, first_today))
+    return (compose_stable(persona_obj) + "\n\n"
+            + build_dynamic_context(
+                persona_obj.settings, now_naive, last_contact, first_today, memory_block))

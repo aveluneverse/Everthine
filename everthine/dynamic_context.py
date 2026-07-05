@@ -12,8 +12,12 @@ Everything here is a pure function of its arguments: no filesystem, no
 datetime.now() inside -- the caller passes `now`. A later task derives
 `last_contact`/`first_today` from the conversation archive and wires
 build_dynamic_context()'s output into persona.build_system_prompt(); that
-wiring is out of scope here. This module is layers.py's sibling, not its
-caller: same constants-then-functions layout, same docstring conventions.
+wiring is out of scope here. The optional `memory_block` parameter is this
+module's other seam: a caller-supplied section slotted in verbatim between
+the milestones section and the final check, with no effect at all when it
+is None or empty -- retrieving and formatting that block is a later task's
+job, not this one's. This module is layers.py's sibling, not its caller:
+same constants-then-functions layout, same docstring conventions.
 """
 from __future__ import annotations
 
@@ -238,6 +242,7 @@ def build_dynamic_context(
     now: datetime,
     last_contact: datetime | None,
     first_today: bool,
+    memory_block: str | None = None,
 ) -> str:
     """Compose Layer 3: the full "what's true right now" block.
 
@@ -253,7 +258,9 @@ def build_dynamic_context(
     3. First-message-today greeting line (first_today is True).
     4. Milestones (any of settings.anniversary/partner_birthday/
        companion_birthday triggers today or previews within a week).
-    5. Final-check reminder (always, always last).
+    5. Retrieved-memory block (memory_block is truthy) -- an optional,
+       caller-supplied section; this module does not produce or format it.
+    6. Final-check reminder (always, always last).
 
     The hour is rounded down to the top of the hour for the baseline only
     -- section 1's displayed clock and daypart line are byte-stable for the
@@ -275,8 +282,11 @@ def build_dynamic_context(
     if milestones is not None:
         sections.append(milestones)
 
-    # [M3 seam] retrieved-memory block threads in HERE - after milestones,
-    # BEFORE the final check. The final check must stay the last words the
-    # engine reads; never append retrieval after it.
+    # Retrieved-memory block (long-term memory) slots in here - after
+    # milestones, BEFORE the final check. The final check must stay the
+    # last words the engine reads; never append anything after it.
+    if memory_block:
+        sections.append(memory_block)
+
     sections.append(FINAL_CHECK_TEMPLATE)
     return "\n\n".join(sections)

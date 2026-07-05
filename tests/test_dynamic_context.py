@@ -527,5 +527,42 @@ class TestWordingPins(unittest.TestCase):
         self.assertEqual(WEEKEND_SUFFIX, " — a weekend")
 
 
+class TestMemoryBlockSeam(unittest.TestCase):
+    """M3 seam: the optional memory_block parameter. Placement (after
+    milestones, before the final check), the "no argument at all" vs.
+    explicit None/"" silence pin, and the exact double-newline join --
+    the recall module (a later task) relies on all three.
+    """
+
+    def test_memory_block_after_milestones_before_final_check(self):
+        settings = _settings(anniversary=date(2021, 7, 5))  # on-day yearly trigger
+        now = datetime(2026, 7, 5, 14, 0)
+        memory_block = "# Things you remember\n\n- x"
+        result = build_dynamic_context(settings, now, None, False, memory_block=memory_block)
+        i_milestones = result.index(MILESTONES_HEADER)
+        i_memory = result.index(memory_block)
+        i_final_check = result.index(FINAL_CHECK_TEMPLATE)
+        self.assertLess(i_milestones, i_memory)
+        self.assertLess(i_memory, i_final_check)
+        self.assertTrue(result.endswith(FINAL_CHECK_TEMPLATE))
+
+    def test_memory_block_none_or_empty_is_byte_identical_to_omitted(self):
+        settings = _settings(anniversary=date(2021, 7, 5))
+        now = datetime(2026, 7, 5, 14, 0)
+        baseline = build_dynamic_context(settings, now, None, False)
+        self.assertEqual(
+            build_dynamic_context(settings, now, None, False, memory_block=None), baseline)
+        self.assertEqual(
+            build_dynamic_context(settings, now, None, False, memory_block=""), baseline)
+
+    def test_memory_block_joined_by_double_newline(self):
+        settings = _settings(anniversary=date(2021, 7, 5))
+        now = datetime(2026, 7, 5, 14, 0)
+        memory_block = "# Things you remember\n\n- x"
+        result = build_dynamic_context(settings, now, None, False, memory_block=memory_block)
+        self.assertIn("\n\n" + memory_block + "\n\n" + FINAL_CHECK_TEMPLATE, result)
+        self.assertNotIn("\n\n\n", result)
+
+
 if __name__ == "__main__":
     unittest.main()

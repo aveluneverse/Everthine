@@ -421,5 +421,69 @@ class TestPersonaCache(_CacheResetTest):
             self.assertNotIn("You are Alex.", result)
 
 
+# --- 10. M3 seam: memory_block threading + current_settings --------------
+
+class TestMemoryBlockWiring(_CacheResetTest):
+    """Folder mode: build_system_prompt threads memory_block straight through
+    to assemble_folder_prompt (positioned before the final check, per
+    dynamic_context's own ordering pin), and omitting it stays byte-identical
+    to passing memory_block=None explicitly -- the same seam-silence contract
+    dynamic_context pins directly, now proven at the outer wiring layer.
+    """
+
+    def _setup(self, td) -> Config:
+        folder = _write_folder(Path(td) / "persona", companion="Alex", partner="Sam")
+        return Config(bot_token="x", authorized_user_id=1,
+                      persona_path=folder, data_dir=Path(td) / "state")
+
+    def test_folder_mode_memory_block_before_final_check(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._setup(td)
+            result = persona.build_system_prompt(cfg, memory_block="MEMBLOCK-SENTINEL")
+            self.assertIn("MEMBLOCK-SENTINEL", result)
+            self.assertLess(result.index("MEMBLOCK-SENTINEL"), result.index(FINAL_CHECK_TEMPLATE))
+
+    def test_folder_mode_memory_block_none_byte_identical_to_no_arg(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._setup(td)
+            a = persona.build_system_prompt(cfg, memory_block=None)
+            b = persona.build_system_prompt(cfg)
+            self.assertEqual(a, b)
+
+    def test_current_settings_folder_mode_returns_settings(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._setup(td)
+            settings = persona.current_settings(cfg)
+            self.assertIsNotNone(settings)
+            self.assertEqual(settings.companion_name, "Alex")
+
+
+class TestFileModeMemoryBlockIgnored(_CacheResetTest):
+    """File mode is the L1 rollback target: memory_block must be a no-op,
+    byte-identical to the no-arg call, same as every other legacy pin in
+    section 1 above.
+    """
+
+    def _cfg(self, persona_path: Path) -> Config:
+        return Config(bot_token="x", authorized_user_id=1, persona_path=persona_path)
+
+    def test_file_mode_memory_block_ignored_and_byte_identical(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "p.md"
+            p.write_text("You are Testbot.", encoding="utf-8")
+            cfg = self._cfg(p)
+            with_block = persona.build_system_prompt(cfg, memory_block="MEMBLOCK-SENTINEL")
+            without_block = persona.build_system_prompt(cfg)
+            self.assertNotIn("MEMBLOCK-SENTINEL", with_block)
+            self.assertEqual(with_block, without_block)
+
+    def test_current_settings_file_mode_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "p.md"
+            p.write_text("You are Testbot.", encoding="utf-8")
+            cfg = self._cfg(p)
+            self.assertIsNone(persona.current_settings(cfg))
+
+
 if __name__ == "__main__":
     unittest.main()

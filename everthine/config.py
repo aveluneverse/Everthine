@@ -62,6 +62,9 @@ class Config:
     stream_total_timeout_s: int = 1200
     session_bloat_mb: float = 1.5
     session_bloat_lines: int = 700
+    memory_enabled: bool = True
+    memory_top_k: int = 3
+    memory_embedding_model: str = "BAAI/bge-small-zh-v1.5"
 
     @property
     def engine_home(self) -> Path:
@@ -74,6 +77,10 @@ class Config:
     @property
     def session_path(self) -> Path:
         return self.data_dir / "session.json"
+
+    @property
+    def memory_db_path(self) -> Path:
+        return self.data_dir / "memory.db"
 
 
 def load_config(env: Mapping | None = None) -> Config:
@@ -119,4 +126,7 @@ def load_config(env: Mapping | None = None) -> Config:
         streaming_enabled=_get_bool(env, "STREAMING_ENABLED", True),
         stream_stall_timeout_s=_get_positive_int(env, "STREAM_STALL_TIMEOUT_S", 60),
         stream_total_timeout_s=_get_positive_int(env, "STREAM_TOTAL_TIMEOUT_S", 1200),
+        memory_enabled=_get_bool(env, "MEMORY_ENABLED", True),
+        memory_top_k=_get_positive_int(env, "MEMORY_TOP_K", 3),
+        memory_embedding_model=str(env.get("MEMORY_EMBEDDING_MODEL", "")).strip() or "BAAI/bge-small-zh-v1.5",
     )

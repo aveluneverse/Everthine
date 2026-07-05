@@ -86,6 +86,25 @@ class TestConfig(unittest.TestCase):
                 with self.assertRaises(ConfigError, msg=f"{key}={bad}"):
                     load_config({**BASE, key: bad})
 
+    def test_memory_defaults(self):
+        cfg = load_config(BASE)
+        self.assertTrue(cfg.memory_enabled)
+        self.assertEqual(cfg.memory_top_k, 3)
+        self.assertEqual(cfg.memory_embedding_model, "BAAI/bge-small-zh-v1.5")
+
+    def test_memory_top_k_non_positive_raises(self):
+        for bad in ("0", "-2"):
+            with self.assertRaises(ConfigError, msg=f"MEMORY_TOP_K={bad}"):
+                load_config({**BASE, "MEMORY_TOP_K": bad})
+
+    def test_memory_enabled_garbage_raises(self):
+        with self.assertRaises(ConfigError):
+            load_config({**BASE, "MEMORY_ENABLED": "maybe"})
+
+    def test_memory_db_path_derived(self):
+        cfg = load_config({**BASE, "DATA_DIR": "companion-data"})
+        self.assertEqual(cfg.memory_db_path, Path("companion-data") / "memory.db")
+
 
 if __name__ == "__main__":
     unittest.main()
