@@ -8,7 +8,7 @@ from pathlib import Path
 from telegram.error import NetworkError, RetryAfter
 from telegram.warnings import PTBDeprecationWarning
 
-from everthine import archive, bot, messages
+from everthine import archive, bot, memory_recall, messages
 from everthine.config import Config
 from everthine.engine import EngineReply
 from everthine.session_store import SessionStore
@@ -233,6 +233,10 @@ class TestConcurrencyScope(unittest.TestCase):
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
         self.addCleanup(self._td.cleanup)
+        # make_app opens the memory store (M3 T5); close it before the tmp
+        # dir deletes -- registered after the tmp cleanup, so LIFO runs it
+        # first, releasing the sqlite handle Windows would otherwise hold.
+        self.addCleanup(memory_recall.reset)
         self._root = Path(self._td.name)
 
     def _app(self, streaming):

@@ -22,7 +22,7 @@ from telegram.error import BadRequest
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, ContextTypes, MessageHandler, filters)
 
-from . import archive, chunking, engine, messages, persona, recent_context
+from . import archive, chunking, engine, memory_recall, messages, persona, recent_context
 from .config import Config, load_config
 from .engine import EngineReply
 from .messages import msg
@@ -39,7 +39,8 @@ def decide_start_buttons(has_session: bool) -> list:
 
 
 def prepare_exchange(cfg: Config, store: SessionStore, text: str, now) -> tuple:
-    """Archive the user's turn and assemble the engine prompt."""
+    """Archive the user's turn, assemble the engine prompt, and recall
+    long-term memories relevant to it."""
     if cfg.archive_enabled:
         archive.write_entry(cfg.archive_dir, "user", text, ts=now)
     data = store.load()
@@ -49,22 +50,38 @@ def prepare_exchange(cfg: Config, store: SessionStore, text: str, now) -> tuple:
     except Exception:
         logger.warning("warmth injection failed; continuing without it",
                        exc_info=True)
-    return recent_context.prepend(block, text), data
+    # Defense in depth: recall_block is already fail-soft by contract, but
+    # current_settings() can raise ConfigError on a broken persona folder --
+    # that already fails loudly at boot via persona.init, so mid-turn this
+    # degrades quietly instead of breaking the reply.
+    memory_block = None
+    try:
+        settings = persona.current_settings(cfg)
+        memory_block = memory_recall.recall_block(cfg, text, now, settings)
+    except Exception:
+        logger.warning("memory recall failed; continuing without it",
+                       exc_info=True)
+    return recent_context.prepend(block, text), data, memory_block
 
 
 def produce_reply(cfg: Config, store: SessionStore, text: str,
                   now: datetime | None = None, engine_mod=engine) -> list:
     now = now or datetime.now().astimezone()
-    prompt, data = prepare_exchange(cfg, store, text, now)
+    prompt, data, memory_block = prepare_exchange(cfg, store, text, now)
 
-    reply = engine_mod.run_once(cfg, prompt, session_id=data.get("session_id"),
-                                system_prompt=persona.build_system_prompt(cfg))
+    reply = engine_mod.run_once(
+        cfg, prompt, session_id=data.get("session_id"),
+        system_prompt=persona.build_system_prompt(cfg, memory_block=memory_block))
     if not reply.ok:
         return [msg(reply.error_kind or "generic_glitch")]
 
     store.stamp_session_started(reply.session_id, now)
     if cfg.archive_enabled and reply.text:
         archive.write_entry(cfg.archive_dir, "companion", reply.text, ts=now)
+    # After-reply: the turn just archived becomes memory once its
+    # conversation closes. Fail-soft by contract; never runs on the error
+    # path above (an early return already skipped it).
+    memory_recall.sync(cfg, now)
 
     out = chunking.split_message(reply.text)
     if store.detect_bloat(cfg, reply.session_id):
@@ -80,13 +97,21 @@ async def stream_reply(cfg: Config, store: SessionStore, text: str,
     thread and forward text deltas to the display. Returns the final
     EngineReply, or None when the user cancelled."""
     now = now or datetime.now().astimezone()
-    prompt, data = prepare_exchange(cfg, store, text, now)
+    # Off-loop: prepare_exchange touches disk (archive writes + memory
+    # recall), so it must never run synchronously on the event loop.
+    prompt, data, memory_block = await asyncio.to_thread(
+        prepare_exchange, cfg, store, text, now)
+    # Off-loop too: this retires the standing event-loop debt -- as the
+    # archive grows, building the system prompt synchronously here would
+    # block every other update.
+    system_prompt = await asyncio.to_thread(
+        persona.build_system_prompt, cfg, memory_block)
 
     events: queue.Queue = queue.Queue()
     worker = threading.Thread(
         target=engine_mod.stream_once,
         kwargs=dict(cfg=cfg, prompt=prompt, session_id=data.get("session_id"),
-                    system_prompt=persona.build_system_prompt(cfg),
+                    system_prompt=system_prompt,
                     events=events, cancel=cancel_flag),
         daemon=True)
     worker.start()
@@ -134,6 +159,8 @@ async def stream_reply(cfg: Config, store: SessionStore, text: str,
         if cfg.archive_enabled and display.full_text:
             archive.write_entry(cfg.archive_dir, "companion",
                                 display.full_text, ts=now)
+        # After-reply sync, off-loop (mirrors produce_reply; see its comment).
+        await asyncio.to_thread(memory_recall.sync, cfg, now)
     return reply
 
 
@@ -171,6 +198,11 @@ def make_app(cfg: Config):
     # leaves every message and the thinking placeholder at their defaults.
     persona.init(cfg)
     messages.load_overrides(*persona.line_overrides(cfg))
+
+    # Boot-time backfill: makes a pre-existing archive recallable before the
+    # first turn (a fresh install, with no cursor yet, ingests everything).
+    memory_recall.init(cfg)
+    memory_recall.sync(cfg, datetime.now().astimezone())
 
     store = SessionStore(cfg.session_path)
     busy = {"active": False}

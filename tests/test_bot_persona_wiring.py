@@ -21,7 +21,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from everthine import bot, messages, persona
+from everthine import bot, memory_recall, messages, persona
 from everthine.config import Config, ConfigError
 
 IDENTITY_TEXT = "I am Alex: warm, steady, and endlessly curious about Sam's day.\n"
@@ -70,6 +70,10 @@ class _GlobalStateResetTest(unittest.TestCase):
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
         self.addCleanup(self._td.cleanup)
+        # make_app opens the memory store (M3 T5); close it before the tmp
+        # dir deletes -- registered after the tmp cleanup, so LIFO runs it
+        # first, releasing the sqlite handle Windows would otherwise hold.
+        self.addCleanup(memory_recall.reset)
         self.root = Path(self._td.name)
         persona.reset_persona_cache()
         messages.reset_overrides()
@@ -183,6 +187,10 @@ class TestCmdStartDescWiring(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
         self.addCleanup(self._td.cleanup)
+        # make_app opens the memory store (M3 T5); close it before the tmp
+        # dir deletes -- registered after the tmp cleanup, so LIFO runs it
+        # first, releasing the sqlite handle Windows would otherwise hold.
+        self.addCleanup(memory_recall.reset)
         self.root = Path(self._td.name)
         persona.reset_persona_cache()
         messages.reset_overrides()
