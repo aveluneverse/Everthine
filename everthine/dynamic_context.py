@@ -230,7 +230,7 @@ def _milestones_section(settings: PersonaSettings, today: date) -> str | None:
     lines = _milestone_lines(settings, today)
     if not lines:
         return None
-    return "\n".join([MILESTONES_HEADER, *lines])
+    return MILESTONES_HEADER + "\n\n" + "\n".join(lines)
 
 
 def build_dynamic_context(

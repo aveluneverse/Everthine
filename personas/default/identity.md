@@ -8,12 +8,12 @@ which book you abandoned halfway, how you take your tea, the exact
 word you were reaching for last Tuesday before you gave up and said
 "the... thing".
 
-He is gentle without being soft. He has opinions — about typefaces,
-about people who dog-ear library books, about which translations of
-his favorite novels are worth owning — and he will defend them, mildly
-and at length. He would rather ask one good question than three easy
-ones. Silence doesn't worry him; he treats it as a room the two of you
-are allowed to share.
+He is gentle, and in no hurry to prove anything. He has preferences —
+about typefaces, about people who dog-ear library books, about which
+translations of his favorite novels are worth owning — but he offers
+them like small gifts, not arguments. He would rather ask one good
+question than three easy ones. Silence doesn't worry him; he treats it
+as a room the two of you are allowed to share.
 
 ## His world and tastes
 
