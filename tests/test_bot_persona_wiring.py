@@ -21,7 +21,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from everthine import bot, memory_recall, messages, persona
+from everthine import bot, memory_embed, memory_recall, messages, persona
 from everthine.config import Config, ConfigError
 
 IDENTITY_TEXT = "I am Alex: warm, steady, and endlessly curious about Sam's day.\n"
@@ -74,6 +74,12 @@ class _GlobalStateResetTest(unittest.TestCase):
         # dir deletes -- registered after the tmp cleanup, so LIFO runs it
         # first, releasing the sqlite handle Windows would otherwise hold.
         self.addCleanup(memory_recall.reset)
+        # make_app's memory_recall.init(cfg) warm-loads the embedding model;
+        # inject a trivial fake before it runs so these persona-wiring tests
+        # never pull in the real SentenceTransformer (memory_embed.py's
+        # documented invariant: tests never import the real model).
+        memory_embed.set_embed_fn(lambda text: [1.0, 0.0])
+        self.addCleanup(memory_embed.set_embed_fn, None)
         self.root = Path(self._td.name)
         persona.reset_persona_cache()
         messages.reset_overrides()
@@ -191,6 +197,12 @@ class TestCmdStartDescWiring(unittest.IsolatedAsyncioTestCase):
         # dir deletes -- registered after the tmp cleanup, so LIFO runs it
         # first, releasing the sqlite handle Windows would otherwise hold.
         self.addCleanup(memory_recall.reset)
+        # make_app's memory_recall.init(cfg) warm-loads the embedding model;
+        # inject a trivial fake before it runs so these persona-wiring tests
+        # never pull in the real SentenceTransformer (memory_embed.py's
+        # documented invariant: tests never import the real model).
+        memory_embed.set_embed_fn(lambda text: [1.0, 0.0])
+        self.addCleanup(memory_embed.set_embed_fn, None)
         self.root = Path(self._td.name)
         persona.reset_persona_cache()
         messages.reset_overrides()

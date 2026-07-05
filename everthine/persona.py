@@ -11,8 +11,10 @@ mode build_system_prompt() now composes Layer 1/2 (layers.compose_stable) with
 the per-turn Layer 3 block (dynamic_context.build_dynamic_context), feeding the
 latter contact signals derived from the conversation archive. A module-level
 cache (init/reset_persona_cache) loads the folder once. build_system_prompt()'s
-signature is frozen, and its FILE-mode behavior is pinned byte-for-byte -- that
-unchanged legacy path is the product's L1 rollback guarantee.
+signature is frozen for existing callers (M3 extends it with one optional
+memory slot -- see that milestone's task), and its FILE-mode behavior is
+pinned byte-for-byte -- that unchanged legacy path is the product's L1
+rollback guarantee.
 """
 from __future__ import annotations
 

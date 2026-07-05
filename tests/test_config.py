@@ -4,6 +4,7 @@ from pathlib import Path
 from everthine.config import Config, ConfigError, load_config
 
 BASE = {"BOT_TOKEN": "123456789:" + "A" * 35, "AUTHORIZED_USER_ID": "42"}
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class TestConfig(unittest.TestCase):
@@ -104,6 +105,15 @@ class TestConfig(unittest.TestCase):
     def test_memory_db_path_derived(self):
         cfg = load_config({**BASE, "DATA_DIR": "companion-data"})
         self.assertEqual(cfg.memory_db_path, Path("companion-data") / "memory.db")
+
+    def test_env_example_documents_memory_vars(self):
+        # Guards the .env.example 1:1 catalog going forward: every env var
+        # load_config reads must be documented there. Substring match only --
+        # robust to whatever comment formatting surrounds each line.
+        text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        for var in ("MEMORY_ENABLED", "MEMORY_TOP_K", "MEMORY_EMBEDDING_MODEL"):
+            with self.subTest(var=var):
+                self.assertIn(var, text)
 
 
 if __name__ == "__main__":

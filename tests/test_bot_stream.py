@@ -8,7 +8,7 @@ from pathlib import Path
 from telegram.error import NetworkError, RetryAfter
 from telegram.warnings import PTBDeprecationWarning
 
-from everthine import archive, bot, memory_recall, messages
+from everthine import archive, bot, memory_embed, memory_recall, messages
 from everthine.config import Config
 from everthine.engine import EngineReply
 from everthine.session_store import SessionStore
@@ -237,6 +237,12 @@ class TestConcurrencyScope(unittest.TestCase):
         # dir deletes -- registered after the tmp cleanup, so LIFO runs it
         # first, releasing the sqlite handle Windows would otherwise hold.
         self.addCleanup(memory_recall.reset)
+        # make_app's memory_recall.init(cfg) warm-loads the embedding model;
+        # inject a trivial fake before it runs so these concurrency-scope
+        # tests never pull in the real SentenceTransformer (memory_embed.py's
+        # documented invariant: tests never import the real model).
+        memory_embed.set_embed_fn(lambda text: [1.0, 0.0])
+        self.addCleanup(memory_embed.set_embed_fn, None)
         self._root = Path(self._td.name)
 
     def _app(self, streaming):
