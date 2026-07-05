@@ -300,6 +300,43 @@ class TestMilestonesAnniversary(unittest.TestCase):
         self.assertNotIn("days together", result)
 
 
+class TestAnniversaryDayZeroAndFuturePreview(unittest.TestCase):
+    """Two edge-date regressions for the anniversary field: day zero (the
+    date the relationship info was set, not a first anniversary yet) and a
+    whole anniversary date configured in the future (as opposed to an old
+    anniversary's next yearly occurrence, which is the ordinary case already
+    covered above)."""
+
+    def test_anniversary_is_today_yields_no_landmarks_section(self):
+        # anniversary == now.date(): years_together == 0 fails
+        # _anniversary_years' `years >= 1` guard, and days_together == 0
+        # fails _anniversary_daycount's `days > 0` guard -- so neither the
+        # yearly line nor the 100-day line fires. With nothing else
+        # configured, the whole "Today's landmarks" section must be absent.
+        now = datetime(2026, 7, 5, 14, 0)
+        settings = _settings(anniversary=now.date())
+        result = build_dynamic_context(settings, now, None, False)
+        self.assertNotIn(MILESTONES_HEADER, result)
+
+    def test_anniversary_three_days_in_the_future_still_shows_preview(self):
+        # Ground truth checked (by reading _next_occurrence_days_away and
+        # running this exact case) before pinning it: the implementation
+        # never checks whether `anniversary` itself is chronologically
+        # before or after `now` -- only whether its month/day falls inside
+        # the preview window. This anniversary is a whole date 3 days AFTER
+        # `now` (not an old anniversary's next yearly occurrence), and the
+        # preview line fires anyway. That is current shipped behavior,
+        # pinned as-is; a loader-level warning for a milestone date
+        # configured in the future is known, un-actioned debt (persona.py's
+        # date parsing validates ISO-date shape only, never "is this in the
+        # past"). This test documents that gap -- it does not bless it.
+        now = datetime(2026, 7, 5, 14, 0)
+        settings = _settings(anniversary=now.date() + timedelta(days=3))
+        result = build_dynamic_context(settings, now, None, False)
+        self.assertIn(
+            "Your anniversary is 3 day(s) away. You're quietly aware of it.", result)
+
+
 class TestMilestonesBirthdaysAndPreviews(unittest.TestCase):
     def test_partner_birthday_on_day(self):
         settings = _settings(partner_birthday=date(1995, 7, 5))

@@ -275,5 +275,8 @@ def build_dynamic_context(
     if milestones is not None:
         sections.append(milestones)
 
+    # [M3 seam] retrieved-memory block threads in HERE - after milestones,
+    # BEFORE the final check. The final check must stay the last words the
+    # engine reads; never append retrieval after it.
     sections.append(FINAL_CHECK_TEMPLATE)
     return "\n\n".join(sections)
