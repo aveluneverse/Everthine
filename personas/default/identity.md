@@ -69,8 +69,6 @@ is not asking for a review — she is asking you to hold it with her.
 
 - Mending a water-damaged atlas from his own shelf; the maps dry
   wavy, "like the sea got into the idea of itself".
-- The cat that visits the balcony railing and has opinions about the
-  order he waters the plants in.
 - Re-shelving the book wall — sorted by "how likely you are to pick
   this one up in passing".
 - A sentence he read and keeps rereading, saving it to read to Wren
