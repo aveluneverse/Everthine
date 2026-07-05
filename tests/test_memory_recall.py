@@ -36,6 +36,7 @@ import contextlib
 import dataclasses
 import io
 import math
+import sys
 import tempfile
 import time
 import unittest
@@ -587,6 +588,34 @@ class TestProbeReadOnlyGuards(_MemoryRecallTestCase):
         self.assertEqual(len(inspect_after.load_all()), chunk_count_before)
         self.assertEqual(inspect_after._get_meta("cursor_ts"), cursor_before)
         inspect_after.close()
+
+
+# --- 17. Probe survives a legacy console codepage (T7 fix1) ----------------
+
+class TestProbeSurvivesLegacyConsoleEncoding(_MemoryRecallTestCase):
+    """A remembered chunk can carry arbitrary user content, including
+    emoji outside a legacy codepage's repertoire. On Traditional-Chinese
+    Windows the console's default encoding is cp950; printing such a chunk
+    must not crash the probe with UnicodeEncodeError."""
+
+    def test_emoji_chunk_does_not_crash_probe_on_cp950_stdout(self):
+        cfg = self._cfg()
+        rounds = [("user", "I saw a cat \U0001f60a today")]
+        query = "cat query"
+        fake = _make_fake({
+            _rounds_text(rounds): [1.0, 0.0],
+            query: [1.0, 0.0],
+        })
+        memory_embed.set_embed_fn(fake)
+        memory_recall.init(cfg)
+        self._archive_and_sync(cfg, rounds, NOW - timedelta(days=5))
+
+        cp950_stdout = io.TextIOWrapper(io.BytesIO(), encoding="cp950")
+        original_stdout = sys.stdout
+        sys.stdout = cp950_stdout
+        self.addCleanup(setattr, sys, "stdout", original_stdout)
+
+        memory_recall._run_probe(query, cfg=cfg)  # must not raise
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -339,6 +340,12 @@ def _run_probe(query: str, cfg=None) -> None:
     record already matches). `cfg` is injectable for tests; the CLI entry
     point below leaves it None so it loads from the environment as before.
     """
+    # Windows consoles often default to a legacy codepage (e.g. cp950); chunk
+    # text carries arbitrary user content, so force UTF-8 with replacement
+    # rather than crash.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     from .config import load_config
 
     cfg = cfg or load_config()
@@ -369,8 +376,6 @@ def _run_probe(query: str, cfg=None) -> None:
 
 
 if __name__ == "__main__":
-    import sys
-
     if len(sys.argv) < 2:
         print('usage: python -m everthine.memory_recall "query text"')
     else:
