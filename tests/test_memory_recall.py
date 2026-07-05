@@ -32,7 +32,9 @@ correctness (not just tidiness):
    multi-conversation test therefore seeds in chronological order (oldest
    sync call first), never the reverse.
 """
+import contextlib
 import dataclasses
+import io
 import math
 import tempfile
 import time
@@ -43,6 +45,7 @@ from unittest import mock
 
 from everthine import archive, memory_embed, memory_recall
 from everthine.config import Config
+from everthine.memory_store import MemoryStore
 from everthine.persona import PersonaSettings
 
 # Aware local, fixed date, mid-afternoon -- subtracting days/hours below never
@@ -535,6 +538,55 @@ class TestMinChunkCharsFloor(_MemoryRecallTestCase):
 
         result = memory_recall.recall_block(cfg, query, NOW, self.settings)
         self.assertIsNone(result)
+
+
+# --- 16. Probe read-only guards (F1) ----------------------------------------
+
+class TestProbeReadOnlyGuards(_MemoryRecallTestCase):
+    """_run_probe must be read-only in fact: a missing store is never
+    created, and a store whose recorded model no longer matches cfg is
+    never handed to init() (which would call ensure_model() and wipe it)."""
+
+    def test_missing_db_prints_no_store_message_and_creates_no_file(self):
+        cfg = self._cfg()
+        self.assertFalse(cfg.memory_db_path.exists())
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            memory_recall._run_probe("does anything match", cfg=cfg)
+
+        self.assertIn("no memory store yet", buf.getvalue())
+        self.assertFalse(cfg.memory_db_path.exists())
+
+    def test_mismatched_stored_model_leaves_store_untouched(self):
+        cfg_a = self._cfg(memory_embedding_model="model-a")
+        rounds = [("user", "a chunk stored under the old embedding model")]
+        fake = _make_fake({_rounds_text(rounds): [1.0, 0.0]})
+        memory_embed.set_embed_fn(fake)
+        memory_recall.init(cfg_a)
+        self._archive_and_sync(cfg_a, rounds, NOW - timedelta(days=5))
+        memory_recall.reset()  # close the store, the way a bot restart would
+
+        inspect_before = MemoryStore(cfg_a.memory_db_path)
+        chunk_count_before = len(inspect_before.load_all())
+        cursor_before = inspect_before._get_meta("cursor_ts")
+        inspect_before.close()
+        self.assertEqual(chunk_count_before, 1)
+        self.assertIsNotNone(cursor_before)
+
+        # Same db, but cfg now points at a different embedding model --
+        # the .env-changed-since-last-boot scenario the probe must catch.
+        cfg_b = self._cfg(memory_embedding_model="model-b")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            memory_recall._run_probe("a chunk", cfg=cfg_b)
+
+        self.assertIn("model in .env differs from the store", buf.getvalue())
+
+        inspect_after = MemoryStore(cfg_a.memory_db_path)
+        self.assertEqual(len(inspect_after.load_all()), chunk_count_before)
+        self.assertEqual(inspect_after._get_meta("cursor_ts"), cursor_before)
+        inspect_after.close()
 
 
 if __name__ == "__main__":

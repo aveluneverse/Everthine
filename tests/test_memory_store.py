@@ -368,6 +368,13 @@ class TestMemoryStore(unittest.TestCase):
         self.assertEqual(len(inserted), 1)
         self.assertEqual(len(store.load_all()), 1)
 
+        # Pin: the meta row now reads back as model-b/dim=5 -- ensure_model
+        # called again is a no-op (True), never a repeat rebuild. Guards a
+        # regression where the meta update during rebuild silently failed
+        # to stick, which would rebuild (and re-embed) from scratch on
+        # every single boot instead of just the one that changed the model.
+        self.assertTrue(store.ensure_model("model-b", 5))
+
     def test_load_all_excludes_non_positive_weight(self):
         # 8. A manually zeroed weight disappears from load_all.
         t0 = datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc)

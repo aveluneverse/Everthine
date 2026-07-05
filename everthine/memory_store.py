@@ -210,6 +210,17 @@ class MemoryStore:
             self._conn.commit()
             return False
 
+    def stored_model(self) -> str | None:
+        """Read-only: the embedding model name currently on record, or None
+        if this store has never recorded one (a brand-new file). Never
+        writes, and never touches the chunks table -- the counterpart to
+        ensure_model's write path, for a caller that wants to know whether
+        a rebuild WOULD happen without actually risking one (the __main__
+        probe uses this to detect a stale .env model before ever handing
+        the store to init/ensure_model)."""
+        with self._lock:
+            return self._get_meta("embedding_model")
+
     def sync_from_archive(
         self, archive_dir, now: datetime, embed, model_name: str
     ) -> list[tuple[Chunk, list[float]]]:

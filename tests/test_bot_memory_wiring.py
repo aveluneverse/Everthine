@@ -464,6 +464,18 @@ class TestMakeAppBootWiring(unittest.TestCase):
         self.assertIsNotNone(app)
         self.assertTrue(memory_recall._disabled)
 
+    def test_flag_off_boot_creates_no_db_and_disables_module(self):
+        cfg = Config(bot_token="x", authorized_user_id=1,
+                     data_dir=self.root / "data",
+                     memory_enabled=False, memory_embedding_model="fake-model")
+        memory_embed.set_embed_fn(_make_fake({}))
+
+        app = bot.make_app(cfg)
+
+        self.assertIsNotNone(app)
+        self.assertFalse(cfg.memory_db_path.exists())
+        self.assertTrue(memory_recall._disabled)
+
 
 if __name__ == "__main__":
     unittest.main()

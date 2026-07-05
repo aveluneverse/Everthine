@@ -322,10 +322,38 @@ def recall_block(cfg, text: str, now: datetime, settings: PersonaSettings | None
 
 # --- Read-only debugging probe ---------------------------------------------
 
-def _run_probe(query: str) -> None:
+def _run_probe(query: str, cfg=None) -> None:
+    """Score `query` against whatever the store already holds, print the
+    raw ranking, and touch nothing -- two guards make "read-only" true in
+    fact, not just in name. First, a missing store file is never created:
+    the existence check below runs before any MemoryStore is ever opened,
+    where the plain act of opening one (even to read) would otherwise
+    create it. Second, a store whose recorded embedding model no longer
+    matches cfg (the .env value changed since the store was built) is left
+    untouched rather than handed to init() -- init() calls ensure_model(),
+    which treats a model change as "rebuild the index", deleting every
+    chunk and resetting the cursor out from under a live bot. Only once
+    both guards pass does this fall through to the same init(cfg) +
+    _candidates() flow the scoring body itself uses, at which point
+    ensure_model() is guaranteed to land on its no-op branch (the name on
+    record already matches). `cfg` is injectable for tests; the CLI entry
+    point below leaves it None so it loads from the environment as before.
+    """
     from .config import load_config
 
-    cfg = load_config()
+    cfg = cfg or load_config()
+
+    if not cfg.memory_db_path.exists():
+        print("no memory store yet; nothing to probe.")
+        return
+
+    probe_store = MemoryStore(cfg.memory_db_path)
+    stored_model = probe_store.stored_model()
+    probe_store.close()
+    if stored_model is not None and stored_model != cfg.memory_embedding_model:
+        print("model in .env differs from the store; restart the bot to rebuild before probing.")
+        return
+
     init(cfg)
     if _store is None:
         print("memory is disabled or unavailable; nothing to probe.")
