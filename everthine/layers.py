@@ -154,8 +154,10 @@ BOUNDARIES_TEMPLATE = """## Their boundaries, in their own words
 {boundaries_text}"""
 
 
-def compose_stable(persona: Persona) -> str:
-    """Compose Layer 1 + Layer 2 (+ boundaries) for a folder-mode persona.
+def compose_stable(persona: Persona, stage_block: str | None = None) -> str:
+    """Compose Layer 1 + Layer 2 (+ boundaries) for a folder-mode persona,
+    with an optional relationship-stage block prepended ahead of everything
+    else.
 
     Folder mode only: the caller guarantees this is never invoked for a
     file-mode (legacy single-file) persona, which has no `settings` to
@@ -164,27 +166,48 @@ def compose_stable(persona: Persona) -> str:
     this task). Raises ValueError if handed one anyway, rather than failing
     later with a confusing AttributeError on `persona.settings`.
 
-    Deterministic: the same Persona always yields the same string. Blocks
-    are joined with a single blank line between them; voice_text and the
-    boundaries block are omitted entirely (no stray blank block) when
-    empty, since persona.py already normalizes their absence to "".
+    `stage_block` (optional, default None) is the M4 seam this function
+    honors: when truthy, it becomes its own block before the declaration --
+    the stage frame is the first thing the composed prompt says, ahead of
+    "Who you are". None or "" adds nothing, byte-identical to the pre-M4
+    composition. Building the block (reading stage state, calling
+    stages.stage_block()) is the caller's job -- this function does no I/O
+    and does not import the stages module.
+
+    `persona.settings.living` must be "together" or "long_distance";
+    anything else raises ValueError naming the offending value. The loader
+    already rejects other values at settings.yaml parse time -- this is
+    defense in depth for a hand-built Persona that bypassed it.
+
+    Deterministic: the same persona and stage_block always yield the same
+    string. Blocks are joined with a single blank line between them;
+    voice_text and the boundaries block are omitted entirely (no stray blank
+    block) when empty, since persona.py already normalizes their absence to
+    "".
     """
     if persona.mode != "folder":
         raise ValueError(
             f"compose_stable() requires a folder-mode Persona, got mode={persona.mode!r}")
 
-    # [M4 seam] relationship-tier block will be prepended here.
     declaration = DECLARATION_TEMPLATE.format(
         companion_name=persona.settings.companion_name,
         partner_name=persona.settings.partner_name,
     )
-    blocks = [declaration, persona.identity_text]
+    blocks = []
+    if stage_block:
+        blocks.append(stage_block)
+    blocks.append(declaration)
+    blocks.append(persona.identity_text)
     if persona.voice_text:
         blocks.append(persona.voice_text)
     # [M6 seam] evolved self-portrait feedback joins Layer 1 here.
 
-    living_line = (LIVING_LINE_TOGETHER if persona.settings.living == "together"
-                   else LIVING_LINE_LONG_DISTANCE)
+    if persona.settings.living == "together":
+        living_line = LIVING_LINE_TOGETHER
+    elif persona.settings.living == "long_distance":
+        living_line = LIVING_LINE_LONG_DISTANCE
+    else:
+        raise ValueError(f"unknown living value: {persona.settings.living!r}")
     blocks.append(DNA_RULES.format(living_line=living_line))
 
     if persona.boundaries_text:

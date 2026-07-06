@@ -54,14 +54,35 @@ def build_system_prompt(cfg: Config, memory_block: str | None = None) -> str:
     assemble_folder_prompt; file mode is the L1 rollback target (the
     pre-memory behavior) and carries no recall block by design, so it
     ignores the argument entirely.
+
+    Folder mode also builds the M4 stage block here, when cfg.stages_enabled
+    and the persona actually defines stages (a persona with no stages.md
+    has nothing to render). Reading stage state and rendering it is
+    wrapped in its own try/except, fail-soft by the same contract as the
+    memory recall this mirrors (see bot.prepare_exchange): a broken or
+    corrupt stage system must never take the reply down with it, so any
+    exception degrades to no stage block at all, logged as a warning.
     """
     if cfg.persona_path.is_dir():
         persona_obj = _cached_folder_persona(cfg)
         now_aware = datetime.now().astimezone()
         last_contact, first_today = contact_signals(cfg, now_aware)
         now_naive = now_aware.astimezone().replace(tzinfo=None)
+        stage_blk = None
+        if cfg.stages_enabled and persona_obj.stages:
+            from . import stages as stages_mod  # lazy: avoids import cycles
+            try:
+                names = tuple(n for n, _ in persona_obj.stages)
+                texts = tuple(t for _, t in persona_obj.stages)
+                state = stages_mod.load_state(cfg.stage_path)
+                stage_blk = stages_mod.stage_block(
+                    names, texts, state, persona_obj.settings.partner_name)
+            except Exception:
+                logger.warning("stage block failed; continuing without it",
+                               exc_info=True)
         return assemble_folder_prompt(
-            persona_obj, now_naive, last_contact, first_today, memory_block)
+            persona_obj, now_naive, last_contact, first_today, memory_block,
+            stage_block=stage_blk)
 
     # --- Legacy file mode: pinned byte-for-byte (do not "improve") ---------
     # Per-call read, strip, non-empty -> return verbatim; otherwise fall back.
@@ -571,12 +592,19 @@ def assemble_folder_prompt(
     last_contact: datetime | None,
     first_today: bool,
     memory_block: str | None = None,
+    stage_block: str | None = None,
 ) -> str:
     """Join the static Layer 1/2 composition and the dynamic Layer 3 block with
     a single blank line. Pure and deterministic given its arguments -- directly
     testable without a clock or filesystem. `memory_block` (optional, default
     None) threads straight through to build_dynamic_context(); see that
     function's docstring for where it lands and its None/empty no-op contract.
+    `stage_block` (optional, default None) threads straight through to
+    compose_stable(), which prepends it ahead of the declaration when truthy
+    and is a no-op (byte-identical to the pre-M4 composition) when it is None
+    or empty. Building the block -- reading stage state off disk, calling
+    stages.stage_block() -- is build_system_prompt()'s job; this function
+    stays pure and does no I/O of its own.
     """
     # layers and dynamic_context both import from persona at module load, so a
     # top-level import here would be circular; import them lazily at call time,
@@ -584,6 +612,6 @@ def assemble_folder_prompt(
     from .dynamic_context import build_dynamic_context
     from .layers import compose_stable
 
-    return (compose_stable(persona_obj) + "\n\n"
+    return (compose_stable(persona_obj, stage_block=stage_block) + "\n\n"
             + build_dynamic_context(
                 persona_obj.settings, now_naive, last_contact, first_today, memory_block))

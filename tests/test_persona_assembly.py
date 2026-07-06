@@ -136,6 +136,26 @@ class TestFileModeRejected(unittest.TestCase):
             compose_stable(persona)
 
 
+class TestStageBlockSeam(unittest.TestCase):
+    def test_none_stage_block_is_byte_identical_to_m3(self):
+        # L1 twin pin: no stage block -> exactly the pre-M4 composition.
+        persona = _persona()
+        self.assertEqual(compose_stable(persona, stage_block=None),
+                         compose_stable(persona))
+
+    def test_stage_block_prepends_before_declaration(self):
+        persona = _persona()
+        out = compose_stable(persona, stage_block="# Where the two of you are\nX")
+        self.assertTrue(out.startswith("# Where the two of you are\nX\n\n# Who you are"))
+
+    def test_unknown_living_value_raises(self):
+        # Defense in depth (register M2-T2): loader already rejects it, but a
+        # hand-built Persona must fail loud, not silently long-distance.
+        persona = _persona(living="weekend_only")
+        with self.assertRaises(ValueError):
+            compose_stable(persona)
+
+
 # Reference copy for TestGoldenCopyPins below: extracted programmatically from
 # the current everthine.layers constants (via gen_golden_pins.py, run once at
 # authoring time) -- never hand-retyped, so this file cannot introduce its own
