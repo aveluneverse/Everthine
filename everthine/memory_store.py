@@ -11,13 +11,15 @@ no I/O, no embedding calls.
 vectors in a local SQLite file and knows how to catch itself up: reading
 the archive from wherever it left off (a cursor timestamp kept in the
 `meta` table), chunking the new material, embedding only the chunks that
-have already closed, and inserting them idempotently. The still-open
-trailing chunk is never stored and the cursor never advances past it, so
-a conversation always arrives as one whole remembered scene once it
-finishes - never as a half-written fragment. The conversation archive
-remains the single source of truth: nothing the store does to its own
-copy can lose anything, because a rebuild (see `ensure_model`) can always
-replay the archive from the start.
+have already closed, and inserting them idempotently in the same
+transaction as the cursor advance - a crash between the two can never
+leave one committed without the other (see `sync_from_archive`). The
+still-open trailing chunk is never stored and the cursor never advances
+past it, so a conversation always arrives as one whole remembered scene
+once it finishes - never as a half-written fragment. The conversation
+archive remains the single source of truth: nothing the store does to
+its own copy can lose anything, because a rebuild (see `ensure_model`)
+can always replay the archive from the start.
 
 Retrieval note: a `weight <= 0` row is excluded by `load_all` - this is
 how future memory sources that must stay out of recall (the bot's own
@@ -233,6 +235,14 @@ class MemoryStore:
         and never at all if nothing closed this run ("progress only on
         output"). Returns the `(chunk, vector)` pairs actually inserted;
         duplicates skipped by `INSERT OR IGNORE` are excluded.
+
+        The chunk inserts and the cursor advance share ONE commit. A crash
+        or exception between them (e.g. mid-`_advance_cursor`) leaves both
+        uncommitted, so a reopen sees neither: the next sync simply rescans
+        this range from the old cursor instead of silently skipping it.
+        `INSERT OR IGNORE` makes that rescan idempotent, so the only cost
+        of the crash window is a repeated embed of the same range, never a
+        gap in memory.
         """
         with self._lock:
             cursor_raw = self._get_meta("cursor_ts")
@@ -262,22 +272,33 @@ class MemoryStore:
                     )
                     if cur.rowcount > 0:
                         inserted.append((chunk, vector))
-                self._conn.commit()
 
-            if inserted:
-                self._advance_cursor(filtered, chunks)
+                if inserted:
+                    self._advance_cursor(filtered, chunks)
+
+                # One commit for both writes above (chunk inserts + cursor
+                # advance): see the atomicity note in this method's
+                # docstring. If anything raises before this line -- inside
+                # the insert loop, inside embed(), or inside
+                # _advance_cursor() -- nothing here has been committed yet,
+                # so the whole run is discarded together, not half of it.
+                self._conn.commit()
 
             return inserted
 
     def _advance_cursor(self, filtered: list[dict], chunks: list[Chunk]) -> None:
         """Progress-only cursor bookkeeping: never move past a still-open
         trailing chunk, and never guess forward if its start entry cannot
-        be located (defensive branch - leaves the cursor unchanged)."""
+        be located (defensive branch - leaves the cursor unchanged).
+
+        Does not commit: the caller (sync_from_archive) commits once, for
+        this write together with the chunk inserts that precede it, so the
+        two can never become durable independently of each other.
+        """
         trailing_open = bool(chunks) and not chunks[-1].closed
         if not trailing_open:
             new_cursor = filtered[-1]["timestamp"].isoformat()
             self._set_meta("cursor_ts", new_cursor)
-            self._conn.commit()
             return
 
         open_chunk = chunks[-1]
@@ -295,7 +316,6 @@ class MemoryStore:
             return
         new_cursor = filtered[idx - 1]["timestamp"].isoformat()
         self._set_meta("cursor_ts", new_cursor)
-        self._conn.commit()
 
     def load_all(self) -> list[tuple[str, str, str, list[float]]]:
         with self._lock:

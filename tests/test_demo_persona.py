@@ -146,5 +146,22 @@ class TestGitignoreBehavior(unittest.TestCase):
         self.assertFalse(self._is_ignored("personas/default-zh/settings.yaml"))
 
 
+# --- 6. M4 stage catalog: both demos walk the same three-stage arc ---------
+
+class TestDemoStages(unittest.TestCase):
+    def test_both_demo_personas_have_three_stages(self):
+        for folder in (EN_DIR, ZH_DIR):
+            p = _load(folder)
+            self.assertIsNotNone(p.stages)
+            self.assertEqual(len(p.stages), 3)
+
+    def test_demo_stage_names_match_catalog(self):
+        en = _load(EN_DIR).stages
+        self.assertEqual(tuple(n for n, _ in en),
+                         ("Settling in", "In rhythm", "Deep water"))
+        zh = _load(ZH_DIR).stages
+        self.assertEqual(tuple(n for n, _ in zh), ("安頓", "合拍", "深水區"))
+
+
 if __name__ == "__main__":
     unittest.main()

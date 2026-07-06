@@ -452,6 +452,44 @@ class TestMemoryStore(unittest.TestCase):
         self.assertEqual(set(texts), {"user: first chat", "user: second chat"})
         self.assertEqual(model_name, "model-xyz")
 
+    def test_insert_and_cursor_commit_atomically(self):
+        # 12. Crash window regression: force an exception between the chunk
+        # insert and the cursor update via a monkeypatched _advance_cursor,
+        # simulating a process death mid-sync. Closing the connection
+        # without an explicit commit discards any uncommitted transaction
+        # (verified separately: sqlite3 rolls back a pending transaction
+        # when its connection closes) -- the real-world equivalent of the
+        # process dying between the two writes. Reopening the same db file
+        # must show NEITHER the chunk NOR the cursor advance: a single
+        # transaction around both, not two independent commits.
+        t0 = datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc)
+        _seed_conversation(self.archive_dir, t0, [("user", "first chat"), ("companion", "hi")])
+        now = t0 + timedelta(hours=1)
+
+        store = self._new_store()
+
+        def _boom(filtered, chunks):
+            raise RuntimeError("simulated crash between chunk insert and cursor update")
+
+        store._advance_cursor = _boom  # instance-level monkeypatch, no class leakage
+
+        with self.assertRaises(RuntimeError):
+            store.sync_from_archive(self.archive_dir, now, _fake_embed, "model-a")
+
+        # Simulate the crash actually landing: drop the connection with its
+        # transaction still open, rather than closing it cleanly.
+        store._conn.close()
+
+        reopened = self._new_store()
+        self.assertEqual(reopened.load_all(), [])  # the chunk insert never became durable
+
+        # The cursor was never advanced either, so the next sync rescans the
+        # whole range from scratch -- a whole chunk again, never skipped.
+        inserted = reopened.sync_from_archive(self.archive_dir, now, _fake_embed, "model-a")
+        self.assertEqual(len(inserted), 1)
+        self.assertEqual(inserted[0][0].text, "user: first chat\ncompanion: hi")
+        self.assertEqual(len(reopened.load_all()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
