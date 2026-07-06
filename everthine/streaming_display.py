@@ -143,7 +143,11 @@ class StreamingDisplay:
         # length after merging it in -- gating on the post-append length
         # would let a single oversized first chunk look like it is already
         # past the window, skip the tag check entirely, and leak the raw
-        # "[react:...]" text straight onto the user's screen.
+        # "[react:...]" text straight onto the user's screen. (In this
+        # implementation the window is effectively enforced on _react_head
+        # accumulation below -- full_text stays empty while undecided, so
+        # this guard is the structural statement of the lesson, kept for
+        # the day the buffering strategy changes.)
         if prev_len >= REACT_CHECK_LIMIT:
             self._react_decided = True
             await self._ingest(chunk)
@@ -151,6 +155,16 @@ class StreamingDisplay:
 
         self._react_head += chunk
         match = REACT_TAG.match(self._react_head)
+        if (match and match.end() == len(self._react_head)
+                and len(self._react_head) < REACT_CHECK_LIMIT):
+            # The match swallowed the whole head. Because the closing "]"
+            # and trailing whitespace are optional in REACT_TAG, a bare
+            # "[react:🔥" already matches -- committing here would truncate
+            # an emoji still arriving (e.g. a split-off variation selector)
+            # and leak the "]" from the next chunk as visible text. Hold
+            # until a terminator lands with text after it, or the window
+            # closes, or the stream ends (the flush strips a full match).
+            return
         if match:
             self._reaction_emoji = match.group(1)
             remainder = self._react_head[match.end():]
@@ -200,13 +214,23 @@ class StreamingDisplay:
         await self._maybe_edit()
 
     async def _flush_pending_react_head(self) -> None:
-        """finalize()/cancel() must not silently drop a still-buffered head:
-        whatever is undecided when the stream ends can never complete a
-        tag, so it flushes through unstripped, exactly like a ruled-out
-        head."""
-        if not self._react_decided and self._react_head:
-            self._react_decided = True
-            head, self._react_head = self._react_head, ""
+        """finalize()/cancel() must not silently drop a still-buffered head.
+        A head that still matches REACT_TAG when the stream ends is a
+        tag-only reply (e.g. "[react:❤️]" with nothing after it, held by
+        append() because its terminator might still have been in flight):
+        strip and capture it exactly as append() would have, instead of
+        flushing the raw tag through as visible text. Anything else can
+        never complete a tag any more, so it flushes unstripped, exactly
+        like a ruled-out head."""
+        if self._react_decided or not self._react_head:
+            return
+        self._react_decided = True
+        head, self._react_head = self._react_head, ""
+        match = REACT_TAG.match(head)
+        if match:
+            self._reaction_emoji = match.group(1)
+            head = head[match.end():]
+        if head:
             await self._ingest(head)
 
     async def _maybe_edit(self) -> None:

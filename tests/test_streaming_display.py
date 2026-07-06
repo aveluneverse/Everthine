@@ -64,6 +64,22 @@ class TestReactTag(unittest.TestCase):
         self.assertEqual(d.reaction_emoji, "\U0001f525")
         self.assertEqual(d.full_text, "warm words")
 
+    def test_tag_boundary_split_after_emoji(self):
+        # "[react:🔥" already satisfies REACT_TAG ("]" and trailing space
+        # are optional), but the terminator is still in flight: committing
+        # on that full-head match would leak "] warm" as visible text.
+        d = asyncio.run(self._display_after("[react:", "\U0001f525", "] warm"))
+        self.assertEqual(d.reaction_emoji, "\U0001f525")
+        self.assertEqual(d.full_text, "warm")
+
+    def test_tag_vs16_emoji_split(self):
+        # U+2764 heart ends one chunk, U+FE0F variation selector opens the
+        # next: the captured emoji must keep both codepoints and the "]"
+        # must not leak into the visible text.
+        d = asyncio.run(self._display_after("[react:❤", "️] hi"))
+        self.assertEqual(d.reaction_emoji, "❤️")
+        self.assertEqual(d.full_text, "hi")
+
     def test_oversized_first_chunk_still_caught(self):
         # 7/4 lesson: the window test must use the length BEFORE the chunk
         # arrived, or a first chunk larger than the window slips through.
@@ -93,6 +109,19 @@ class TestReactTag(unittest.TestCase):
         d = asyncio.run(run())
         self.assertIsNone(d.reaction_emoji)
         self.assertEqual(d.full_text, "[rea")
+
+    def test_tag_only_reply_still_strips_on_finalize(self):
+        # Whole reply is just the tag: finalize must strip and capture,
+        # not flush the raw tag through as visible text.
+        async def run():
+            d, _, _ = make_display()
+            await d.append("[react:❤️]")
+            await d.finalize()
+            return d
+
+        d = asyncio.run(run())
+        self.assertEqual(d.reaction_emoji, "❤️")
+        self.assertEqual(d.full_text, "")
 
     def test_cancel_flushes_undecided_head(self):
         async def run():
