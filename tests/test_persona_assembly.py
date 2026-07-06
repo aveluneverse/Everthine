@@ -1,8 +1,11 @@
 """Tests for the M2 static composition layer: Layer 1 (identity declaration)
 + Layer 2 (the seven ground rules) + the boundaries embed. Conventions follow
 tests/test_persona_loader.py. Personas are built directly via the dataclasses
-(no filesystem needed); build_system_prompt() and its wiring into
-compose_stable() are out of scope here (a later task does the wiring).
+(no filesystem needed), with one deliberate exception: the M4 stage-wiring
+integration tests (TestStageWiringThroughBuildSystemPrompt) drive
+build_system_prompt() against real temp persona folders, because the
+guard -> lazy stages import -> load_state -> stage_block -> assemble render
+path is covered nowhere else.
 
 Two collision traps worth flagging for future readers of this file: (1)
 DNA_RULES rule 3 itself contains the sentence "Their boundaries file may
@@ -15,8 +18,11 @@ headings -- so heading counts are pinned with "^## \\d+. " (numbered
 headings only) rather than a bare "^## ".
 """
 import re
+import tempfile
 import unittest
+from pathlib import Path
 
+from everthine.config import Config
 from everthine.layers import (
     BOUNDARIES_TEMPLATE,
     DECLARATION_TEMPLATE,
@@ -25,7 +31,12 @@ from everthine.layers import (
     LIVING_LINE_TOGETHER,
     compose_stable,
 )
-from everthine.persona import Persona, PersonaSettings
+from everthine.persona import (
+    Persona,
+    PersonaSettings,
+    build_system_prompt,
+    reset_persona_cache,
+)
 
 IDENTITY_TEXT = ("Ledger-keeper by day, storyteller by night, always half a "
                   "page ahead in the book on the nightstand.")
@@ -154,6 +165,104 @@ class TestStageBlockSeam(unittest.TestCase):
         persona = _persona(living="weekend_only")
         with self.assertRaises(ValueError):
             compose_stable(persona)
+
+
+_STAGES_MD = """\
+## Settling in
+Early days: you are still learning each other's rhythms, and you let
+them set every pace.
+
+## In rhythm
+You move around each other easily now.
+"""
+
+
+class TestStageWiringThroughBuildSystemPrompt(unittest.TestCase):
+    """Integration coverage for build_system_prompt()'s M4 stage wiring --
+    the guard -> lazy stages import -> load_state -> stage_block -> assemble
+    render path, which no other test (and no later M4 task) exercises.
+    Real temp persona folders and the real clock, like the folder-mode
+    integration tests in tests/test_persona_assembly_wiring.py; every
+    assertion is structural (headings, names, containment), except the
+    deliberate full-output equality in the flag-off test, which follows
+    that file's existing byte-identity convention (TestMemoryBlockWiring):
+    the stable prefix never depends on the clock, and the dynamic suffix is
+    identical when two back-to-back calls land inside the same rendered
+    hour. Config is built directly, the way the wiring file's tests do.
+    """
+
+    def setUp(self):
+        # The persona cache is process-global and keyed on persona_path;
+        # tmp dirs differ per test, but clear it anyway so no test here can
+        # ever serve (or leak) another test's folder.
+        reset_persona_cache()
+        self.addCleanup(reset_persona_cache)
+
+    def _write_folder(self, root: Path, *, with_stages: bool) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "identity.md").write_text(
+            "I am Alex: warm, steady, always half a page ahead in the book.",
+            encoding="utf-8")
+        (root / "settings.yaml").write_text(
+            "companion:\n  name: Alex\npartner:\n  name: Sam\n",
+            encoding="utf-8")
+        if with_stages:
+            (root / "stages.md").write_text(_STAGES_MD, encoding="utf-8")
+        return root
+
+    def _cfg(self, folder: Path, data_dir: Path, **overrides) -> Config:
+        return Config(bot_token="x", authorized_user_id=1,
+                      persona_path=folder, data_dir=data_dir, **overrides)
+
+    def test_stage_frame_tops_prompt_first_stage_when_no_state_file(self):
+        # Happy path: stages.md present, flag on, no stage.json yet -> the
+        # frame opens the whole prompt, resolved to the FIRST stage.
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona", with_stages=True)
+            cfg = self._cfg(folder, Path(td) / "state", stages_enabled=True)
+            out = build_system_prompt(cfg)
+            self.assertTrue(out.startswith("# Where the two of you are"))
+            self.assertIn("Settling in", out)
+            self.assertIn("still learning each other's rhythms", out)
+            self.assertIn("# Who you are", out)
+            self.assertLess(out.index("# Where the two of you are"),
+                            out.index("# Who you are"))
+
+    def test_corrupt_state_degrades_to_first_stage_and_leaves_corpse(self):
+        # A garbage stage.json must never break the reply: load_state
+        # quarantines it as a .corrupt-<ts> corpse (loudly) and degrades to
+        # a fresh state, so the frame still renders -- at the first stage.
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona", with_stages=True)
+            data_dir = Path(td) / "state"
+            cfg = self._cfg(folder, data_dir, stages_enabled=True)
+            cfg.stage_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg.stage_path.write_text("{not valid json", encoding="utf-8")
+            with self.assertLogs("everthine", level="WARNING"):
+                out = build_system_prompt(cfg)
+            self.assertIn("# Where the two of you are", out)
+            self.assertIn("Settling in", out)  # fresh state -> first stage
+            self.assertEqual(
+                len(list(data_dir.glob("stage.json.corrupt-*"))), 1)
+
+    def test_flag_off_matches_no_stages_md_and_has_no_frame(self):
+        # STAGES_ENABLED=false with a stages.md, and stages enabled with NO
+        # stages.md, must both be the plain no-stage composition -- equal to
+        # each other, no frame anywhere, declaration first. This is the L1
+        # rollback pin at the outer (build_system_prompt) layer.
+        with tempfile.TemporaryDirectory() as td:
+            folder_stages = self._write_folder(Path(td) / "a", with_stages=True)
+            folder_plain = self._write_folder(Path(td) / "b", with_stages=False)
+            data_dir = Path(td) / "state"
+            out_off = build_system_prompt(
+                self._cfg(folder_stages, data_dir, stages_enabled=False))
+            reset_persona_cache()  # path change reloads anyway; be explicit
+            out_plain = build_system_prompt(
+                self._cfg(folder_plain, data_dir, stages_enabled=True))
+            self.assertNotIn("# Where the two of you are", out_off)
+            self.assertNotIn("# Where the two of you are", out_plain)
+            self.assertTrue(out_off.startswith("# Who you are"))
+            self.assertEqual(out_off, out_plain)
 
 
 # Reference copy for TestGoldenCopyPins below: extracted programmatically from
