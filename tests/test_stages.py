@@ -34,6 +34,24 @@ class TestLoadState(unittest.TestCase):
             self.assertEqual(stages.load_state(p),
                              {"current": None, "history": []})
 
+    def test_malformed_history_entry_is_corrupt(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "stage.json"
+            p.write_text('{"current": null, "history": ["not-a-dict"]}',
+                         encoding="utf-8")
+            state = stages.load_state(p)
+            self.assertEqual(state, {"current": None, "history": []})
+            self.assertEqual(len(list(Path(td).glob("stage.json.corrupt-*"))), 1)
+
+    def test_history_entry_missing_keys_is_corrupt(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "stage.json"
+            p.write_text('{"current": null, "history": [{"note": "x"}]}',
+                         encoding="utf-8")
+            state = stages.load_state(p)
+            self.assertEqual(state, {"current": None, "history": []})
+            self.assertEqual(len(list(Path(td).glob("stage.json.corrupt-*"))), 1)
+
 
 class TestResolveIndex(unittest.TestCase):
     def test_none_current_is_first_stage(self):

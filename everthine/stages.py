@@ -71,6 +71,10 @@ def _fresh_state() -> dict:
 
 
 def _is_well_shaped(data) -> bool:
+    """The single place corruption is decided. Every history element is
+    validated down to its keys here, so everything downstream -- most of
+    all stage_block(), whose output lands in a live system prompt -- can
+    render history entries without defensive checks of its own."""
     if not isinstance(data, dict):
         return False
     if "current" not in data or "history" not in data:
@@ -78,7 +82,16 @@ def _is_well_shaped(data) -> bool:
     current = data["current"]
     if current is not None and not isinstance(current, str):
         return False
-    return isinstance(data["history"], list)
+    history = data["history"]
+    if not isinstance(history, list):
+        return False
+    for entry in history:
+        if not isinstance(entry, dict):
+            return False
+        for key in ("stage", "date", "note"):
+            if not isinstance(entry.get(key), str):
+                return False
+    return True
 
 
 def _quarantine_corpse(path: Path, reason: Exception) -> None:
