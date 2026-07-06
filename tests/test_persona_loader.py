@@ -432,6 +432,11 @@ class TestStagesFile(unittest.TestCase):
         with self.assertRaises(ConfigError):
             load_persona(p)
 
+    def test_empty_section_name_fails_loud(self):
+        p = self._folder_with_stages("##   \n\ntext\n")
+        with self.assertRaises(ConfigError):
+            load_persona(p)
+
     def test_empty_stages_file_is_none(self):
         # An empty/whitespace-only optional file counts as absent (same
         # tolerance as voice/boundaries), not as a broken one.
