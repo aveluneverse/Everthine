@@ -381,6 +381,64 @@ class TestVoiceAndBoundaries(unittest.TestCase):
             self.assertIn("voice.md", str(cm.exception))
 
 
+class TestStagesFile(unittest.TestCase):
+    """M4 T3: the optional stages.md file. Conventions follow
+    tests/test_bot_persona_wiring.py's setUp (a TemporaryDirectory kept
+    alive for the whole test method via addCleanup) since, unlike the
+    with-block fixtures above, the returned Config must still be valid
+    after the helper method itself returns.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        self.root = Path(self._td.name)
+
+    def _folder_without_stages(self) -> Config:
+        _write_folder(self.root)
+        return _cfg(self.root)
+
+    def _folder_with_stages(self, text: str) -> Config:
+        _write_folder(self.root)
+        (self.root / "stages.md").write_text(text, encoding="utf-8")
+        return _cfg(self.root)
+
+    def test_absent_file_is_none(self):
+        persona = load_persona(self._folder_without_stages())
+        self.assertIsNone(persona.stages)
+
+    def test_sections_parse_in_order_verbatim(self):
+        p = self._folder_with_stages(
+            "# My stages\n\n## Settling in\n\ncalm text\nsecond line\n\n"
+            "## Deep water\n\ndeep text\n")
+        persona = load_persona(p)
+        self.assertEqual(persona.stages, (
+            ("Settling in", "calm text\nsecond line"),
+            ("Deep water", "deep text")))
+
+    def test_empty_section_body_fails_loud(self):
+        p = self._folder_with_stages("## Settling in\n\n## Deep water\n\ntext\n")
+        with self.assertRaises(ConfigError) as ctx:
+            load_persona(p)
+        self.assertIn("Settling in", str(ctx.exception))
+
+    def test_duplicate_names_fail_loud(self):
+        p = self._folder_with_stages("## Same\n\na\n\n## Same\n\nb\n")
+        with self.assertRaises(ConfigError):
+            load_persona(p)
+
+    def test_no_sections_fails_loud(self):
+        p = self._folder_with_stages("just prose, no headings\n")
+        with self.assertRaises(ConfigError):
+            load_persona(p)
+
+    def test_empty_stages_file_is_none(self):
+        # An empty/whitespace-only optional file counts as absent (same
+        # tolerance as voice/boundaries), not as a broken one.
+        p = self._folder_with_stages("   \n")
+        self.assertIsNone(load_persona(p).stages)
+
+
 class TestFileMode(unittest.TestCase):
     def test_existing_file_raw_text_is_stripped(self):
         with tempfile.TemporaryDirectory() as td:

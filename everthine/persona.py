@@ -111,9 +111,15 @@ class Persona:
 
     mode == "folder": identity_text/voice_text/boundaries_text/settings are
     populated (voice_text and boundaries_text are "" when their optional
-    files are absent); raw_text is always None.
+    files are absent); raw_text is always None. stages is parsed from an
+    optional stages.md (see _parse_stages) when present and non-blank, else
+    None -- None rather than an empty tuple, because "file absent/blank" and
+    "file present but structurally empty" are different states: the latter
+    is a ConfigError, not a valid empty stage list, so an empty tuple is
+    never a value this field actually takes.
     mode == "file": raw_text carries the file's stripped contents (or None
-    if it was unreadable or empty); the other fields are unused ("" / None).
+    if it was unreadable or empty); the other fields are unused ("" / None),
+    including stages, which is always None in file mode.
     """
 
     mode: str
@@ -122,6 +128,7 @@ class Persona:
     boundaries_text: str = ""
     settings: PersonaSettings | None = None
     raw_text: str | None = None
+    stages: tuple | None = None
 
 
 def _read_text(path: Path) -> str:
@@ -310,17 +317,95 @@ def _load_settings(path: Path) -> PersonaSettings:
     )
 
 
+def _parse_stages(text: str) -> tuple:
+    """Parse stages.md's lightweight section format into ((name, text), ...).
+
+    A line starting with "## " opens a section -- name = the rest of that
+    line, stripped. A section's body is every following line up to the next
+    "## " line (or end of file), joined back with newlines and stripped as
+    one block: internal blank lines and line breaks are kept verbatim, this
+    is the one deliberate exception to M2's "prose gets zero parsing"
+    convention -- the section STRUCTURE must be machine-readable for a later
+    task to walk, but each section's own text is still opaque prose beyond
+    that outer strip.
+
+    Before the first "## " line, blank lines and a single "#" title line
+    (a friendly markdown h1, e.g. "# My stages") are tolerated and ignored;
+    any other content there means the file is not actually using the
+    section format, so it fails loud exactly like a file with no sections
+    at all. `text` is assumed non-empty (callers only reach this function
+    once _read_optional's stripped result is truthy; an absent or
+    blank-only stages.md is a separate, non-erroring "no stages" state
+    handled by the caller, not by this parser).
+
+    Every failure raises ConfigError naming stages.md and, where there is
+    one, the offending section name -- callers should never see a bare
+    ValueError or IndexError out of a malformed file.
+    """
+    sections: list[tuple[str, str]] = []
+    seen_names: set[str] = set()
+    current_name: str | None = None
+    current_lines: list[str] = []
+    found_first_section = False
+
+    def _finalize(name: str, lines: list[str]) -> None:
+        body = "\n".join(lines).strip()
+        if not body:
+            raise ConfigError(f"stages.md: section {name!r} has no body text")
+        if name in seen_names:
+            raise ConfigError(f"stages.md: duplicate section name {name!r}")
+        seen_names.add(name)
+        sections.append((name, body))
+
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if current_name is not None:
+                _finalize(current_name, current_lines)
+            name = line[3:].strip()
+            if not name:
+                raise ConfigError(
+                    f"stages.md: section heading has an empty name: {line!r}")
+            current_name = name
+            current_lines = []
+            found_first_section = True
+            continue
+        if found_first_section:
+            current_lines.append(line)
+            continue
+        # Still before the first "## " heading: only blank lines and a
+        # single-"#" title line are tolerated here.
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#") and not stripped.startswith("##"):
+            continue
+        raise ConfigError(
+            "stages.md: unexpected content before the first '## ' section "
+            f"heading: {line!r}")
+
+    if current_name is not None:
+        _finalize(current_name, current_lines)
+
+    if not sections:
+        raise ConfigError("stages.md: no '## ' section headings found")
+
+    return tuple(sections)
+
+
 def _load_folder_persona(folder: Path) -> Persona:
     identity_text = _read_required(folder / "identity.md")
     settings = _load_settings(folder / "settings.yaml")
     voice_text = _read_optional(folder / "voice.md")
     boundaries_text = _read_optional(folder / "boundaries.md")
+    stages_text = _read_optional(folder / "stages.md")
+    stages = _parse_stages(stages_text) if stages_text else None
     return Persona(
         mode="folder",
         identity_text=identity_text,
         voice_text=voice_text,
         boundaries_text=boundaries_text,
         settings=settings,
+        stages=stages,
     )
 
 
