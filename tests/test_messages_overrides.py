@@ -147,7 +147,7 @@ class TestUnknownKeyFallsBack(_OverrideResetTest):
 
 # --- 8. M4 stage/album keys: all 17 pinned verbatim, placeholders usable ---
 
-class TestStageAlbumKeys(unittest.TestCase):
+class TestStageAlbumKeys(_OverrideResetTest):
     def test_new_keys_exist_with_exact_values(self):
         self.assertEqual(messages.msg("cmd_stage_desc"), "Where the two of you are")
         self.assertEqual(messages.msg("cmd_album_desc"), "Moments you both kept")

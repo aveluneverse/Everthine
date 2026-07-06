@@ -493,6 +493,41 @@ class TestPartnerHeartReactions(_AlbumWiringTestCase):
         self.assertEqual(context.bot.sent_messages, [])
 
 
+# --- M4 final review: a heart VARIANT swap ("❤️" -> "❤", both read as
+#     "heart" to a person but are distinct Telegram reaction strings) must
+#     not un-keep an already-kept moment. Reviewer-reproduced: a single
+#     update carrying old=["❤️"] new=["❤"] used to hit the added-branch
+#     first (dedup no-ops, the entry already exists) and then the
+#     removed-branch second, deleting the very entry the message's still-
+#     visible heart implies is still kept. -------------------------------
+
+class TestHeartVariantSwapKeepsTheKeepsake(_AlbumWiringTestCase):
+    def test_variant_swap_does_not_delete_the_kept_entry(self):
+        cfg = self._cfg()
+        app, handle_reaction, sent = self._seed(cfg, reply_text="a nice reply")
+
+        # An initial heart keeps the moment (a pre-existing entry -- the
+        # scenario the reviewer's dedup-then-delete sequence depends on).
+        first_heart = FakeReactionUpdate(
+            user_id=1, chat_id=1, message_id=sent.message_id,
+            old_emojis=[], new_emojis=["❤️"])
+        asyncio.run(handle_reaction(first_heart, FakeContext()))
+        self.assertEqual(len(album.all_entries(cfg)), 1)
+
+        # The client swaps the heart glyph variant: old and new are both
+        # heart emoji, so this is one update carrying both a heart "add"
+        # and a heart "remove" at once -- not an actual un-heart.
+        swap_update = FakeReactionUpdate(
+            user_id=1, chat_id=1, message_id=sent.message_id,
+            old_emojis=["❤️"], new_emojis=["❤"])
+        context = FakeContext()
+        asyncio.run(handle_reaction(swap_update, context))
+
+        entries = album.all_entries(cfg)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(context.bot.sent_messages, [])
+
+
 # --- Consumption gates (fix round 1). Two invariants the first cut of T7
 #     broke:
 #     (1) ALBUM_ENABLED=false must be byte-equivalent to the pre-feature
@@ -1348,6 +1383,62 @@ class TestStageBusyGating(_StageAlbumUITestCase):
         pending_check = source.index('pending_note["active"]', on_text_start)
         busy_check = source.index('if busy["active"]:', on_text_start)
         self.assertLess(pending_check, busy_check)
+
+
+# --- M4 final review: stale-button guard for disabled features. Telegram
+#     keeps an inline keyboard alive forever once sent, and the combined
+#     stg_/alb_ handler is registered whenever EITHER flag is on
+#     (`stage_active or cfg.album_enabled` in make_app) -- so a press on a
+#     stg_ button surviving from before STAGES_ENABLED was flipped off (or
+#     an alb_ button from before ALBUM_ENABLED was) must not fall through
+#     into its branch just because the OTHER feature kept the handler
+#     registered. Reviewer-reproduced: a stale stg_ret_yes still retreated
+#     and persisted state with stages disabled; a stale alb_del still
+#     deleted a keepsake with the album disabled (violating its
+#     never-lost doctrine). The guard sits BEFORE the busy gate, right
+#     after `data = query.data`. -----------------------------------------
+
+class TestStaleButtonGuardForDisabledFeatures(_StageAlbumUITestCase):
+    def test_stale_stage_retreat_yes_is_refused_when_stages_disabled(self):
+        # The combined handler is registered here because album is ON --
+        # stages being off must still refuse a stg_ press on its own terms.
+        cfg = self._cfg(stages_enabled=False, album_enabled=True)
+        stages.advance(cfg.stage_path, STAGE_NAMES, "", NOW)  # seed: In rhythm
+        app = bot.make_app(cfg)
+        callback = _stage_album_handler(app)
+        stage_message = FakeMessage("stale stage view")
+
+        query = FakeCallbackQuery("stg_ret_yes", stage_message)
+        asyncio.run(callback(
+            FakeUpdate(stage_message, callback_query=query), FakeContext()))
+
+        self.assertEqual(query.answers, [None])
+        self.assertEqual(stage_message.edits, [])
+        self.assertEqual(stages.load_state(cfg.stage_path)["current"], "In rhythm")
+
+    def test_stale_album_delete_is_refused_when_album_disabled(self):
+        # Seed the keepsake through a cfg with the album ON (add_partner_flag
+        # itself gates on cfg.album_enabled), then rebuild with it OFF --
+        # same data_dir, so the same album.json -- to drive the stale press.
+        seed_cfg = self._cfg(album_enabled=True)
+        album.add_partner_flag(seed_cfg, "a kept moment", 9200, NOW)
+        entry_id = album.all_entries(seed_cfg)[0]["id"]
+
+        # The combined handler is registered here because stages are ON --
+        # the album being off must still refuse an alb_ press on its own
+        # terms.
+        cfg = self._cfg(album_enabled=False, stages_enabled=True)
+        app = bot.make_app(cfg)
+        callback = _stage_album_handler(app)
+        album_message = FakeMessage("stale album view")
+
+        query = FakeCallbackQuery(f"alb_del:{entry_id}:0", album_message)
+        asyncio.run(callback(
+            FakeUpdate(album_message, callback_query=query), FakeContext()))
+
+        self.assertEqual(query.answers, [None])
+        self.assertEqual(album_message.edits, [])
+        self.assertEqual(len(album.all_entries(cfg)), 1)
 
 
 # --- The M4 T8 CallbackQueryHandler must not steal on_button's callbacks --

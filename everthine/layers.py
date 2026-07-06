@@ -8,10 +8,10 @@ relationship state, no randomness. compose_stable() covers Layer 1 (the
 identity declaration, then the loaded identity/voice text verbatim) and
 Layer 2 (the seven ground rules -- the framework's built-in behavioral DNA,
 not persona-authored -- with the living-frame line swapped in, plus the
-boundaries file appended last). A later milestone adds the dynamic Layer 3
-(relationship tier, time of day, evolving self-portrait) and wires this
-module's output into persona.build_system_prompt(); that wiring, and
-build_system_prompt() itself, are untouched here.
+boundaries file appended last). persona.build_system_prompt() joins this
+composition with the dynamic Layer 3 block (dynamic_context.py); the M4
+relationship-stage frame arrives pre-built through compose_stable()'s
+stage_block parameter.
 """
 from __future__ import annotations
 

@@ -638,6 +638,14 @@ def make_app(cfg: Config):
             return
         query = update.callback_query
         data = query.data
+        if data.startswith("stg_") and not stage_active:
+            logger.warning("stage callback %r pressed while stages are inactive", data)
+            await query.answer()
+            return
+        if data.startswith("alb_") and not cfg.album_enabled:
+            logger.warning("album callback %r pressed while the album is disabled", data)
+            await query.answer()
+            return
         if busy["active"] and data in ("stg_adv", "stg_ret",
                                        "stg_ret_yes", "stg_note_skip"):
             await query.answer(msg("busy"))
@@ -842,6 +850,8 @@ def make_app(cfg: Config):
         new_emojis = _reaction_emoji_set(reaction.new_reaction)
         added = new_emojis - old_emojis
         removed = old_emojis - new_emojis
+        if added & _HEART_EMOJIS and removed & _HEART_EMOJIS:
+            return  # heart variant swap: still hearted, keep the keepsake
         if added & _HEART_EMOJIS:
             cached = _message_cache.get(reaction.message_id)
             if cached is None:

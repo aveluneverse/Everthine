@@ -432,6 +432,11 @@ class TestStagesFile(unittest.TestCase):
         with self.assertRaises(ConfigError):
             load_persona(p)
 
+    def test_title_only_file_fails_loud(self):
+        p = self._folder_with_stages("# My stages\n")
+        with self.assertRaises(ConfigError):
+            load_persona(p)
+
     def test_empty_section_name_fails_loud(self):
         p = self._folder_with_stages("##   \n\ntext\n")
         with self.assertRaises(ConfigError):

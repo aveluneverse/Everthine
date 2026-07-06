@@ -135,6 +135,14 @@ class TestStageAlbumKnobs(unittest.TestCase):
         with self.assertRaises(ConfigError):
             load_config({**BASE, "STAGES_ENABLED": "maybe"})
 
+    def test_env_example_documents_stage_album_vars(self):
+        # Sibling of TestConfig.test_env_example_documents_memory_vars, same
+        # shape: guards .env.example's 1:1 catalog for the stage/album knobs.
+        text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        for var in ("STAGES_ENABLED", "ALBUM_ENABLED"):
+            with self.subTest(var=var):
+                self.assertIn(var, text)
+
 
 if __name__ == "__main__":
     unittest.main()
