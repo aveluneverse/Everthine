@@ -42,20 +42,36 @@ narrow test of its own further down, pinning the trap that semantics
 implies: a streamed reply's placeholder object never reflects its own
 final text, so on_text must cache the text it already knows from
 display.message_texts, never message.text.
+
+M4 Task 8 extends this same file with /stage and /album: a second
+CallbackQueryHandler (pattern=r"^(stg|alb)_") drives their button flows,
+tested here via a NEW _stage_album_handler() lookup (on_button's own bare,
+unpatterned CallbackQueryHandler is no longer the only one in
+app.handlers[0], so class-type lookup alone can no longer disambiguate
+them) and a NEW _command_handler(app, name) lookup (app.handlers[0] may
+now hold three CommandHandlers -- start/stage/album -- at once). These
+scenarios need a FOLDER-mode persona with a real stages.md, unlike every
+T7 scenario above (file-mode personas never have stages -- see
+persona.Persona.stages' own docstring): _StageAlbumUITestCase overrides
+_cfg() accordingly, leaving every T7 class above using the base file-mode
+_cfg() untouched.
 """
 import asyncio
+import inspect
 import itertools
 import tempfile
+import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from telegram import ReactionTypeEmoji
+from telegram import InlineKeyboardMarkup, ReactionTypeEmoji
 from telegram.error import BadRequest
 from telegram.ext import (CallbackQueryHandler, CommandHandler,
                           MessageHandler, MessageReactionHandler)
 
-from everthine import album, bot, engine, memory_embed, memory_recall, messages, persona
+from everthine import album, bot, engine, memory_embed, memory_recall, messages, persona, stages
 from everthine.config import Config
 from everthine.engine import EngineReply
 
@@ -76,6 +92,32 @@ def _handler(app, handler_cls):
         if isinstance(h, handler_cls):
             return h.callback
     raise AssertionError(f"no {handler_cls.__name__} registered")
+
+
+def _command_handler(app, command):
+    """The registered callback for one specific /command name. app.handlers[0]
+    may hold THREE CommandHandlers at once once M4 T8's flag-gated /stage and
+    /album join /start, so _handler's plain by-class lookup can no longer
+    disambiguate between them; this filters on CommandHandler.commands
+    (the frozenset of lowercased names PTB matches against) instead."""
+    for h in app.handlers[0]:
+        if isinstance(h, CommandHandler) and command in h.commands:
+            return h.callback
+    raise AssertionError(f"no CommandHandler registered for /{command}")
+
+
+def _stage_album_handler(app):
+    """The M4 T8 CallbackQueryHandler (pattern=r"^(stg|alb)_"). app.handlers[0]
+    holds TWO CallbackQueryHandlers whenever /stage or /album is active: this
+    one, and on_button's own bare, unpatterned one (matches every callback
+    query unconditionally -- see bot.py's handler-registration comment for
+    why registration ORDER, not just existence, keeps the two from
+    colliding). Discriminated here by which one actually carries a pattern,
+    since on_button's does not."""
+    for h in app.handlers[0]:
+        if isinstance(h, CallbackQueryHandler) and h.pattern is not None:
+            return h.callback
+    raise AssertionError("no stage/album CallbackQueryHandler registered")
 
 
 class FakeUser:
@@ -104,9 +146,19 @@ class FakeMessage:
         self.reactions_set: list = []
         self.replies: list = []
         self.edits: list = []
+        # M4 T8: the reply_markup each edit_text call was given, positionally
+        # aligned with .edits (markup_edits[-1] pairs with edits[-1]) -- for
+        # tests that need to inspect a /stage or /album view's button layout
+        # after an edit, not just its text. .markup is the markup a
+        # reply_text call was given, stashed on the CHILD message it
+        # returns (a fresh /stage or /album command response is a new
+        # message, never an edit of this one).
+        self.markup_edits: list = []
+        self.markup = None
 
     async def reply_text(self, text, parse_mode=None, reply_markup=None):
         reply = FakeMessage(text)
+        reply.markup = reply_markup
         self.replies.append(reply)
         return reply
 
@@ -116,6 +168,7 @@ class FakeMessage:
         # cache design documents. Edits are recorded for assertions;
         # edits[-1] is what a real Telegram client would be displaying.
         self.edits.append(text)
+        self.markup_edits.append(reply_markup)
         return FakeMessage(text, message_id=self.message_id)
 
     async def set_reaction(self, reaction, is_big=None):
@@ -125,12 +178,40 @@ class FakeMessage:
         return True
 
 
+class FakeCallbackQuery:
+    """Minimal telegram.CallbackQuery stand-in (M4 T8): enough surface for
+    on_stage_album_button (data, answer, edit_message_text) to run against.
+    edit_message_text delegates to the message this query is attached to,
+    mirroring how a real CallbackQuery's edit just proxies to
+    Bot.edit_message_text against that same chat/message_id -- so
+    assertions read off the message's own .edits/.markup_edits exactly as
+    the button-less command tests already do."""
+
+    def __init__(self, data, message):
+        self.data = data
+        self.message = message
+        self.answers: list = []
+
+    async def answer(self, text=None):
+        self.answers.append(text)
+
+    async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+        return await self.message.edit_text(text, parse_mode=parse_mode,
+                                            reply_markup=reply_markup)
+
+
 class FakeUpdate:
-    def __init__(self, message, user_id=1, chat_id=1):
+    def __init__(self, message, user_id=1, chat_id=1, callback_query=None):
         self.message = message
         self.effective_user = FakeUser(user_id)
         self.effective_chat = FakeChat(chat_id)
         self.message_reaction = None
+        # M4 T8: a callback-query update carries no incoming .message of its
+        # own in the pattern this file's other fakes use (the message
+        # parameter above is the message the button is ATTACHED to, reused
+        # so _authorized's update.effective_user check still works
+        # uniformly for every update shape).
+        self.callback_query = callback_query
 
 
 class FakeMessageReaction:
@@ -716,6 +797,574 @@ class TestStreamReplySentSink(unittest.IsolatedAsyncioTestCase):
         # never trust message.text directly.
         self.assertEqual(sink[0].text, "...thinking...")
         self.assertEqual(display.message_texts, ["the real streamed reply"])
+
+
+# --- M4 Task 8: /stage and /album command UI. ------------------------------
+#
+# Unlike every scenario above, these need a FOLDER-mode persona with a real
+# stages.md -- file-mode personas never have stages (persona.Persona.stages'
+# own docstring: "mode == 'file': ... stages, which is always None in file
+# mode"). STAGE_SECTIONS mirrors persona.py's own stages.md section format
+# ("## name" heading, body text below each, per _parse_stages).
+
+NOW = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+
+STAGE_SECTIONS = (
+    ("Settling in", "Gentle and curious, still learning Sam's rhythms."),
+    ("In rhythm", "Comfortable, easy, a shared cadence."),
+    ("Deep water", "Fully open, nothing held back."),
+)
+STAGE_NAMES = tuple(name for name, _ in STAGE_SECTIONS)
+
+
+def _write_stage_persona(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "identity.md").write_text(
+        "I am Alex, warm and steady.\n", encoding="utf-8")
+    (root / "settings.yaml").write_text(
+        "companion:\n  name: Alex\npartner:\n  name: Sam\n", encoding="utf-8")
+    body = "\n\n".join(f"## {name}\n{text}" for name, text in STAGE_SECTIONS)
+    (root / "stages.md").write_text(body + "\n", encoding="utf-8")
+    return root
+
+
+def _button_labels(markup: InlineKeyboardMarkup) -> list:
+    """Flatten an InlineKeyboardMarkup's rows into one list of button
+    labels, row-then-column order -- the shape most scenarios below only
+    need to assert presence/absence/order over; a test that cares about
+    row GROUPING (e.g. the album nav row) reads .inline_keyboard directly
+    instead."""
+    return [button.text for row in markup.inline_keyboard for button in row]
+
+
+def _on_button_handler(app):
+    """The ORIGINAL M1.5 CallbackQueryHandler (on_button, pattern=None,
+    matches every callback query unconditionally). Discriminated from the
+    M4 T8 one by the absence of a pattern -- the mirror image of
+    _stage_album_handler below."""
+    for h in app.handlers[0]:
+        if isinstance(h, CallbackQueryHandler) and h.pattern is None:
+            return h.callback
+    raise AssertionError("no on_button CallbackQueryHandler registered")
+
+
+class _StageAlbumUITestCase(_AlbumWiringTestCase):
+    """Task 8's UI tests need a FOLDER-mode persona with a real stages.md on
+    top of every reset _AlbumWiringTestCase already does (tmp dir +
+    memory_recall/memory_embed/persona-cache/messages-overrides resets).
+    _cfg() here SHADOWS the base class's file-mode one for every test class
+    below that inherits from THIS class instead of directly from
+    _AlbumWiringTestCase; every T7 class above is unaffected, since Python
+    resolves self._cfg() through each test case's own MRO."""
+
+    def _cfg(self, **overrides):
+        folder = self.root / "persona"
+        if not (folder / "identity.md").exists():
+            _write_stage_persona(folder)
+        kwargs = dict(bot_token="x", authorized_user_id=1,
+                     data_dir=self.root / "data", persona_path=folder,
+                     memory_enabled=False, streaming_enabled=False,
+                     stages_enabled=True, album_enabled=True)
+        kwargs.update(overrides)
+        return Config(**kwargs)
+
+
+# --- /stage: the view itself (current stage, history, edge buttons) -------
+
+class TestStageView(_StageAlbumUITestCase):
+    def test_stage_cmd_shows_current_and_history(self):
+        cfg = self._cfg()
+        stages.advance(cfg.stage_path, STAGE_NAMES, "our first trip", NOW)
+        app = bot.make_app(cfg)
+        stage_cmd = _command_handler(app, "stage")
+        message = FakeMessage("/stage")
+
+        asyncio.run(stage_cmd(FakeUpdate(message), FakeContext()))
+
+        reply = message.replies[0]
+        history_line = f'{NOW.date().isoformat()} · In rhythm · "our first trip"'
+        self.assertEqual(
+            reply.text,
+            messages.msg("stage_intro").format(stage="In rhythm") + "\n" + history_line)
+        # After one advance (index 0 -> 1 of 3), neither edge applies --
+        # both advance and retreat show; edge-hiding itself is
+        # test_stage_buttons_hidden_at_edges's job, not this test's.
+        labels = _button_labels(reply.markup)
+        self.assertIn(messages.msg("btn_stage_advance"), labels)
+        self.assertIn(messages.msg("btn_stage_retreat"), labels)
+        self.assertIn(messages.msg("btn_stage_close"), labels)
+
+    def test_stage_buttons_hidden_at_edges(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        stage_cmd = _command_handler(app, "stage")
+
+        bottom = FakeMessage("/stage")
+        asyncio.run(stage_cmd(FakeUpdate(bottom), FakeContext()))
+        bottom_labels = _button_labels(bottom.replies[0].markup)
+        self.assertIn(messages.msg("btn_stage_advance"), bottom_labels)
+        self.assertNotIn(messages.msg("btn_stage_retreat"), bottom_labels)
+        self.assertIn(messages.msg("btn_stage_close"), bottom_labels)
+
+        for _ in range(len(STAGE_NAMES) - 1):
+            stages.advance(cfg.stage_path, STAGE_NAMES, "", NOW)
+        top = FakeMessage("/stage")
+        asyncio.run(stage_cmd(FakeUpdate(top), FakeContext()))
+        top_labels = _button_labels(top.replies[0].markup)
+        self.assertNotIn(messages.msg("btn_stage_advance"), top_labels)
+        self.assertIn(messages.msg("btn_stage_retreat"), top_labels)
+        self.assertIn(messages.msg("btn_stage_close"), top_labels)
+
+    def test_stage_close_clears_buttons(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        callback = _stage_album_handler(app)
+        stage_message = FakeMessage("stage view")
+
+        asyncio.run(callback(
+            FakeUpdate(stage_message, callback_query=FakeCallbackQuery("stg_close", stage_message)),
+            FakeContext()))
+
+        self.assertEqual(stage_message.edits[-1],
+                         messages.msg("stage_intro").format(stage="Settling in"))
+        self.assertEqual(list(stage_message.markup_edits[-1].inline_keyboard), [])
+
+    def test_stage_cmd_absent_when_flag_off(self):
+        cfg = self._cfg(stages_enabled=False)
+        app = bot.make_app(cfg)
+        self.assertFalse(any(isinstance(h, CommandHandler) and "stage" in h.commands
+                             for h in app.handlers[0]))
+
+        # A persona with no stages.md never registers /stage, even with the
+        # flag on -- there is nothing to advance or retreat through.
+        plain = self.root / "plain_persona"
+        plain.mkdir(parents=True, exist_ok=True)
+        (plain / "identity.md").write_text("I am Alex.\n", encoding="utf-8")
+        (plain / "settings.yaml").write_text(
+            "companion:\n  name: Alex\npartner:\n  name: Sam\n", encoding="utf-8")
+        cfg2 = self._cfg(stages_enabled=True, persona_path=plain,
+                         data_dir=self.root / "data2")
+        app2 = bot.make_app(cfg2)
+        self.assertFalse(any(isinstance(h, CommandHandler) and "stage" in h.commands
+                             for h in app2.handlers[0]))
+
+
+# --- /stage: the advance flow (note prompt -> typed note / skip / cancel) -
+
+class TestStageAdvanceFlow(_StageAlbumUITestCase):
+    def test_advance_flow_with_note(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        callback = _stage_album_handler(app)
+        stage_message = FakeMessage("stage view")
+
+        asyncio.run(callback(
+            FakeUpdate(stage_message, callback_query=FakeCallbackQuery("stg_adv", stage_message)),
+            FakeContext()))
+        self.assertEqual(stage_message.edits[-1], messages.msg("stage_note_prompt"))
+        self.assertEqual(_button_labels(stage_message.markup_edits[-1]),
+                         [messages.msg("btn_note_skip"), messages.msg("btn_note_cancel")])
+
+        note_message = FakeMessage("what a lovely evening")
+        with mock.patch.object(engine, "run_once") as run_once:
+            asyncio.run(on_text(FakeUpdate(note_message), FakeContext()))
+        run_once.assert_not_called()  # a note is not an engine turn
+
+        self.assertEqual(note_message.replies[0].text, messages.msg("note_saved_ack"))
+        self.assertEqual(note_message.replies[1].text,
+                         messages.msg("stage_advanced_ack").format(stage="In rhythm"))
+        state = stages.load_state(cfg.stage_path)
+        self.assertEqual(state["current"], "In rhythm")
+        self.assertEqual(state["history"][-1]["note"], "what a lovely evening")
+
+    def test_advance_flow_skip(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        callback = _stage_album_handler(app)
+        stage_message = FakeMessage("stage view")
+
+        asyncio.run(callback(
+            FakeUpdate(stage_message, callback_query=FakeCallbackQuery("stg_adv", stage_message)),
+            FakeContext()))
+        asyncio.run(callback(
+            FakeUpdate(stage_message,
+                      callback_query=FakeCallbackQuery("stg_note_skip", stage_message)),
+            FakeContext()))
+
+        self.assertEqual(stage_message.edits[-1],
+                         messages.msg("stage_advanced_ack").format(stage="In rhythm"))
+        state = stages.load_state(cfg.stage_path)
+        self.assertEqual(state["current"], "In rhythm")
+        self.assertEqual(state["history"][-1]["note"], "")
+
+        # Pending must be cleared -- a later plain message reaches the engine.
+        plain = FakeMessage("just chatting")
+        with mock.patch.object(engine, "run_once",
+                               return_value=EngineReply("hi", "sess", ok=True)):
+            asyncio.run(on_text(FakeUpdate(plain), FakeContext()))
+        self.assertEqual(plain.replies[0].text, "hi")
+
+    def test_advance_cancel_leaves_state(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        callback = _stage_album_handler(app)
+        stage_message = FakeMessage("stage view")
+
+        asyncio.run(callback(
+            FakeUpdate(stage_message, callback_query=FakeCallbackQuery("stg_adv", stage_message)),
+            FakeContext()))
+        asyncio.run(callback(
+            FakeUpdate(stage_message,
+                      callback_query=FakeCallbackQuery("stg_note_cancel", stage_message)),
+            FakeContext()))
+
+        state = stages.load_state(cfg.stage_path)
+        self.assertIsNone(state["current"])
+        self.assertEqual(state["history"], [])
+        self.assertEqual(stage_message.edits[-1],
+                         messages.msg("stage_intro").format(stage="Settling in"))
+
+        plain = FakeMessage("hey there")
+        with mock.patch.object(engine, "run_once",
+                               return_value=EngineReply("hey!", "sess", ok=True)):
+            asyncio.run(on_text(FakeUpdate(plain), FakeContext()))
+        self.assertEqual(plain.replies[0].text, "hey!")
+
+    def test_note_timeout_message_goes_to_engine(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        callback = _stage_album_handler(app)
+        stage_message = FakeMessage("stage view")
+
+        clock = {"t": 1000.0}
+        with mock.patch("time.monotonic", side_effect=lambda: clock["t"]):
+            asyncio.run(callback(
+                FakeUpdate(stage_message,
+                          callback_query=FakeCallbackQuery("stg_adv", stage_message)),
+                FakeContext()))
+            clock["t"] += bot.NOTE_TIMEOUT_S + 1
+            late = FakeMessage("sorry, got busy")
+            with mock.patch.object(engine, "run_once",
+                                   return_value=EngineReply("no worries", "sess", ok=True)):
+                asyncio.run(on_text(FakeUpdate(late), FakeContext()))
+
+        self.assertEqual(late.replies[0].text, "no worries")
+        # The stale "note" never landed -- state is untouched.
+        self.assertIsNone(stages.load_state(cfg.stage_path)["current"])
+
+
+# --- /stage: the retreat flow (confirm -> yes / no) ------------------------
+
+class TestStageRetreatFlow(_StageAlbumUITestCase):
+    def test_retreat_requires_confirm(self):
+        cfg = self._cfg()
+        stages.advance(cfg.stage_path, STAGE_NAMES, "", NOW)
+        app = bot.make_app(cfg)
+        callback = _stage_album_handler(app)
+        stage_message = FakeMessage("stage view")
+
+        asyncio.run(callback(
+            FakeUpdate(stage_message, callback_query=FakeCallbackQuery("stg_ret", stage_message)),
+            FakeContext()))
+        self.assertEqual(stage_message.edits[-1],
+                         messages.msg("stage_retreat_confirm").format(stage="Settling in"))
+        self.assertEqual(_button_labels(stage_message.markup_edits[-1]),
+                         [messages.msg("btn_retreat_yes"), messages.msg("btn_retreat_no")])
+        # No mutation until "yes" is actually pressed.
+        self.assertEqual(stages.load_state(cfg.stage_path)["current"], "In rhythm")
+
+        asyncio.run(callback(
+            FakeUpdate(stage_message,
+                      callback_query=FakeCallbackQuery("stg_ret_yes", stage_message)),
+            FakeContext()))
+        self.assertEqual(stage_message.edits[-1],
+                         messages.msg("stage_retreated_ack").format(stage="Settling in"))
+        self.assertEqual(stages.load_state(cfg.stage_path)["current"], "Settling in")
+
+    def test_retreat_no_restores_stage_view(self):
+        cfg = self._cfg(data_dir=self.root / "data-no")
+        stages.advance(cfg.stage_path, STAGE_NAMES, "", NOW)
+        app = bot.make_app(cfg)
+        callback = _stage_album_handler(app)
+        stage_message = FakeMessage("stage view")
+
+        asyncio.run(callback(
+            FakeUpdate(stage_message, callback_query=FakeCallbackQuery("stg_ret", stage_message)),
+            FakeContext()))
+        asyncio.run(callback(
+            FakeUpdate(stage_message,
+                      callback_query=FakeCallbackQuery("stg_ret_no", stage_message)),
+            FakeContext()))
+
+        # The one prior advance() call already wrote a (note-less) history
+        # entry, so the restored view carries it too -- this is the SAME
+        # rendering test_stage_cmd_shows_current_and_history already pins
+        # for a note-bearing entry, just without the quoted note.
+        history_line = f'{NOW.date().isoformat()} · In rhythm'
+        self.assertEqual(
+            stage_message.edits[-1],
+            messages.msg("stage_intro").format(stage="In rhythm") + "\n" + history_line)
+        self.assertEqual(stages.load_state(cfg.stage_path)["current"], "In rhythm")
+
+
+# --- busy interplay: stg_adv/stg_ret are gated, a pending note is not -----
+
+class TestStageBusyGating(_StageAlbumUITestCase):
+    def test_busy_blocks_stage_mutations_with_toast(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        callback = _stage_album_handler(app)
+        stage_message = FakeMessage("stage view")
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingEngine:
+            def run_once(self, cfg, prompt, session_id=None, system_prompt=None):
+                entered.set()
+                release.wait(5)
+                return EngineReply("a real reply", "sess-busy", ok=True)
+
+        busy_trigger = FakeMessage("are you there?")
+
+        async def scenario():
+            with mock.patch.object(engine, "run_once", BlockingEngine().run_once):
+                turn_task = asyncio.create_task(on_text(FakeUpdate(busy_trigger), FakeContext()))
+                await asyncio.to_thread(entered.wait, 5)
+
+                query_adv = FakeCallbackQuery("stg_adv", stage_message)
+                await callback(FakeUpdate(stage_message, callback_query=query_adv), FakeContext())
+                self.assertEqual(query_adv.answers, [messages.msg("busy")])
+                self.assertEqual(stage_message.edits, [])  # no state mutation
+
+                query_ret = FakeCallbackQuery("stg_ret", stage_message)
+                await callback(FakeUpdate(stage_message, callback_query=query_ret), FakeContext())
+                self.assertEqual(query_ret.answers, [messages.msg("busy")])
+                self.assertEqual(stage_message.edits, [])
+
+                release.set()
+                await turn_task
+
+        asyncio.run(scenario())
+        self.assertEqual(busy_trigger.replies[0].text, "a real reply")
+        # Neither busy-blocked press armed a pending note or mutated state.
+        self.assertIsNone(stages.load_state(cfg.stage_path)["current"])
+
+    def test_pending_note_check_precedes_busy_gate_in_on_text(self):
+        """Per the brief: a pending note never reaches the engine, and is
+        orthogonal to busy -- it must never be blocked by the busy gate. A
+        literal end-to-end runtime replay of "note arrives while busy=True"
+        turns out to be UNREACHABLE through
+        the actual handler surface, and this is worth spelling out rather
+        than faking: busy["active"] is written to True in exactly one place
+        in the whole module -- on_text's own normal-chat branch -- which sits
+        AFTER the pending-note check in source order. So the only door into
+        busy=True is a call to on_text that the pending-note check did NOT
+        intercept, which by definition means pending_note was already
+        inactive at that moment; and the only door that ARMS pending_note
+        (stg_adv, in on_stage_album_button) is itself refused while busy is
+        already True (test_busy_blocks_stage_mutations_with_toast above). The
+        two states can therefore never actually coexist -- an early draft of
+        this test tried to force it by starting a busy turn while a note was
+        already pending, and the busy-triggering message itself got consumed
+        as the note instead (proving the same point the hard way).
+
+        What the brief's claim actually reduces to, then, is a SOURCE-ORDER
+        guarantee: on_text must check pending_note before it ever looks at
+        busy, so that IF the two states were ever reachable together (e.g. a
+        future change adds another writer of busy["active"]), the note would
+        still win. Pinned by source order, the same way
+        test_bot_persona_wiring.py's TestPlaceholderSourcePin pins a
+        source-level fact no behavioral test on the same return value could
+        distinguish.
+        """
+        source = inspect.getsource(bot)
+        on_text_start = source.index("async def on_text(")
+        pending_check = source.index('pending_note["active"]', on_text_start)
+        busy_check = source.index('if busy["active"]:', on_text_start)
+        self.assertLess(pending_check, busy_check)
+
+
+# --- The M4 T8 CallbackQueryHandler must not steal on_button's callbacks --
+
+class TestOnButtonUnaffectedByStageAlbumHandler(_StageAlbumUITestCase):
+    """on_button (M1.5, untouched) is registered SECOND once /stage or
+    /album is active (see make_app's handler-registration comment); these
+    pin that the ordering trick actually works both ways: the new handler's
+    own pattern rejects btn_-shaped data (so it falls through), and
+    on_button, reached second, still answers and acts on it normally."""
+
+    def test_stage_album_handler_pattern_rejects_btn_prefixed_data(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        pattern = None
+        for h in app.handlers[0]:
+            if isinstance(h, CallbackQueryHandler) and h.pattern is not None:
+                pattern = h.pattern
+                break
+        self.assertIsNotNone(pattern, "no stage/album CallbackQueryHandler registered")
+        self.assertIsNone(pattern.match("btn_clean"))
+        self.assertIsNotNone(pattern.match("stg_adv"))
+        self.assertIsNotNone(pattern.match("alb_del:keep_1:0"))
+
+    def test_btn_clean_still_works_with_stage_album_handler_registered_first(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        on_button = _on_button_handler(app)
+        message = FakeMessage("start view")
+        query = FakeCallbackQuery("btn_clean", message)
+
+        asyncio.run(on_button(FakeUpdate(message, callback_query=query), FakeContext()))
+
+        self.assertEqual(query.answers, [None])
+        self.assertEqual(message.edits[-1], messages.msg("clean_ack"))
+
+
+# --- /album: paginated listing + delete + empty state ----------------------
+
+class TestAlbumCommandUI(_StageAlbumUITestCase):
+    def test_album_cmd_empty_line(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        album_cmd = _command_handler(app, "album")
+        message = FakeMessage("/album")
+
+        asyncio.run(album_cmd(FakeUpdate(message), FakeContext()))
+
+        reply = message.replies[0]
+        self.assertEqual(reply.text, messages.msg("album_empty"))
+        self.assertEqual(list(reply.markup.inline_keyboard), [])
+
+    def test_album_cmd_lists_pages_and_deletes(self):
+        cfg = self._cfg()
+        for i in range(7):
+            album.add_partner_flag(cfg, f"moment number {i}", 9000 + i,
+                                   NOW + timedelta(minutes=i))
+        app = bot.make_app(cfg)
+        album_cmd = _command_handler(app, "album")
+        callback = _stage_album_handler(app)
+
+        page0 = FakeMessage("/album")
+        asyncio.run(album_cmd(FakeUpdate(page0), FakeContext()))
+        reply = page0.replies[0]
+        self.assertEqual(reply.text, messages.msg("cmd_album_desc"))
+        rows = reply.markup.inline_keyboard
+        self.assertEqual(len(rows), 6)  # 5 entries + one nav row
+        self.assertTrue(rows[0][0].text.endswith("moment number 6"))  # newest first
+        self.assertTrue(rows[4][0].text.endswith("moment number 2"))
+        nav_row = rows[-1]
+        self.assertEqual([b.text for b in nav_row], ["▶"])  # only "next" on page 0
+
+        next_cb = nav_row[0].callback_data
+        asyncio.run(callback(
+            FakeUpdate(reply, callback_query=FakeCallbackQuery(next_cb, reply)), FakeContext()))
+        self.assertEqual(reply.edits[-1], messages.msg("cmd_album_desc"))
+        page1_rows = reply.markup_edits[-1].inline_keyboard
+        self.assertEqual(len(page1_rows), 3)  # 2 entries + one nav row
+        self.assertTrue(page1_rows[0][0].text.endswith("moment number 1"))
+        self.assertTrue(page1_rows[1][0].text.endswith("moment number 0"))
+        self.assertEqual([b.text for b in page1_rows[-1]], ["◀"])  # only "prev"
+
+        del_cb = page1_rows[0][0].callback_data
+        self.assertTrue(del_cb.startswith("alb_del:"))
+        asyncio.run(callback(
+            FakeUpdate(reply, callback_query=FakeCallbackQuery(del_cb, reply)), FakeContext()))
+        self.assertEqual(len(album.all_entries(cfg)), 6)
+        # Re-rendered the SAME page (now shrunk to one entry) rather than
+        # going empty or crashing on the now-out-of-range slot.
+        page1_after = reply.markup_edits[-1].inline_keyboard
+        self.assertEqual(len(page1_after), 2)  # 1 entry + nav row
+        self.assertTrue(page1_after[0][0].text.endswith("moment number 0"))
+
+
+# --- T7 review fold-in: _cache_sent gated on cfg.album_enabled ------------
+
+class TestCacheSentAlbumGating(unittest.TestCase):
+    """The T7 review named this a one-line fold-in for M4 T8: _cache_sent
+    filled the message cache even with album_enabled=False -- pure memory
+    waste, since handle_reaction (its only reader) is not even registered
+    in that case (see TestAlbumFlagGating above). There is no reaction
+    handler to probe this behaviorally when the flag is off (that IS the
+    point of the fix), so -- exactly like test_bot_persona_wiring.py's
+    TestPlaceholderSourcePin -- reading the source directly is the only
+    honest way to pin that the early-exit gate actually exists."""
+
+    def test_cache_sent_checks_album_enabled_before_caching(self):
+        source = inspect.getsource(bot)
+        start = source.index("def _cache_sent(")
+        # The next sibling closure (start_cmd) is "async def", not "def" --
+        # searched by name rather than a generic "\n    def " scan, which
+        # would miss it.
+        end = source.index("\n    async def start_cmd(", start + 1)
+        body = source[start:end]
+        self.assertIn("cfg.album_enabled", body)
+
+
+# --- register_commands: menu grows with the enabled organs -----------------
+
+class _FakeCommandBot:
+    def __init__(self):
+        self.set_my_commands_calls = []
+
+    async def set_my_commands(self, commands):
+        self.set_my_commands_calls.append(commands)
+
+
+class _FakeCommandApp:
+    """Mirrors test_bot_stream.py's/test_bot_persona_wiring.py's own
+    FakeCommandApp shape exactly -- bot_data is only set when a caller
+    explicitly supplies it, so a bare _FakeCommandApp() has NO bot_data
+    attribute at all, matching every existing direct-call test site for
+    register_commands byte-for-byte."""
+
+    def __init__(self, bot_data=None):
+        self.bot = _FakeCommandBot()
+        if bot_data is not None:
+            self.bot_data = bot_data
+
+
+class TestCommandMenuOrganWiring(_StageAlbumUITestCase):
+    def test_command_menu_matches_enabled_organs(self):
+        cfg = self._cfg()  # stages+album on, persona has stages
+        app = bot.make_app(cfg)
+        # make_app's own side of the wiring: cfg travels to register_commands
+        # through app.bot_data, since post_init is passed register_commands
+        # by bare reference (test_bot_stream.py pins that identity).
+        self.assertIs(app.bot_data.get("cfg"), cfg)
+
+        fake = _FakeCommandApp(bot_data=app.bot_data)
+        asyncio.run(bot.register_commands(fake))
+        commands = fake.bot.set_my_commands_calls[0]
+        self.assertEqual([c.command for c in commands], ["start", "stage", "album"])
+        self.assertEqual(commands[1].description, messages.msg("cmd_stage_desc"))
+        self.assertEqual(commands[2].description, messages.msg("cmd_album_desc"))
+
+        cfg_off = self._cfg(stages_enabled=False, album_enabled=False,
+                            data_dir=self.root / "data-off")
+        app_off = bot.make_app(cfg_off)
+        fake_off = _FakeCommandApp(bot_data=app_off.bot_data)
+        asyncio.run(bot.register_commands(fake_off))
+        commands_off = fake_off.bot.set_my_commands_calls[0]
+        self.assertEqual([c.command for c in commands_off], ["start"])
+        self.assertFalse(any(isinstance(h, CommandHandler) and "stage" in h.commands
+                             for h in app_off.handlers[0]))
+        self.assertFalse(any(isinstance(h, CommandHandler) and "album" in h.commands
+                             for h in app_off.handlers[0]))
+
+    def test_register_commands_still_start_only_with_bare_app(self):
+        # No bot_data at all (the exact shape every pre-M4-T8 direct-call
+        # site uses, in this file and in test_bot_stream.py/
+        # test_bot_persona_wiring.py) must stay byte-identical to the
+        # original start-only menu.
+        fake = _FakeCommandApp()
+        asyncio.run(bot.register_commands(fake))
+        commands = fake.bot.set_my_commands_calls[0]
+        self.assertEqual([c.command for c in commands], ["start"])
 
 
 if __name__ == "__main__":

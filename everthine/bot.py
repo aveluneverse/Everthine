@@ -15,6 +15,18 @@ _message_cache closure); his captured [react:emoji] tag -- T6 already
 stripped it out of the visible reply -- sets a real Telegram reaction on
 her message via _consume_react, flagging it into the album too when the
 emoji is a heart.
+
+/stage and /album (M4 T8) are the user-facing controls on top of stages.py
+and album.py: /stage shows the current stage and its history, with buttons
+to advance (an optional note, captured by a pending-note interception at
+the top of on_text) or retreat (behind a yes/no confirm); /album is a
+paginated, newest-first keepsake listing with per-entry delete. Both live
+behind their own registration gates (stages_enabled + persona has stages;
+album_enabled) and share a SECOND CallbackQueryHandler
+(on_stage_album_button, pattern=r"^(stg|alb)_") registered ahead of
+on_button in the same PTB group -- see make_app's handler-registration
+comment for why that ordering, not just the pattern, is what keeps
+on_button's own bare CallbackQueryHandler from swallowing these presses.
 """
 from __future__ import annotations
 
@@ -33,7 +45,8 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, ContextTypes, MessageHandler,
                           MessageReactionHandler, filters)
 
-from . import album, archive, chunking, engine, memory_recall, messages, persona, recent_context
+from . import (album, archive, chunking, engine, memory_recall, messages,
+              persona, recent_context, stages)
 from .config import Config, load_config
 from .engine import EngineReply
 from .messages import msg
@@ -55,6 +68,19 @@ _HEART_EMOJIS = frozenset({"❤️", "❤"})
 # lazily enforced on insert -- see _cache_sent's docstring.
 MESSAGE_CACHE_TTL_S = 24 * 3600
 MESSAGE_CACHE_MAX = 500
+
+# make_app's pending_note slot (M4 T8): how long an armed "advance" note
+# prompt (stg_adv) stays fresh before a later text message is treated as
+# ordinary chat again instead of the note. See on_text's interception
+# (checked before the busy gate -- a note mutates no session state) and
+# on_stage_album_button's stg_adv branch, which stamps "since".
+NOTE_TIMEOUT_S = 300
+
+# /album's page size and per-entry label length (M4 T8). Not named in the
+# task's interface list, but pulled out as constants for the same reason
+# the message-cache knobs above are: one obvious place to tune them.
+ALBUM_PAGE_SIZE = 5
+ALBUM_SNIPPET_CHARS = 30
 
 
 def decide_start_buttons(has_session: bool) -> list:
@@ -293,14 +319,151 @@ def _keyboard(keys: list) -> InlineKeyboardMarkup:
                                  for k in keys])
 
 
+def _stage_registration_active(cfg: Config) -> bool:
+    """Whether /stage should exist at all: cfg.stages_enabled AND the active
+    persona actually defines a stage sequence. A persona with no stages.md
+    (or a file-mode persona, which never has one) has nothing to advance or
+    retreat through, so the command has no reason to exist -- mirrors
+    persona.build_system_prompt()'s own "folder mode and persona_obj.stages"
+    gate on building the stage prompt block.
+
+    persona.py exposes no public "just the stages" accessor (current_settings()
+    returns PersonaSettings, which carries lines/thinking but not stages);
+    _cached_folder_persona(cfg) is what build_system_prompt() itself calls
+    internally for exactly this, so reusing it here matches Persona's own
+    load-persona-consistent access pattern verbatim rather than adding a new
+    persona.py accessor (that file is off-limits for this task).
+    """
+    if not cfg.stages_enabled or not cfg.persona_path.is_dir():
+        return False
+    return bool(persona._cached_folder_persona(cfg).stages)
+
+
+def _stage_names(cfg: Config) -> tuple:
+    """This app's persona-defined stage sequence, or () outside folder mode
+    or when the persona has no stages.md. /stage and its callbacks are only
+    ever registered when _stage_registration_active(cfg) was true at
+    make_app time, so in practice this is never empty on those call sites;
+    the empty fallback stays anyway rather than assuming a cached persona
+    can never change shape under a long-running process.
+    """
+    if not cfg.persona_path.is_dir():
+        return ()
+    stage_sections = persona._cached_folder_persona(cfg).stages
+    return tuple(name for name, _ in stage_sections) if stage_sections else ()
+
+
+def _stage_view(cfg: Config, names: tuple) -> tuple:
+    """Render /stage's own view: the current stage plus its road so far
+    (T2's stored history, one line per milestone, note appended in quotes
+    when the milestone was marked with one), and a button row that only
+    ever offers a direction that still exists -- no advance past the last
+    stage, no retreat before the first."""
+    state = stages.load_state(cfg.stage_path)
+    index = stages.resolve_index(state, names)
+    lines = [msg("stage_intro").format(stage=names[index])]
+    for entry in state.get("history") or []:
+        line = f'{entry["date"]} · {entry["stage"]}'
+        if entry.get("note"):
+            line += f' · "{entry["note"]}"'
+        lines.append(line)
+    rows = []
+    if index < len(names) - 1:
+        rows.append([InlineKeyboardButton(msg("btn_stage_advance"), callback_data="stg_adv")])
+    if index > 0:
+        rows.append([InlineKeyboardButton(msg("btn_stage_retreat"), callback_data="stg_ret")])
+    rows.append([InlineKeyboardButton(msg("btn_stage_close"), callback_data="stg_close")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _stage_note_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(msg("btn_note_skip"), callback_data="stg_note_skip")],
+        [InlineKeyboardButton(msg("btn_note_cancel"), callback_data="stg_note_cancel")],
+    ])
+
+
+def _retreat_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(msg("btn_retreat_yes"), callback_data="stg_ret_yes")],
+        [InlineKeyboardButton(msg("btn_retreat_no"), callback_data="stg_ret_no")],
+    ])
+
+
+def _album_page(cfg: Config, page: int) -> tuple:
+    """Newest-first entries for one /album page, clamped into range.
+    Returns (page_entries, resolved_page, total_pages); total_pages is 0
+    (and page_entries always []) exactly when the whole album is empty."""
+    entries = list(reversed(album.all_entries(cfg)))
+    total_pages = (len(entries) + ALBUM_PAGE_SIZE - 1) // ALBUM_PAGE_SIZE
+    if total_pages == 0:
+        return [], 0, 0
+    page = max(0, min(page, total_pages - 1))
+    start = page * ALBUM_PAGE_SIZE
+    return entries[start:start + ALBUM_PAGE_SIZE], page, total_pages
+
+
+def _album_view(cfg: Config, page: int) -> tuple:
+    """Render one /album page: msg("album_empty") with no buttons when
+    nothing has been kept; otherwise the catalog's own album description as
+    a header, one delete button per kept moment (newest first), and a
+    </> nav row whenever there is a previous/next page to reach. Always
+    returns a real (possibly empty) InlineKeyboardMarkup, never None --
+    editing with reply_markup=None would leave Telegram's PREVIOUS markup
+    in place rather than clearing it, which an empty InlineKeyboardMarkup
+    does unambiguously.
+    """
+    page_entries, page, total_pages = _album_page(cfg, page)
+    if not page_entries:
+        return msg("album_empty"), InlineKeyboardMarkup([])
+    rows = []
+    for entry in page_entries:
+        date_label = datetime.fromisoformat(entry["timestamp"]).strftime("%m-%d")
+        snippet = entry["message"]["text"][:ALBUM_SNIPPET_CHARS]
+        rows.append([InlineKeyboardButton(
+            f"[{date_label}] {snippet}",
+            callback_data=f"alb_del:{entry['id']}:{page}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀", callback_data=f"alb_page:{page - 1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("▶", callback_data=f"alb_page:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    return msg("cmd_album_desc"), InlineKeyboardMarkup(rows)
+
+
 async def register_commands(app) -> None:
     """Publish the command menu Telegram shows behind the Menu button.
 
     The menu is cosmetic, so failures are logged and never fatal: PTB awaits
     post_init outside its network retry loop, and an escaping exception here
-    would crash the whole bot at startup."""
+    would crash the whole bot at startup.
+
+    Always publishes start; /stage and /album (M4 T8) join it only when
+    cfg says they should exist at all -- the same _stage_registration_active
+    condition their CommandHandler was registered under, and cfg.album_enabled
+    for /album. cfg travels here through app.bot_data["cfg"] rather than a
+    parameter: this function is handed to ApplicationBuilder().post_init
+    verbatim (make_app passes the bare function, never a cfg-bound wrapper),
+    because a test (test_bot_stream.py's test_post_init_registers_command_menu)
+    pins that the object handed to .post_init(...) IS this exact function
+    object. bot_data is PTB's own per-Application storage, sanctioned for
+    exactly this kind of side channel. Every existing direct-call site
+    (this project's own tests included) hands this a bare app with no
+    bot_data attribute at all, which degrades to the original start-only
+    menu, byte-identical to before M4 T8.
+    """
+    bot_data = getattr(app, "bot_data", None)
+    cfg = bot_data.get("cfg") if isinstance(bot_data, dict) else None
+    commands = [BotCommand("start", msg("cmd_start_desc"))]
+    if cfg is not None:
+        if _stage_registration_active(cfg):
+            commands.append(BotCommand("stage", msg("cmd_stage_desc")))
+        if cfg.album_enabled:
+            commands.append(BotCommand("album", msg("cmd_album_desc")))
     try:
-        await app.bot.set_my_commands([BotCommand("start", msg("cmd_start_desc"))])
+        await app.bot.set_my_commands(commands)
     except Exception:
         logger.warning("could not publish the command menu; continuing without it",
                        exc_info=True)
@@ -318,6 +481,14 @@ def make_app(cfg: Config):
     persona.init(cfg)
     messages.load_overrides(*persona.line_overrides(cfg))
 
+    # M4 T8: whether /stage exists at all this run (stages_enabled AND the
+    # persona actually defines stages). Computed once here rather than
+    # per-update, and reused below for both handler registration and the
+    # command-menu side channel (register_commands reads it back off
+    # app.bot_data["cfg"] -- see that function's own docstring for why cfg
+    # travels that way instead of as a parameter).
+    stage_active = _stage_registration_active(cfg)
+
     # Boot-time backfill: makes a pre-existing archive recallable before the
     # first turn (a fresh install, with no cursor yet, ingests everything).
     memory_recall.init(cfg)
@@ -326,6 +497,14 @@ def make_app(cfg: Config):
     store = SessionStore(cfg.session_path)
     busy = {"active": False}
     cancel_flag = threading.Event()
+
+    # M4 T8: the single pending-note slot armed by stg_adv and consumed by
+    # on_text's interception at the top of that function (before the busy
+    # gate -- a note mutates no session state, so it must work even while a
+    # reply is streaming). "since" is a time.monotonic() timestamp;
+    # NOTE_TIMEOUT_S is the freshness window after which the slot silently
+    # expires and a stray reply falls through to ordinary chat instead.
+    pending_note = {"active": False, "since": 0.0}
 
     # Heart-reaction pipeline (M4 T7): companion message_id -> (text,
     # monotonic send time), so a later heart on it (handle_reaction below)
@@ -350,8 +529,15 @@ def make_app(cfg: Config):
         order is chronological order here: every message_id is unique and
         inserted exactly once, so the dict's own iteration order (Python
         dicts preserve insertion order) already sorts oldest to newest.
+
+        Gated on cfg.album_enabled (M4 T8 fold-in from the T7 review): the
+        cache exists solely so a later heart can resolve back to the text
+        it landed on, and handle_reaction -- its only reader -- is not even
+        registered when the album is off (see make_app's own handler-table
+        gate further down). Filling it in that case would be pure memory
+        waste with no reader ever able to benefit from it.
         """
-        if message is None or not text:
+        if not cfg.album_enabled or message is None or not text:
             return
         now_mono = time.monotonic()
         for stale_id in [mid for mid, (_, ts) in _message_cache.items()
@@ -403,11 +589,123 @@ def make_app(cfg: Config):
         except BadRequest:
             pass  # double-click: content unchanged, Telegram rejects the edit
 
+    async def stage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _authorized(cfg, update):
+            return
+        text, markup = _stage_view(cfg, _stage_names(cfg))
+        await update.message.reply_text(text, reply_markup=markup)
+
+    async def album_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _authorized(cfg, update):
+            return
+        text, markup = _album_view(cfg, 0)
+        await update.message.reply_text(text, reply_markup=markup)
+
+    async def on_stage_album_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """The stg_/alb_ callback family (M4 T8): a second CallbackQueryHandler
+        (pattern=r"^(stg|alb)_"), registered ahead of on_button in the same
+        PTB handler group -- see make_app's handler-registration comment for
+        why the ORDER of those two add_handler calls, not just their
+        existence, is what keeps on_button's own bare CallbackQueryHandler
+        (pattern=None, matches every callback query unconditionally) from
+        also intercepting these presses: PTB dispatches at most one handler
+        per group, in registration order, so whichever narrower matcher
+        comes first wins and on_button never even sees a stg_/alb_ callback.
+        on_button itself is completely untouched -- M1.5's own pin stays
+        exactly as it was.
+
+        One query.answer() per callback, same PTB rule on_button follows.
+        busy only gates the two entry points that ARM a mutation flow
+        (stg_adv, stg_ret) -- mirroring the M1.5 btn_warm/btn_clean
+        precedent (mid-turn stage mutation would tear the running prompt
+        away from the state it was built against) -- not the follow-up
+        confirm/skip/cancel presses, which by construction can only fire
+        once their entry point already got past that gate.
+        """
+        if not _authorized(cfg, update):
+            return
+        query = update.callback_query
+        data = query.data
+        if busy["active"] and data in ("stg_adv", "stg_ret"):
+            await query.answer(msg("busy"))
+            return
+        await query.answer()
+        now = datetime.now().astimezone()
+        names = _stage_names(cfg)
+        try:
+            if data == "stg_adv":
+                pending_note["active"] = True
+                pending_note["since"] = time.monotonic()
+                await query.edit_message_text(msg("stage_note_prompt"),
+                                              reply_markup=_stage_note_keyboard())
+            elif data == "stg_note_skip":
+                if pending_note["active"]:
+                    pending_note["active"] = False
+                    new_stage = stages.advance(cfg.stage_path, names, "", now)
+                    if new_stage is not None:
+                        await query.edit_message_text(
+                            msg("stage_advanced_ack").format(stage=new_stage))
+            elif data == "stg_note_cancel":
+                pending_note["active"] = False
+                text, markup = _stage_view(cfg, names)
+                await query.edit_message_text(text, reply_markup=markup)
+            elif data == "stg_ret":
+                state = stages.load_state(cfg.stage_path)
+                index = stages.resolve_index(state, names)
+                if index == 0:
+                    # Defensive only (the retreat button is hidden at the
+                    # bottom): fall back to the plain view rather than
+                    # wrapping names[-1].
+                    text, markup = _stage_view(cfg, names)
+                    await query.edit_message_text(text, reply_markup=markup)
+                else:
+                    await query.edit_message_text(
+                        msg("stage_retreat_confirm").format(stage=names[index - 1]),
+                        reply_markup=_retreat_confirm_keyboard())
+            elif data == "stg_ret_yes":
+                new_stage = stages.retreat(cfg.stage_path, names, now)
+                if new_stage is not None:
+                    await query.edit_message_text(
+                        msg("stage_retreated_ack").format(stage=new_stage))
+            elif data == "stg_ret_no":
+                text, markup = _stage_view(cfg, names)
+                await query.edit_message_text(text, reply_markup=markup)
+            elif data == "stg_close":
+                text, _unused_markup = _stage_view(cfg, names)
+                await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([]))
+            elif data.startswith("alb_del:"):
+                _prefix, entry_id, page_str = data.split(":", 2)
+                album.remove_by_id(cfg, entry_id)
+                text, markup = _album_view(cfg, int(page_str))
+                await query.edit_message_text(text, reply_markup=markup)
+            elif data.startswith("alb_page:"):
+                _prefix, page_str = data.split(":", 1)
+                text, markup = _album_view(cfg, int(page_str))
+                await query.edit_message_text(text, reply_markup=markup)
+            else:
+                logger.warning("unknown stage/album callback: %r", data)
+        except BadRequest:
+            pass  # double-click: content unchanged, Telegram rejects the edit
+
     async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.text:
             return
         if not _authorized(cfg, update):
             return
+        if pending_note["active"]:
+            if time.monotonic() - pending_note["since"] <= NOTE_TIMEOUT_S:
+                pending_note["active"] = False
+                now = datetime.now().astimezone()
+                new_stage = stages.advance(cfg.stage_path, _stage_names(cfg),
+                                           update.message.text, now)
+                await update.message.reply_text(msg("note_saved_ack"))
+                if new_stage is not None:
+                    await update.message.reply_text(
+                        msg("stage_advanced_ack").format(stage=new_stage))
+                return
+            # Stale: the slot silently expires and this message falls
+            # through to ordinary chat below, exactly like any other text.
+            pending_note["active"] = False
         if busy["active"]:
             await update.message.reply_text(msg("busy"))
             return
@@ -527,8 +825,25 @@ def make_app(cfg: Config):
     app = (ApplicationBuilder().token(cfg.bot_token)
            .concurrent_updates(cfg.streaming_enabled)
            .post_init(register_commands).build())
+    # register_commands is passed above by bare reference (a test pins that
+    # exact identity -- see its own docstring); cfg reaches it at call time
+    # through this side channel instead of a parameter.
+    app.bot_data["cfg"] = cfg
     app.add_handler(CommandHandler("start", start_cmd))
+    if stage_active or cfg.album_enabled:
+        # M4 T8: added ahead of on_button (next line) so PTB's one-handler-
+        # per-group dispatch tries this narrower pattern match FIRST --
+        # on_button's own bare CallbackQueryHandler (pattern=None) matches
+        # every callback query unconditionally and, registered first, would
+        # otherwise swallow every stg_/alb_ press before this ever ran. See
+        # on_stage_album_button's own docstring for the full reasoning.
+        app.add_handler(CallbackQueryHandler(on_stage_album_button,
+                                             pattern=r"^(stg|alb)_"))
     app.add_handler(CallbackQueryHandler(on_button))
+    if stage_active:
+        app.add_handler(CommandHandler("stage", stage_cmd))
+    if cfg.album_enabled:
+        app.add_handler(CommandHandler("album", album_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     if cfg.album_enabled:
         # Defense in depth with album.py's own write-time gate: flag off
