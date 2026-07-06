@@ -254,11 +254,21 @@ async def _consume_react(cfg: Config, update: Update, emoji: str | None,
     hand; no cache lookup belongs here (contrast handle_reaction below,
     which reacts to a message of the bot's OWN sending and has only a
     message_id to recover the text from). Both reply paths call this with
-    whatever emoji they captured: produce_reply's on_react sink for the
-    non-streaming path, display.reaction_emoji directly for the streaming
-    one.
+    whatever emoji they captured -- on SUCCESSFUL turns only (produce_reply's
+    on_react sink for the non-streaming path, which its failure path never
+    fills; display.reaction_emoji behind on_text's reply.ok gate for the
+    streaming one): a reaction is a success gesture, and one landing next
+    to an error notice would read as him keeping the moment his reply died
+    on.
+
+    Gated on cfg.album_enabled at the top, covering every call site at
+    once: a visible reaction on her message is user-facing feature
+    behavior, so flag off must discard the captured emoji exactly as T6
+    left it -- byte-equivalent to the pre-feature baseline (the L1
+    rollback), the same contract the handler table and album.py's own
+    write gate already honor.
     """
-    if not emoji:
+    if not cfg.album_enabled or not emoji:
         return
     try:
         await update.message.set_reaction([ReactionTypeEmoji(emoji)])
@@ -454,8 +464,14 @@ def make_app(cfg: Config):
                     msg(reply.error_kind or "generic_glitch"))
             if reply.ok and store.detect_bloat(cfg, reply.session_id):
                 await update.message.reply_text(msg("notebook_full"))
-            await _consume_react(cfg, update, display.reaction_emoji,
-                                datetime.now().astimezone())
+            if reply.ok:
+                # Mirror of the non-streaming gate (produce_reply's failure
+                # path early-returns before its on_react sink ever fires):
+                # a reaction is a success gesture, so a stream that died
+                # mid-reply after emitting a tag must not heart+flag her
+                # message right next to the error notice above.
+                await _consume_react(cfg, update, display.reaction_emoji,
+                                     datetime.now().astimezone())
         except Exception:
             logger.error("reply pipeline failed unexpectedly", exc_info=True)
             try:
@@ -481,9 +497,9 @@ def make_app(cfg: Config):
         reaction = update.message_reaction
         if reaction is None:
             return
-        # reaction.user is None on some reaction-count-only updates; this
-        # handler only ever sees MESSAGE_REACTION_UPDATED ones (the default
-        # message_reaction_types), but a missing user must still resolve to
+        # reaction.user can be None even on the user-attributed updates the
+        # registration below asks for: an anonymous reactor arrives with
+        # actor_chat set instead of user. A missing user must resolve to
         # "not the authorized partner" rather than raise.
         user_id = reaction.user.id if reaction.user else 0
         if user_id != cfg.authorized_user_id:
@@ -519,7 +535,14 @@ def make_app(cfg: Config):
         # means this handler does not even exist, matching _allowed_updates
         # never asking Telegram for reaction updates in the first place --
         # byte-identical to M3's handler table at the registration level.
-        app.add_handler(MessageReactionHandler(handle_reaction))
+        # message_reaction_types is explicit because PTB's default is
+        # MESSAGE_REACTION -- BOTH user-attributed reaction updates and
+        # anonymous count updates -- and this handler only understands the
+        # former; asking for exactly that beats leaning on the
+        # update.message_reaction None-guard inside the handler.
+        app.add_handler(MessageReactionHandler(
+            handle_reaction,
+            message_reaction_types=MessageReactionHandler.MESSAGE_REACTION_UPDATED))
     return app
 
 

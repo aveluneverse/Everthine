@@ -27,17 +27,21 @@ on_text always calls produce_reply with the module-level default
 (engine_mod=engine), so that is the only seam available to a caller that
 never gets to pick produce_reply's kwargs.
 
-Every scenario here runs with streaming_enabled=False: the reaction
+Most scenarios here run with streaming_enabled=False: the reaction
 pipeline's cache-fill and consumption steps are identical in spirit on
 both reply paths (see bot.py's on_text), and the non-streaming path is
-far simpler to drive with hand-written fakes (no StreamingDisplay, no
-worker thread). stream_reply's own sent_sink plumbing gets one direct,
-narrow test of its own further down, using the ScriptedEngine/FakeDisplay
-harness tests/test_bot_stream.py established -- it exists to pin a subtle
-trap: telegram.Message.edit_text() returns a NEW Message rather than
-mutating the one it was called on, so a streamed reply's placeholder
-object never reflects its own final text; on_text must cache the text it
-already knows from display.message_texts, never message.text.
+far simpler to drive with hand-written fakes. The streaming branch is
+covered end-to-end too (TestStreamingPathReactionWiring, plus the
+streaming halves of TestReactionConsumptionGates): the REAL on_text
+streaming path over a REAL StreamingDisplay, with only engine.stream_once
+scripted (via _drive_stream on the base class) and Telegram represented
+by FakeMessage objects whose edit_text mirrors PTB's semantics of
+returning a NEW Message rather than mutating the one it was called on.
+On top of those, stream_reply's sent_sink plumbing keeps one direct,
+narrow test of its own further down, pinning the trap that semantics
+implies: a streamed reply's placeholder object never reflects its own
+final text, so on_text must cache the text it already knows from
+display.message_texts, never message.text.
 """
 import asyncio
 import itertools
@@ -48,7 +52,8 @@ from unittest import mock
 
 from telegram import ReactionTypeEmoji
 from telegram.error import BadRequest
-from telegram.ext import MessageHandler, MessageReactionHandler
+from telegram.ext import (CallbackQueryHandler, CommandHandler,
+                          MessageHandler, MessageReactionHandler)
 
 from everthine import album, bot, engine, memory_embed, memory_recall, messages, persona
 from everthine.config import Config
@@ -84,10 +89,11 @@ class FakeChat:
 
 
 class FakeMessage:
-    """Minimal telegram.Message stand-in: enough surface for on_text's
-    non-streaming path (text, message_id, reply_text) and reaction
-    consumption (set_reaction) to run against. Auto-assigned message_ids
-    are unique per instance, mirroring real Telegram message_ids."""
+    """Minimal telegram.Message stand-in: enough surface for both of
+    on_text's branches (text, message_id, reply_text, edit_text) and for
+    reaction consumption (set_reaction) to run against. Auto-assigned
+    message_ids are unique per instance, mirroring real Telegram
+    message_ids."""
     _counter = itertools.count(9001)
 
     def __init__(self, text, message_id=None, set_reaction_error=None):
@@ -97,11 +103,20 @@ class FakeMessage:
         self.set_reaction_error = set_reaction_error
         self.reactions_set: list = []
         self.replies: list = []
+        self.edits: list = []
 
     async def reply_text(self, text, parse_mode=None, reply_markup=None):
         reply = FakeMessage(text)
         self.replies.append(reply)
         return reply
+
+    async def edit_text(self, text, parse_mode=None, reply_markup=None):
+        # Mirrors real PTB semantics: an edit returns a NEW Message and
+        # never mutates this object's .text -- the immutability trap the
+        # cache design documents. Edits are recorded for assertions;
+        # edits[-1] is what a real Telegram client would be displaying.
+        self.edits.append(text)
+        return FakeMessage(text, message_id=self.message_id)
 
     async def set_reaction(self, reaction, is_big=None):
         if self.set_reaction_error is not None:
@@ -157,6 +172,24 @@ class FakeContext:
         self.bot = FakeBot()
 
 
+class ScriptedEngine:
+    """stream_once stand-in: pushes a scripted event list onto the queue --
+    mirrors tests/test_bot_stream.py's helper of the same name."""
+    def __init__(self, script):
+        self.script = script
+
+    def stream_once(self, cfg, prompt, session_id=None, system_prompt=None,
+                    events=None, cancel=None):
+        for event in self.script:
+            events.put(event)
+
+
+def ok_script(text_chunks, session_id="sess-stream"):
+    full = "".join(text_chunks)
+    return [{"type": "text", "text": c} for c in text_chunks] + [
+        {"type": "done", "reply": EngineReply(full, session_id, ok=True)}]
+
+
 class _AlbumWiringTestCase(unittest.TestCase):
     """Base for every scenario below: a tmp dir plus the full set of
     process-global resets a make_app call can touch. Registration order
@@ -206,6 +239,24 @@ class _AlbumWiringTestCase(unittest.TestCase):
             asyncio.run(on_text(update, FakeContext()))
         sent = her_message.replies[0]
         return app, handle_reaction, sent
+
+    def _drive_stream(self, cfg, script, text="her words"):
+        """Drive one REAL streamed turn through the REAL on_text closure:
+        make_app builds the app, engine.stream_once is the only thing
+        scripted (the module-attribute seam, since on_text's stream_reply
+        call uses the module-level engine default), and a real
+        StreamingDisplay runs over FakeMessage objects. cfg must have
+        streaming_enabled=True. Returns (app, her_message); the
+        placeholder the display edited is her_message.replies[0], and any
+        split continuations follow it in the same list."""
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her_message = FakeMessage(text)
+        update = FakeUpdate(her_message)
+        with mock.patch.object(engine, "stream_once",
+                               ScriptedEngine(script).stream_once):
+            asyncio.run(on_text(update, FakeContext()))
+        return app, her_message
 
 
 # --- His side: the captured [react:emoji] tag sets a reaction, and a heart
@@ -358,6 +409,137 @@ class TestPartnerHeartReactions(_AlbumWiringTestCase):
         self.assertEqual(context.bot.sent_messages, [])
 
 
+# --- Consumption gates (fix round 1). Two invariants the first cut of T7
+#     broke:
+#     (1) ALBUM_ENABLED=false must be byte-equivalent to the pre-feature
+#         baseline -- the L1 rollback. A visible Telegram reaction set on
+#         her message while the flag is off IS user-facing feature
+#         behavior, no matter that the album write itself was gated; when
+#         off, the captured emoji must be discarded exactly as T6 left it.
+#     (2) A reaction is a success gesture. The non-streaming path is
+#         success-only by construction (produce_reply's failure path
+#         early-returns before the on_react sink fires), but the streaming
+#         path consumed display.reaction_emoji whenever the turn was not
+#         cancelled -- a mid-stream engine death after emitting a tag
+#         would heart+flag her message right next to an error notice. ----
+
+class TestReactionConsumptionGates(_AlbumWiringTestCase):
+    def test_album_flag_off_discards_captured_emoji_non_stream(self):
+        cfg = self._cfg(album_enabled=False)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her_message = FakeMessage("a quiet evening in")
+        update = FakeUpdate(her_message)
+
+        with mock.patch.object(
+                engine, "run_once",
+                return_value=EngineReply("[react:❤️] kept forever",
+                                         "sess-off", ok=True)):
+            asyncio.run(on_text(update, FakeContext()))
+
+        # Flag off == pre-feature baseline: no visible reaction, no album
+        # write, and the reply itself still lands tag-stripped (the strip
+        # is T6 behavior, active regardless of the album flag).
+        self.assertEqual(her_message.reactions_set, [])
+        self.assertEqual(album.all_entries(cfg), [])
+        self.assertEqual(her_message.replies[0].text, "kept forever")
+
+    def test_album_flag_off_discards_captured_emoji_streaming(self):
+        cfg = self._cfg(album_enabled=False, streaming_enabled=True)
+        app, her_message = self._drive_stream(
+            cfg, ok_script(["[react:❤️] kept forever."]))
+
+        self.assertEqual(her_message.reactions_set, [])
+        self.assertEqual(album.all_entries(cfg), [])
+        # The streamed reply still landed tag-stripped in the placeholder.
+        placeholder = her_message.replies[0]
+        self.assertEqual(placeholder.edits[-1], "kept forever.")
+
+    def test_failed_stream_with_tag_sets_no_reaction_and_no_flag(self):
+        cfg = self._cfg(streaming_enabled=True)
+        script = [
+            {"type": "text", "text": "[react:❤️] partial thought"},
+            {"type": "done",
+             "reply": EngineReply("[react:❤️] partial thought", None,
+                                  ok=False, error_kind="nonzero")},
+        ]
+        app, her_message = self._drive_stream(cfg, script, text="are you ok?")
+
+        # The tag was captured (display strips it either way), but the turn
+        # FAILED: no reaction lands on her message and nothing enters the
+        # album -- a heart next to an error notice would read as him
+        # keeping the moment his reply died on.
+        self.assertEqual(her_message.reactions_set, [])
+        self.assertEqual(album.all_entries(cfg), [])
+        # The failure path itself is unchanged: partial text kept in the
+        # placeholder, then the error notice as a fresh message.
+        placeholder = her_message.replies[0]
+        self.assertEqual(placeholder.edits[-1], "partial thought")
+        self.assertEqual(her_message.replies[1].text, messages.msg("nonzero"))
+
+
+# --- Streaming path end-to-end (fix round 1): the REAL on_text streaming
+#     branch -- real StreamingDisplay, real sent_sink -> cache fill, real
+#     consumption -- with only engine.stream_once scripted. ---------------
+
+class TestStreamingPathReactionWiring(_AlbumWiringTestCase):
+    def test_streamed_heart_tag_sets_reaction_and_flags_her_message(self):
+        cfg = self._cfg(streaming_enabled=True)
+        app, her_message = self._drive_stream(
+            cfg, ok_script(["[react:❤️] warm and here."]),
+            text="I kept your note")
+
+        self.assertEqual(her_message.reactions_set,
+                         [[ReactionTypeEmoji("❤️")]])
+        entries = album.all_entries(cfg)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["direction"], "companion_flagged")
+        self.assertEqual(entries[0]["message"],
+                         {"speaker": "user", "text": "I kept your note"})
+        self.assertEqual(entries[0]["message_id"], her_message.message_id)
+        # The visible reply was tag-free.
+        placeholder = her_message.replies[0]
+        self.assertEqual(placeholder.edits[-1], "warm and here.")
+
+    def test_streamed_multi_message_turn_seeds_cache_for_partner_hearts(self):
+        cfg = self._cfg(streaming_enabled=True)
+        # Long enough to force StreamingDisplay's split-and-continue: the
+        # turn lands as TWO messages (the edited placeholder + a fresh
+        # continuation), and BOTH must be heartable afterwards.
+        long_text = "A steady line we said together. " * 130  # ~4160 chars
+        app, her_message = self._drive_stream(cfg, ok_script([long_text]))
+        handle_reaction = _handler(app, MessageReactionHandler)
+
+        placeholder, continuation = her_message.replies[0], her_message.replies[1]
+
+        for target in (placeholder, continuation):
+            reaction_update = FakeReactionUpdate(
+                user_id=1, chat_id=1, message_id=target.message_id,
+                old_emojis=[], new_emojis=["❤️"])
+            context = FakeContext()
+            asyncio.run(handle_reaction(reaction_update, context))
+            # Cache hit, both times: silent keep, never album_expired.
+            self.assertEqual(context.bot.sent_messages, [])
+
+        entries = album.all_entries(cfg)
+        self.assertEqual(len(entries), 2)
+        texts = {e["message_id"]: e["message"]["text"] for e in entries}
+        for e in entries:
+            self.assertEqual(e["direction"], "partner_flagged")
+            self.assertEqual(e["message"]["speaker"], "companion")
+        # Each entry carries the text that message was DISPLAYING: the
+        # placeholder's final edit, and the continuation's sent content --
+        # and the two halves reassemble the full streamed reply exactly.
+        self.assertEqual(texts[placeholder.message_id], placeholder.edits[-1])
+        self.assertEqual(texts[continuation.message_id], continuation.text)
+        self.assertEqual(texts[placeholder.message_id]
+                         + texts[continuation.message_id], long_text)
+        # And the immutability trap, pinned end-to-end: the placeholder
+        # object's own .text is still the thinking line, so the cache
+        # demonstrably stored display.message_texts, not message.text.
+        self.assertNotEqual(texts[placeholder.message_id], placeholder.text)
+
+
 # --- _message_cache's own lazy pruning: MESSAGE_CACHE_TTL_S and
 #     MESSAGE_CACHE_MAX are named exactly in the spec, so both get a direct
 #     test rather than resting on the cache-miss coverage above (which
@@ -437,8 +619,12 @@ class TestAlbumFlagGating(_AlbumWiringTestCase):
     def test_album_flag_off_no_reaction_handler_registered(self):
         cfg = self._cfg(album_enabled=False)
         app = bot.make_app(cfg)
-        self.assertFalse(any(isinstance(h, MessageReactionHandler)
-                             for h in app.handlers[0]))
+        # Byte-equivalence with M3's handler table, pinned exactly: the
+        # same single default group, the same three handlers in the same
+        # order, and nothing else -- not merely "no reaction handler".
+        self.assertEqual(list(app.handlers.keys()), [0])
+        self.assertEqual([type(h) for h in app.handlers[0]],
+                         [CommandHandler, CallbackQueryHandler, MessageHandler])
 
     def test_allowed_updates_include_reaction_only_when_album_on(self):
         cfg_on = self._cfg(album_enabled=True)
@@ -491,24 +677,6 @@ class FakeSentDisplay:
 
     async def cancel(self):
         return []
-
-
-class ScriptedEngine:
-    """stream_once stand-in: pushes a scripted event list onto the queue --
-    mirrors tests/test_bot_stream.py's helper of the same name."""
-    def __init__(self, script):
-        self.script = script
-
-    def stream_once(self, cfg, prompt, session_id=None, system_prompt=None,
-                    events=None, cancel=None):
-        for event in self.script:
-            events.put(event)
-
-
-def ok_script(text_chunks, session_id="sess-stream"):
-    full = "".join(text_chunks)
-    return [{"type": "text", "text": c} for c in text_chunks] + [
-        {"type": "done", "reply": EngineReply(full, session_id, ok=True)}]
 
 
 class TestStreamReplySentSink(unittest.IsolatedAsyncioTestCase):
