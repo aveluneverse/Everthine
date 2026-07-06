@@ -26,6 +26,11 @@ class FakeEngineFail:
         return EngineReply("", session_id, ok=False, error_kind="timeout")
 
 
+class FakeEngineReact:
+    def run_once(self, cfg, prompt, session_id=None, system_prompt=None):
+        return EngineReply("[react:❤️] warm", "sess-react", ok=True)
+
+
 class TestProduceReply(unittest.TestCase):
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
@@ -63,6 +68,27 @@ class TestProduceReply(unittest.TestCase):
         self.assertEqual(len(chunks), 1)
         self.assertNotEqual(chunks[0].strip(), "")
         self.assertIsNone(self.store.load()["session_id"])
+
+    def test_archives_stripped_text_when_reply_has_react_tag(self):
+        # A tag in the archive would flow into M3's memory index as literal
+        # content, so the archive must always see the cleaned text.
+        chunks = bot.produce_reply(self.cfg, self.store, "hi", now=NOW,
+                                   engine_mod=FakeEngineReact())
+        self.assertEqual(chunks, ["warm"])
+        texts = [e["text"] for e in archive.iter_entries(self.cfg.archive_dir)]
+        self.assertIn("warm", texts)
+        for t in texts:
+            self.assertNotIn("[react:", t)
+
+
+class TestExtractReact(unittest.TestCase):
+    def test_extracts_and_strips(self):
+        emoji, text = bot._extract_react("[react:❤️] kept words")
+        self.assertEqual(emoji, "❤️")
+        self.assertEqual(text, "kept words")
+
+    def test_plain_text_untouched(self):
+        self.assertEqual(bot._extract_react("hello"), (None, "hello"))
 
 
 class TestHelpers(unittest.TestCase):

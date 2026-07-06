@@ -47,6 +47,65 @@ def make_display():
     return d, msg0, sender
 
 
+class TestReactTag(unittest.TestCase):
+    async def _display_after(self, *chunks):
+        d, _, _ = make_display()
+        for c in chunks:
+            await d.append(c)
+        return d
+
+    def test_tag_captured_and_stripped(self):
+        d = asyncio.run(self._display_after("[react:❤️] hello there"))
+        self.assertEqual(d.reaction_emoji, "❤️")
+        self.assertEqual(d.full_text, "hello there")
+
+    def test_tag_split_across_chunks_within_window(self):
+        d = asyncio.run(self._display_after("[rea", "ct:\U0001f525] warm words"))
+        self.assertEqual(d.reaction_emoji, "\U0001f525")
+        self.assertEqual(d.full_text, "warm words")
+
+    def test_oversized_first_chunk_still_caught(self):
+        # 7/4 lesson: the window test must use the length BEFORE the chunk
+        # arrived, or a first chunk larger than the window slips through.
+        d = asyncio.run(self._display_after("[react:❤️] " + "x" * 500))
+        self.assertEqual(d.reaction_emoji, "❤️")
+        self.assertNotIn("[react:", d.full_text)
+
+    def test_mid_text_react_is_not_a_tag(self):
+        d = asyncio.run(self._display_after("I will [react:❤️] later"))
+        self.assertIsNone(d.reaction_emoji)
+        self.assertIn("[react:❤️]", d.full_text)
+
+    def test_no_tag_no_capture(self):
+        d = asyncio.run(self._display_after("plain reply"))
+        self.assertIsNone(d.reaction_emoji)
+
+    def test_finalize_flushes_undecided_head(self):
+        # A cancelled/finalized display mid-buffer must not lose the head:
+        # whatever is still undecided when the stream ends can never
+        # complete a tag, so it must flush through unstripped.
+        async def run():
+            d, _, _ = make_display()
+            await d.append("[rea")
+            await d.finalize()
+            return d
+
+        d = asyncio.run(run())
+        self.assertIsNone(d.reaction_emoji)
+        self.assertEqual(d.full_text, "[rea")
+
+    def test_cancel_flushes_undecided_head(self):
+        async def run():
+            d, _, _ = make_display()
+            await d.append("[rea")
+            await d.cancel()
+            return d
+
+        d = asyncio.run(run())
+        self.assertIsNone(d.reaction_emoji)
+        self.assertEqual(d.full_text, "[rea")
+
+
 class TestPureHelpers(unittest.TestCase):
     def test_sentence_boundary(self):
         self.assertTrue(has_sentence_boundary("Done. Next"))

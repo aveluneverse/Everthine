@@ -28,6 +28,15 @@ _DEFAULT_EDIT_INTERVAL = 1.0
 _FLOOD_EDIT_INTERVAL = 2.0
 _FORCE_EDIT_TIMEOUT = 3.0
 
+# A leading [react:emoji] tag the companion may emit, captured and stripped
+# before the text ever reaches the visible message or full_text. The
+# bracket and leading whitespace are both optional; the emoji token is any
+# run of non-"]"/non-whitespace characters. bot.py imports this constant so
+# the non-streaming path shares the exact same rule (single source of truth).
+REACT_TAG = re.compile(r"^\s*\[?react:([^\]\s]+)\]?\s*", re.IGNORECASE)
+REACT_CHECK_LIMIT = 30
+_REACT_LITERAL = "react:"
+
 
 def has_sentence_boundary(text: str) -> bool:
     return bool(_SENTENCE_BOUNDARY.search(text))
@@ -70,6 +79,21 @@ def cancel_markup() -> InlineKeyboardMarkup:
     ]])
 
 
+def _react_prefix_possible(head: str) -> bool:
+    """True while `head` (leading whitespace and at most one leading "["
+    stripped) is still a prefix of the literal "react:" -- i.e. a tag is
+    still conceivable if more text arrives. Once the literal is complete
+    plus one emoji character, REACT_TAG.match() already succeeds on its own
+    (the closing "]" and trailing space are optional), so this only has to
+    arbitrate the still-typing-the-literal phase. Comparing against an
+    equal-length slice of the literal also rejects, with no extra case, a
+    candidate that has already run longer than the literal itself."""
+    candidate = head.lstrip()
+    if candidate.startswith("["):
+        candidate = candidate[1:]
+    return candidate.lower() == _REACT_LITERAL[:len(candidate)]
+
+
 class StreamingDisplay:
     """Drives one progressively-edited reply.
 
@@ -90,21 +114,59 @@ class StreamingDisplay:
         self._is_first_update = True
         self._edit_interval = _DEFAULT_EDIT_INTERVAL
         self._markdown_ok = True
+        # Leading-tag capture state: undecided until a match, a ruled-out
+        # head, or the window closes (see append()).
+        self._reaction_emoji = None
+        self._react_decided = False
+        self._react_head = ""
 
     @property
     def full_text(self) -> str:
         return self._full_text
 
     @property
+    def reaction_emoji(self) -> str | None:
+        return self._reaction_emoji
+
+    @property
     def message_texts(self) -> list:
         return self._message_texts
 
     async def append(self, chunk: str) -> None:
-        self._full_text += chunk
-        self._current_buffer += chunk
-        await self._maybe_edit()
+        if self._react_decided:
+            await self._ingest(chunk)
+            return
+
+        prev_len = len(self._full_text)
+        # 7/4 lesson: the detection window is judged by the length already
+        # committed to full_text BEFORE this chunk arrives, never by the
+        # length after merging it in -- gating on the post-append length
+        # would let a single oversized first chunk look like it is already
+        # past the window, skip the tag check entirely, and leak the raw
+        # "[react:...]" text straight onto the user's screen.
+        if prev_len >= REACT_CHECK_LIMIT:
+            self._react_decided = True
+            await self._ingest(chunk)
+            return
+
+        self._react_head += chunk
+        match = REACT_TAG.match(self._react_head)
+        if match:
+            self._reaction_emoji = match.group(1)
+            remainder = self._react_head[match.end():]
+        elif (len(self._react_head) >= REACT_CHECK_LIMIT
+                or not _react_prefix_possible(self._react_head)):
+            remainder = self._react_head
+        else:
+            return  # still undecided; hold the head for the next chunk
+
+        self._react_decided = True
+        self._react_head = ""
+        if remainder:
+            await self._ingest(remainder)
 
     async def finalize(self) -> list:
+        await self._flush_pending_react_head()
         if len(self._current_buffer) > self._displayed_len:
             await self._do_edit()
         if self._current_buffer:
@@ -115,6 +177,7 @@ class StreamingDisplay:
         return self._messages
 
     async def cancel(self) -> list:
+        await self._flush_pending_react_head()
         if self._is_first_update:
             try:
                 await self._current_msg.delete()
@@ -130,6 +193,21 @@ class StreamingDisplay:
         return self._messages
 
     # ─── internals ─────────────────────────────────────────────────
+
+    async def _ingest(self, chunk: str) -> None:
+        self._full_text += chunk
+        self._current_buffer += chunk
+        await self._maybe_edit()
+
+    async def _flush_pending_react_head(self) -> None:
+        """finalize()/cancel() must not silently drop a still-buffered head:
+        whatever is undecided when the stream ends can never complete a
+        tag, so it flushes through unstripped, exactly like a ruled-out
+        head."""
+        if not self._react_decided and self._react_head:
+            self._react_decided = True
+            head, self._react_head = self._react_head, ""
+            await self._ingest(head)
 
     async def _maybe_edit(self) -> None:
         new_text = self._current_buffer[self._displayed_len:]

@@ -27,7 +27,7 @@ from .config import Config, load_config
 from .engine import EngineReply
 from .messages import msg
 from .session_store import SessionStore
-from .streaming_display import StreamingDisplay, cancel_markup
+from .streaming_display import REACT_TAG, StreamingDisplay, cancel_markup
 
 logger = logging.getLogger("everthine")
 
@@ -64,6 +64,20 @@ def prepare_exchange(cfg: Config, store: SessionStore, text: str, now) -> tuple:
     return recent_context.prepend(block, text), data, memory_block
 
 
+def _extract_react(text: str) -> tuple[str | None, str]:
+    """Strip a leading [react:emoji] tag, if present: returns (emoji, text).
+
+    Non-streaming twin of StreamingDisplay's chunk-buffered detection -- the
+    whole reply is already in hand here, so no windowing is needed, just one
+    match against the same REACT_TAG (single source of truth, imported from
+    streaming_display) that the stream path uses.
+    """
+    match = REACT_TAG.match(text)
+    if not match:
+        return None, text
+    return match.group(1), text[match.end():]
+
+
 def produce_reply(cfg: Config, store: SessionStore, text: str,
                   now: datetime | None = None, engine_mod=engine) -> list:
     now = now or datetime.now().astimezone()
@@ -75,15 +89,20 @@ def produce_reply(cfg: Config, store: SessionStore, text: str,
     if not reply.ok:
         return [msg(reply.error_kind or "generic_glitch")]
 
+    emoji, cleaned = _extract_react(reply.text)
+    # reaction consumption lands in the next task
+
     store.stamp_session_started(reply.session_id, now)
-    if cfg.archive_enabled and reply.text:
-        archive.write_entry(cfg.archive_dir, "companion", reply.text, ts=now)
+    if cfg.archive_enabled and cleaned:
+        # A tag surviving into the archive would flow into M3's memory
+        # index as literal content, so the archive always sees cleaned text.
+        archive.write_entry(cfg.archive_dir, "companion", cleaned, ts=now)
     # After-reply: the turn just archived becomes memory once its
     # conversation closes. Fail-soft by contract; never runs on the error
     # path above (an early return already skipped it).
     memory_recall.sync(cfg, now)
 
-    out = chunking.split_message(reply.text)
+    out = chunking.split_message(cleaned)
     if store.detect_bloat(cfg, reply.session_id):
         out.append(msg("notebook_full"))
     return out or [msg("generic_glitch")]
@@ -157,6 +176,11 @@ async def stream_reply(cfg: Config, store: SessionStore, text: str,
     if reply.ok:
         store.stamp_session_started(reply.session_id, now)
         if cfg.archive_enabled and display.full_text:
+            # display.full_text is already tag-free -- StreamingDisplay
+            # strips a leading [react:emoji] before it ever reaches
+            # full_text, so no second strip belongs here. A tag surviving
+            # into the archive would flow into M3's memory index as literal
+            # content, which is exactly what that guarantee prevents.
             archive.write_entry(cfg.archive_dir, "companion",
                                 display.full_text, ts=now)
         # After-reply sync, off-loop (mirrors produce_reply; see its comment).
