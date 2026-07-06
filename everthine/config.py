@@ -65,6 +65,8 @@ class Config:
     memory_enabled: bool = True
     memory_top_k: int = 3
     memory_embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    stages_enabled: bool = True
+    album_enabled: bool = True
 
     @property
     def engine_home(self) -> Path:
@@ -81,6 +83,14 @@ class Config:
     @property
     def memory_db_path(self) -> Path:
         return self.data_dir / "memory.db"
+
+    @property
+    def stage_path(self) -> Path:
+        return self.data_dir / "stage.json"
+
+    @property
+    def album_path(self) -> Path:
+        return self.data_dir / "album.json"
 
 
 def load_config(env: Mapping | None = None) -> Config:
@@ -129,4 +139,6 @@ def load_config(env: Mapping | None = None) -> Config:
         memory_enabled=_get_bool(env, "MEMORY_ENABLED", True),
         memory_top_k=_get_positive_int(env, "MEMORY_TOP_K", 3),
         memory_embedding_model=str(env.get("MEMORY_EMBEDDING_MODEL", "")).strip() or "BAAI/bge-small-zh-v1.5",
+        stages_enabled=_get_bool(env, "STAGES_ENABLED", True),
+        album_enabled=_get_bool(env, "ALBUM_ENABLED", True),
     )

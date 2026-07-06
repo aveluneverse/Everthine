@@ -116,5 +116,25 @@ class TestConfig(unittest.TestCase):
                 self.assertIn(var, text)
 
 
+class TestStageAlbumKnobs(unittest.TestCase):
+    def test_defaults(self):
+        cfg = load_config(BASE)
+        self.assertTrue(cfg.stages_enabled)
+        self.assertTrue(cfg.album_enabled)
+
+    def test_paths_derive_from_data_dir(self):
+        cfg = load_config({**BASE, "DATA_DIR": "elsewhere"})
+        self.assertEqual(cfg.stage_path, Path("elsewhere") / "stage.json")
+        self.assertEqual(cfg.album_path, Path("elsewhere") / "album.json")
+
+    def test_flags_parse_and_validate(self):
+        cfg = load_config({**BASE, "STAGES_ENABLED": "false",
+                           "ALBUM_ENABLED": "0"})
+        self.assertFalse(cfg.stages_enabled)
+        self.assertFalse(cfg.album_enabled)
+        with self.assertRaises(ConfigError):
+            load_config({**BASE, "STAGES_ENABLED": "maybe"})
+
+
 if __name__ == "__main__":
     unittest.main()

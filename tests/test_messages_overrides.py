@@ -145,5 +145,46 @@ class TestUnknownKeyFallsBack(_OverrideResetTest):
         self.assertEqual(messages.msg("no-such-key"), messages.msg("generic_glitch"))
 
 
+# --- 8. M4 stage/album keys: all 17 pinned verbatim, placeholders usable ---
+
+class TestStageAlbumKeys(unittest.TestCase):
+    def test_new_keys_exist_with_exact_values(self):
+        self.assertEqual(messages.msg("cmd_stage_desc"), "Where the two of you are")
+        self.assertEqual(messages.msg("cmd_album_desc"), "Moments you both kept")
+        self.assertEqual(messages.msg("stage_intro"), "You are here: {stage}")
+        self.assertEqual(messages.msg("btn_stage_advance"), "Take a step forward")
+        self.assertEqual(messages.msg("btn_stage_retreat"), "Step back one stage")
+        self.assertEqual(messages.msg("btn_stage_close"), "Close")
+        self.assertEqual(messages.msg("stage_note_prompt"),
+                         "A word to mark this step? Reply with one line, or skip.")
+        self.assertEqual(messages.msg("btn_note_skip"), "Skip the note")
+        self.assertEqual(messages.msg("btn_note_cancel"), "Cancel this step")
+        self.assertEqual(messages.msg("stage_advanced_ack"), "You are now at: {stage}")
+        self.assertEqual(messages.msg("note_saved_ack"), "Kept, word for word.")
+        self.assertEqual(messages.msg("stage_retreat_confirm"), 'Step back to "{stage}"?')
+        self.assertEqual(messages.msg("btn_retreat_yes"), "Yes, step back")
+        self.assertEqual(messages.msg("btn_retreat_no"), "Stay here")
+        self.assertEqual(messages.msg("stage_retreated_ack"), "Back at: {stage}")
+        self.assertEqual(messages.msg("album_expired"),
+                         "That message is too old for me to reach now - it was not kept.")
+        self.assertEqual(messages.msg("album_empty"),
+                         "Nothing kept yet. React with a heart to keep a moment.")
+
+    def test_placeholder_keys_contain_and_format_stage(self):
+        # Catalog's first placeholder keys: pin that "{stage}" survives
+        # verbatim in the default AND that str.format() actually works on it
+        # (a stray brace or typo'd field name would pass the exact-value
+        # check above but blow up at call time).
+        for key in ("stage_intro", "stage_advanced_ack",
+                    "stage_retreat_confirm", "stage_retreated_ack"):
+            with self.subTest(key=key):
+                self.assertIn("{stage}", messages.msg(key))
+                formatted = messages.msg(key).format(stage="X")
+                self.assertNotIn("{stage}", formatted)
+                self.assertIn("X", formatted)
+        self.assertEqual(messages.msg("stage_advanced_ack").format(stage="X"),
+                         "You are now at: X")
+
+
 if __name__ == "__main__":
     unittest.main()

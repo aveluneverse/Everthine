@@ -39,3 +39,23 @@ lines:
   start_has_session: "妳來了。我們從哪裡接著說？"
   thinking:
     - "正在思考中⋯⋯"
+
+  # M4 新增：關係階段與回憶錄台詞。{stage} 是階段名稱佔位符，
+  # 重新配音時務必保留 {stage} 原樣，不可刪除或翻譯這個標記本身。
+  cmd_stage_desc: "我們走到哪了"
+  cmd_album_desc: "我們留下的時刻"
+  stage_intro: "我們現在在：{stage}"
+  btn_stage_advance: "往前走一步"
+  btn_stage_retreat: "退回上一階"
+  btn_stage_close: "關閉"
+  stage_note_prompt: "想為這一步留句記號嗎？回我一行字，或跳過。"
+  btn_note_skip: "不留了"
+  btn_note_cancel: "先不前進"
+  stage_advanced_ack: "我們現在是：{stage}"
+  note_saved_ack: "記下了，一字不改。"
+  stage_retreat_confirm: "退回「{stage}」嗎？"
+  btn_retreat_yes: "嗯，退一步"
+  btn_retreat_no: "留在這裡"
+  stage_retreated_ack: "回到：{stage}"
+  album_expired: "那則太久了，我搆不到了——沒能收進來。"
+  album_empty: "還沒收藏任何時刻。對訊息按顆愛心，我就會收好。"

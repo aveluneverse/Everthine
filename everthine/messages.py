@@ -33,6 +33,23 @@ _MESSAGES = {
     "start_fresh": "Hello. Send me a message to begin.",
     "start_has_session": "Welcome back. How should we pick things up?",
     "unauthorized_silence": "",
+    "cmd_stage_desc": "Where the two of you are",
+    "cmd_album_desc": "Moments you both kept",
+    "stage_intro": "You are here: {stage}",
+    "btn_stage_advance": "Take a step forward",
+    "btn_stage_retreat": "Step back one stage",
+    "btn_stage_close": "Close",
+    "stage_note_prompt": "A word to mark this step? Reply with one line, or skip.",
+    "btn_note_skip": "Skip the note",
+    "btn_note_cancel": "Cancel this step",
+    "stage_advanced_ack": "You are now at: {stage}",
+    "note_saved_ack": "Kept, word for word.",
+    "stage_retreat_confirm": 'Step back to "{stage}"?',
+    "btn_retreat_yes": "Yes, step back",
+    "btn_retreat_no": "Stay here",
+    "stage_retreated_ack": "Back at: {stage}",
+    "album_expired": "That message is too old for me to reach now - it was not kept.",
+    "album_empty": "Nothing kept yet. React with a heart to keep a moment.",
 }
 
 
