@@ -80,6 +80,13 @@ class TestWriteAndDedup(unittest.TestCase):
             self.assertFalse(album.add_companion_flag(cfg, "her words", 7, NOW))
             self.assertFalse(cfg.album_path.exists())
 
+    def test_dedup_spans_both_directions(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            self.assertTrue(album.add_partner_flag(cfg, "his words", 7, NOW))
+            self.assertFalse(album.add_companion_flag(cfg, "her words", 7, NOW))
+            self.assertEqual(len(album.all_entries(cfg)), 1)
+
 
 class TestSeamAPIs(unittest.TestCase):
     def test_entries_for_today_filters_by_local_date(self):
@@ -103,6 +110,21 @@ class TestSeamAPIs(unittest.TestCase):
                 album.add_partner_flag(cfg, f"day-{offset}", 5 - offset, ts)
             window = album.entries_for_days(cfg, 3, NOW)
             self.assertEqual([e["message_id"] for e in window], [3, 4, 5])
+
+    def test_entries_for_today_sees_same_instant_across_utcoffsets(self):
+        # An entry kept under one utcoffset must stay visible to a query
+        # made at the very same real instant expressed under another: raw
+        # .date() comparison on the two faces (2026-07-06 in +00:00 vs
+        # 2026-07-07 in +02:00) would call these different days and lose
+        # the keepsake; normalizing both sides to local time may not.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            written = datetime(2026, 7, 6, 23, 30, tzinfo=timezone.utc)
+            queried = written.astimezone(timezone(timedelta(hours=2)))
+            self.assertEqual(written, queried)  # same instant, two faces
+            album.add_partner_flag(cfg, "his words", 42, written)
+            [e] = album.entries_for_today(cfg, queried)
+            self.assertEqual(e["message_id"], 42)
 
 
 if __name__ == "__main__":

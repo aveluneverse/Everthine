@@ -56,6 +56,21 @@ from .config import Config
 logger = logging.getLogger("everthine")
 
 
+def _to_naive_local(ts: datetime) -> datetime:
+    """Collapse an aware-or-naive timestamp to naive LOCAL wall-clock time,
+    so every date comparison in this module happens in one space. Aware ->
+    convert to the machine's local zone, then drop tzinfo. Naive -> assume
+    it is already local and use as-is. Mirrors persona.py's helper of the
+    same shape, duplicated locally rather than imported (the precedent
+    memory_recall.py set): this module never imports the prompt chain --
+    the D1 dependency direction stays one-way, with nothing for the guard
+    test to ever trip over.
+    """
+    if ts.tzinfo is not None and ts.tzinfo.utcoffset(ts) is not None:
+        return ts.astimezone().replace(tzinfo=None)
+    return ts
+
+
 def _fresh_album() -> dict:
     return {"version": 1, "entries": []}
 
@@ -246,7 +261,12 @@ def all_entries(cfg: Config) -> list:
 def entries_for_today(cfg: Config, now: datetime) -> list:
     """M5/M6 seam: every kept moment whose stored timestamp falls on
     `now`'s local calendar date. Storage order is already chronological,
-    so results come back oldest-first with no re-sort needed.
+    so results come back oldest-first with no re-sort needed. `now` is
+    timezone-aware local (as the bot supplies); both it and every stored
+    timestamp are normalized to naive local (_to_naive_local) before the
+    date comparison, so mixed-zone or naive values compare correctly in
+    local time -- the same instant never lands on two different days just
+    because it was written and read under different utcoffsets.
 
     This is one of two read APIs (with entries_for_days) a future inner
     pipeline -- a diary entry, an evolving self-portrait -- draws
@@ -263,9 +283,9 @@ def entries_for_today(cfg: Config, now: datetime) -> list:
          earned, or as praise for having been kept -- it is simply what
          happened.
     """
-    today = now.date()
+    today = _to_naive_local(now).date()
     return [e for e in load_album(cfg.album_path)["entries"]
-            if datetime.fromisoformat(e["timestamp"]).date() == today]
+            if _to_naive_local(datetime.fromisoformat(e["timestamp"])).date() == today]
 
 
 def entries_for_days(cfg: Config, days: int, now: datetime) -> list:
@@ -273,11 +293,15 @@ def entries_for_days(cfg: Config, days: int, now: datetime) -> list:
     local calendar date falls within the last `days` days, inclusive of
     today (days=3 means today, yesterday, and the day before it -- three
     calendar dates total). Storage order is already chronological, so
-    results come back oldest-first with no re-sort needed. The same
+    results come back oldest-first with no re-sort needed. `now` is
+    timezone-aware local (as the bot supplies); it and every stored
+    timestamp are normalized to naive local (_to_naive_local) before the
+    date comparison, exactly as in entries_for_today -- mixed-zone or
+    naive values compare correctly in local time. The same
     three-commandment consumer obligation documented on entries_for_today
     applies to whatever framing is built from this result.
     """
-    today = now.date()
+    today = _to_naive_local(now).date()
     valid_dates = {today - timedelta(days=n) for n in range(days)}
     return [e for e in load_album(cfg.album_path)["entries"]
-            if datetime.fromisoformat(e["timestamp"]).date() in valid_dates]
+            if _to_naive_local(datetime.fromisoformat(e["timestamp"])).date() in valid_dates]
