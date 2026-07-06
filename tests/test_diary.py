@@ -11,8 +11,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from everthine import diary
+from everthine import album, archive, diary
 from everthine.config import load_config
+from everthine.persona import Persona, PersonaSettings
 
 BASE_ENV = {"BOT_TOKEN": "123456789:" + "A" * 35, "AUTHORIZED_USER_ID": "42"}
 
@@ -383,6 +384,214 @@ class TestRecentEntries(unittest.TestCase):
                 entries = diary.recent_entries(cfg, 5)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["content"], "good one")
+
+
+# ---------------------------------------------------------------------
+# M5 T3: material assembly (build_material) + diary system prompt.
+# Persona fixtures mirror tests/test_persona_assembly.py; archive/album
+# fixtures follow tests/test_album.py conventions (tz-aware timestamps).
+# ---------------------------------------------------------------------
+
+IDENTITY_TEXT = ("Ledger-keeper by day, storyteller by night, always half a "
+                 "page ahead in the book on the nightstand.")
+VOICE_TEXT = "Short sentences. Warm and a little wry, never flowery."
+
+
+def _persona(*, identity_text=IDENTITY_TEXT, voice_text="", boundaries_text="",
+             companion_name="Alex", partner_name="Sam", living="together"):
+    settings = PersonaSettings(
+        companion_name=companion_name, partner_name=partner_name, living=living)
+    return Persona(mode="folder", identity_text=identity_text, voice_text=voice_text,
+                   boundaries_text=boundaries_text, settings=settings)
+
+
+def _seed_convo(cfg, now, pairs=(("user", "hi"), ("companion", "hey"))):
+    """Write conversation entries into the archive an hour back, so they land
+    inside the 24h diary lookback and keep the order they are given."""
+    for i, (speaker, text) in enumerate(pairs):
+        archive.write_entry(cfg.archive_dir, speaker, text,
+                            ts=now - timedelta(hours=1) + timedelta(minutes=i))
+
+
+class TestBuildMaterialRecordRequired(unittest.TestCase):
+    def test_no_conversation_returns_none_even_with_keepsake(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            album.add_partner_flag(cfg, "his words", 1, NOW)  # today's keepsake exists
+            # The conversation record is the required block: no record, no page,
+            # even though the album holds a moment from today.
+            self.assertIsNone(diary.build_material(cfg, NOW, None, "Wren"))
+
+
+class TestBuildMaterialShape(unittest.TestCase):
+    def test_record_mapping_order_and_hard_rules_last(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _seed_convo(cfg, NOW)
+            material = diary.build_material(cfg, NOW, None, "Wren")
+        self.assertIn(
+            diary.DIARY_RECORD_HEADER.format(
+                partner_name="Wren", hours=diary.DIARY_LOOKBACK_HOURS),
+            material)
+        self.assertIn("(the full record of the last 24 hours)", material)  # hours=24 pin
+        self.assertIn("Wren: hi", material)   # user -> partner_name
+        self.assertIn("You: hey", material)   # companion -> You
+        self.assertLess(material.index("Wren: hi"), material.index("You: hey"))
+        self.assertTrue(material.endswith(
+            diary.DIARY_HARD_RULES.format(partner_name="Wren")))  # always last
+        self.assertIn("must be traceable to the conversation", material)  # transcription pin
+        # optional blocks absent when nothing seeds them
+        self.assertNotIn(diary.DIARY_KEEPSAKE_HEADER, material)
+        self.assertNotIn(diary.DIARY_RECENT_HEADER, material)
+        self.assertNotIn("since you last heard from", material)
+
+
+class TestBuildMaterialTruncation(unittest.TestCase):
+    def test_tail_truncation_keeps_whole_newest_lines(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _seed_convo(cfg, NOW, pairs=[("user", f"line {i:03d}") for i in range(20)])
+            original = [f"Wren: line {i:03d}" for i in range(20)]
+            orig_cap = diary.DIARY_CONTEXT_MAX_CHARS
+            diary.DIARY_CONTEXT_MAX_CHARS = 120
+            self.addCleanup(setattr, diary, "DIARY_CONTEXT_MAX_CHARS", orig_cap)
+            material = diary.build_material(cfg, NOW, None, "Wren")
+        record_block = material.split("\n\n")[0]
+        block_lines = record_block.split("\n")
+        self.assertEqual(
+            block_lines[0],
+            diary.DIARY_RECORD_HEADER.format(
+                partner_name="Wren", hours=diary.DIARY_LOOKBACK_HOURS))
+        self.assertEqual(block_lines[1], diary.DIARY_OMISSION_LINE)   # elision flagged at top
+        kept = block_lines[2:]
+        self.assertGreater(len(kept), 0)
+        self.assertTrue(all(line in original for line in kept))       # no mid-line fragment
+        self.assertEqual(kept, original[len(original) - len(kept):])  # newest tail, in order
+        self.assertLessEqual(len("\n".join(kept)), 120)               # within the cap
+
+
+class TestBuildMaterialKeepsake(unittest.TestCase):
+    def test_who_mapping_verbatim_text_and_close_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _seed_convo(cfg, NOW)
+            long_text = ("the sea was the exact grey of your eyes, " * 5) + "and I remember it"
+            album.add_partner_flag(cfg, long_text, 1, NOW)           # she kept his words
+            album.add_companion_flag(cfg, "her small joke", 2, NOW)  # he kept her words
+            material = diary.build_material(cfg, NOW, None, "Wren")
+        self.assertIn(diary.DIARY_KEEPSAKE_HEADER, material)
+        self.assertIn(f"- [Wren kept this] {long_text}", material)    # partner_flagged, untruncated
+        self.assertIn("- [You kept this] her small joke", material)   # companion_flagged
+        self.assertIn(diary.DIARY_KEEPSAKE_CLOSE, material)
+        self.assertLess(material.index("[Wren kept this]"),
+                        material.index("[You kept this]"))             # storage order preserved
+
+    def test_album_disabled_hides_block_even_with_data(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _seed_convo(cfg, NOW)
+            album.add_partner_flag(cfg, "his kept words", 1, NOW)   # data written under enabled cfg
+            disabled = _cfg(td, ALBUM_ENABLED="false")
+            material = diary.build_material(disabled, NOW, None, "Wren")
+        self.assertNotIn(diary.DIARY_KEEPSAKE_HEADER, material)
+        self.assertNotIn("his kept words", material)
+
+    def test_enabled_but_no_keepsake_today_hides_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _seed_convo(cfg, NOW)
+            material = diary.build_material(cfg, NOW, None, "Wren")
+        self.assertNotIn(diary.DIARY_KEEPSAKE_HEADER, material)
+
+    def test_yesterday_keepsake_excluded(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _seed_convo(cfg, NOW)
+            album.add_partner_flag(cfg, "old kept moment", 1, NOW - timedelta(days=1))
+            material = diary.build_material(cfg, NOW, None, "Wren")
+        self.assertNotIn(diary.DIARY_KEEPSAKE_HEADER, material)
+        self.assertNotIn("old kept moment", material)
+
+
+class TestBuildMaterialRecent(unittest.TestCase):
+    def test_recent_snippet_capped_at_200(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _seed_convo(cfg, NOW)
+            diary.save_entry(cfg, {"content": "a" * 250}, NOW - timedelta(days=1))
+            material = diary.build_material(cfg, NOW, None, "Wren")
+        self.assertIn(diary.DIARY_RECENT_HEADER, material)
+        self.assertIn("a" * 200, material)
+        self.assertNotIn("a" * 201, material)  # snippet is exactly content[:200]
+
+    def test_no_diary_hides_recent_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _seed_convo(cfg, NOW)
+            material = diary.build_material(cfg, NOW, None, "Wren")
+        self.assertNotIn(diary.DIARY_RECENT_HEADER, material)
+
+
+class TestBuildMaterialAbsence(unittest.TestCase):
+    def test_gap_under_24h_no_absence(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _seed_convo(cfg, NOW)
+            material = diary.build_material(cfg, NOW, NOW - timedelta(hours=23), "Wren")
+        self.assertNotIn("since you last heard from", material)
+
+    def test_gap_over_24h_absence_present(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _seed_convo(cfg, NOW)
+            material = diary.build_material(cfg, NOW, NOW - timedelta(hours=25), "Wren")
+        self.assertIn(
+            diary.DIARY_ABSENCE_LINE.format(hours=25, partner_name="Wren"), material)
+        self.assertIn("about 25 hours", material)
+
+    def test_none_last_contact_no_absence(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _seed_convo(cfg, NOW)
+            material = diary.build_material(cfg, NOW, None, "Wren")
+        self.assertNotIn("since you last heard from", material)
+
+
+class TestBuildSystemPromptDiary(unittest.TestCase):
+    def test_four_block_order_with_voice(self):
+        result = diary.build_system_prompt_diary(_persona(voice_text=VOICE_TEXT))
+        self.assertTrue(result.startswith("# Who you are"))        # declaration first
+        self.assertTrue(result.endswith(diary.DIARY_TASK))          # task last
+        self.assertLess(result.index("# Who you are"), result.index(IDENTITY_TEXT))
+        self.assertLess(result.index(IDENTITY_TEXT), result.index(VOICE_TEXT))
+        self.assertLess(result.index(VOICE_TEXT), result.index("# Your private page"))
+
+    def test_empty_voice_three_blocks_no_stray_blank(self):
+        result = diary.build_system_prompt_diary(_persona(voice_text=""))
+        self.assertNotIn(VOICE_TEXT, result)
+        self.assertNotIn("\n\n\n", result)                          # no stray blank block
+        self.assertIn(IDENTITY_TEXT, result)
+        self.assertTrue(result.endswith(diary.DIARY_TASK))
+
+    def test_file_mode_persona_raises(self):
+        with self.assertRaises(ValueError):
+            diary.build_system_prompt_diary(Persona(mode="file", raw_text="You are Testbot."))
+
+    def test_excludes_dna_boundaries_stage_layer3(self):
+        result = diary.build_system_prompt_diary(
+            _persona(voice_text=VOICE_TEXT, boundaries_text="Never mention the storm."))
+        self.assertNotIn("# The ground rules", result)             # DNA heading absent
+        self.assertNotIn("## Their boundaries, in their own words", result)  # boundaries absent
+        self.assertNotIn("Never mention the storm.", result)
+
+
+class TestSaveEntryKeywordsGuard(unittest.TestCase):
+    def test_non_string_keyword_elements_dropped(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            path = diary.save_entry(cfg, {"content": "hi", "keywords": [1, "ok"]}, NOW)
+            data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["keywords"], ["ok"])
 
 
 if __name__ == "__main__":

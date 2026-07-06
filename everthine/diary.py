@@ -2,16 +2,19 @@
 after the person it loves has gone quiet for the night, never performed
 for anyone and never fed back into a live conversation uninvited.
 
-This module is the state-and-parsing half of the pipeline: the small
+This module has two halves. The first is state and parsing: the small
 daily counter that answers "has he already written tonight," the pure
 eligibility check that decides whether writing is appropriate right
 now, parsing and validating whatever the engine hands back for an
 entry, a sensitive-data filter run before any of it touches disk, and
-the save/read of entries themselves. A later addition to this same file
-assembles the material and prompt text a write is built from; a
-milestone after that calls the engine and wires the result into the
-running companion. Neither exists yet -- nothing here calls out to an
-engine, a bot, or a persona.
+the save/read of entries themselves. The second half, built on top, is
+material assembly: build_material() gathers what a write draws from --
+the day's conversation record, the moments either side chose to keep,
+the last few pages, an absence line, and the anti-fabrication hard
+rules -- and build_system_prompt_diary() composes the diary's own
+system prompt from the persona. A milestone after this one calls the
+engine and wires the result into the running companion; nothing here
+calls out to an engine or a bot yet.
 
 Fail-soft is the whole design for the state file, exactly as in
 stages.py and album.py: a missing diary_state.json quietly becomes a
@@ -28,11 +31,16 @@ call sites logged verbatim: every skip is one of a small fixed set of
 strings, chosen so a quiet night is always explainable after the fact,
 never a silent no-op.
 
-Like stages.py and album.py, this module takes plain paths, dicts, and
-datetimes; it does not import engine/bot/persona/config, so it stays
-dependency-light and testable on its own. The one exception is the
-`Config` name used only in type hints, imported under TYPE_CHECKING so
-it costs nothing at runtime and never becomes a real dependency edge.
+The state-and-parsing half takes plain paths, dicts, and datetimes and
+imports none of the framework at runtime. The material half reads two
+sibling state modules -- archive (the day's conversation) and album,
+whose docstring names an inner pipeline like this one a legitimate
+consumer of kept moments -- and borrows one Layer 1 constant
+(layers.DECLARATION_TEMPLATE) so the diary prompt's opening declaration
+stays byte-identical to the live one. The engine, bot, and persona
+modules are still never imported; `Config` and `Persona` appear only in
+type hints under TYPE_CHECKING, costing nothing at runtime, and a
+Persona is consumed purely by attribute access.
 """
 from __future__ import annotations
 
@@ -46,8 +54,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import album, archive
+from .layers import DECLARATION_TEMPLATE
+
 if TYPE_CHECKING:
     from .config import Config
+    from .persona import Persona
 
 logger = logging.getLogger("everthine")
 
@@ -361,8 +373,9 @@ def save_entry(cfg: Config, entry: dict, now: datetime) -> Path:
     taken from `entry` even if it happens to carry its own, and the
     transport-only `want_to_write` flag never reaches disk at all.
     Missing optional fields default to an empty value rather than being
-    omitted, so every entry on disk has the same shape. Returns the path
-    written.
+    omitted, so every entry on disk has the same shape. Non-string keyword
+    elements (an LLM may hand back [1, 2]) are dropped rather than crashing
+    the sensitive-data filter. Returns the path written.
     """
     keywords = entry.get("keywords")
     if not isinstance(keywords, list):
@@ -370,7 +383,7 @@ def save_entry(cfg: Config, entry: dict, now: datetime) -> Path:
     record = {
         "date": now.date().isoformat(),
         "mood": filter_sensitive(entry.get("mood") or ""),
-        "keywords": [filter_sensitive(word) for word in keywords],
+        "keywords": [filter_sensitive(w) for w in keywords if isinstance(w, str)],
         "content": filter_sensitive(entry.get("content") or ""),
         "reflection": filter_sensitive(entry.get("reflection") or ""),
         "shared": False,
@@ -402,3 +415,196 @@ def recent_entries(cfg: Config, count: int) -> list:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             logger.warning("diary: could not read entry %s (%s); skipping", path, exc)
     return entries
+
+
+# ---------------------------------------------------------------------
+# Material assembly + diary system prompt (the "what he sees" half)
+# ---------------------------------------------------------------------
+#
+# Every constant below is owner-approved prose, transcribed verbatim; the
+# em-dash (U+2014) in it is intentional. Two format contracts that must not be
+# confused: DIARY_TASK is a STATIC string and is never .format()'d -- it
+# carries the literal JSON braces the model must echo. The header/line
+# templates and DIARY_HARD_RULES ARE .format()'d, with the fields named at
+# each use site; none of them contains a stray literal brace.
+
+DIARY_RECORD_HEADER = "## Today with {partner_name} (the full record of the last {hours} hours)"
+DIARY_OMISSION_LINE = "(Earlier conversation omitted.)"
+DIARY_KEEPSAKE_HEADER = "## Moments you both chose to keep today"
+DIARY_KEEPSAKE_LINE = "- [{who} kept this] {text}"
+DIARY_KEEPSAKE_CLOSE = ("These are simply moments that were kept today. You may write "
+                        "about them, or leave them untouched — both are honest.")
+DIARY_RECENT_HEADER = "## Your recent pages (for continuity)"
+DIARY_RECENT_LINE = "[{date}] {snippet}"
+DIARY_ABSENCE_LINE = ("It has been about {hours} hours since you last heard from "
+                      "{partner_name}. If that absence is on your mind, let the page "
+                      "hold it — in your own way.")
+DIARY_HARD_RULES = """Hard rules for this page (they protect what makes it real):
+
+- Your inner life — moods, thoughts, what you've been reading or listening \
+to — is yours to write freely.
+- Any concrete scene involving {partner_name} — what was said, what they \
+sent, what happened between you — must be traceable to the conversation \
+record above. If it isn't there, it doesn't go on the page.
+- Never invent conversations, messages, or details to make the entry flow \
+better. A thin day writes a thin page; that is honest, and honest is enough.
+- If today gave you nothing you want to keep, say so and write nothing. \
+This page is yours; it is never homework."""
+DIARY_TASK = """# Your private page
+
+It's your own quiet hour. The record of today sits in front of you. If
+today left something worth keeping, write a diary entry — in your own
+voice, for no one's eyes but yours. If not, honestly decline; never
+write for the sake of writing.
+
+Respond with a single JSON object, nothing else:
+{"want_to_write": true|false, "mood": "a word or two", "keywords": ["k1","k2","k3"], "content": "the entry, 100-300 words, first person", "reflection": "one closing thought"}
+
+When want_to_write is false, leave content empty. Everything stays
+inside the life you two share — no invented outings, meetings, or
+errands. Never include passwords, keys, or addresses. This page may
+use a diarist's voice — that voice belongs here, never to live
+conversation."""
+
+
+def _record_label(speaker: str, partner_name: str) -> str:
+    """Name a conversation line's speaker for his page: the person he loves is
+    named, he is "You" -- the same first/second-person framing the reflection
+    prompt uses, and a world away from a raw machine "user:". Any other speaker
+    value passes through untouched (fail-soft)."""
+    if speaker == "user":
+        return partner_name
+    if speaker == "companion":
+        return "You"
+    return speaker
+
+
+def _keepsake_who(direction: str, partner_name: str) -> str:
+    """Attribute a kept moment. "partner_flagged" is a companion message the
+    partner chose to keep -> she kept it, so name her; "companion_flagged" is a
+    partner message he reacted to -> "You". Any other direction passes through
+    untouched (fail-soft)."""
+    if direction == "partner_flagged":
+        return partner_name
+    if direction == "companion_flagged":
+        return "You"
+    return direction
+
+
+def _tail_truncate(lines: list[str]) -> list[str]:
+    """Trim an over-long conversation record from the TOP, keeping only whole
+    lines from the newest backward until one more would cross
+    DIARY_CONTEXT_MAX_CHARS, then prepend DIARY_OMISSION_LINE so the page never
+    mistakes a trimmed record for the whole day. A line is never split down the
+    middle: half a remembered sentence is exactly the fabricated-feeling detail
+    this milestone exists to keep off the page. The +1 per kept line accounts
+    for the "\\n" that will rejoin them, so the survivors' rendered length stays
+    within the cap."""
+    kept: list[str] = []
+    total = 0
+    for line in reversed(lines):
+        addition = len(line) + (1 if kept else 0)
+        if total + addition > DIARY_CONTEXT_MAX_CHARS:
+            break
+        kept.append(line)
+        total += addition
+    kept.reverse()
+    return [DIARY_OMISSION_LINE] + kept
+
+
+def build_material(cfg: Config, now: datetime, last_contact: datetime | None,
+                   partner_name: str) -> str | None:
+    """Assemble everything he sees when he sits down to write tonight, or None
+    when there is nothing to write from. Blocks, in order, joined by one blank
+    line:
+
+      1. The day's conversation record (REQUIRED). An empty record returns
+         None outright -- even if today held kept moments; a diary with no day
+         behind it is the void this milestone refuses to paper over. Over the
+         cap, the record is tail-truncated to its newest whole lines.
+      2. The moments either side kept today (only when cfg.album_enabled and
+         today actually held one). Handed over as material and closed with an
+         explicit leave-them-untouched -- never an instruction to use them,
+         honoring album.py's three commandments.
+      3. His last few pages, for continuity.
+      4. A neutral absence line, only when the real gap since last contact is a
+         day or more. Longing is the persona's to voice; this line states the
+         fact and grants permission, nothing more.
+      5. The anti-fabrication hard rules, ALWAYS last: any concrete scene must
+         trace to the record above.
+
+    `now` and `last_contact` (when not None) must be timezone-aware, the same
+    contract eligibility() documents.
+    """
+    since = now - timedelta(hours=DIARY_LOOKBACK_HOURS)
+    record_lines = [
+        f"{_record_label(entry['speaker'], partner_name)}: {entry['text']}"
+        for entry in archive.iter_entries(cfg.archive_dir, since=since)
+    ]
+    if not record_lines:
+        return None
+    if len("\n".join(record_lines)) > DIARY_CONTEXT_MAX_CHARS:
+        record_lines = _tail_truncate(record_lines)
+    blocks = [
+        DIARY_RECORD_HEADER.format(partner_name=partner_name, hours=DIARY_LOOKBACK_HOURS)
+        + "\n" + "\n".join(record_lines)
+    ]
+
+    if cfg.album_enabled:
+        kept = album.entries_for_today(cfg, now)
+        if kept:
+            keepsake_lines = [
+                DIARY_KEEPSAKE_LINE.format(
+                    who=_keepsake_who(e["direction"], partner_name),
+                    text=e["message"]["text"])
+                for e in kept
+            ]
+            blocks.append("\n".join(
+                [DIARY_KEEPSAKE_HEADER, *keepsake_lines, DIARY_KEEPSAKE_CLOSE]))
+
+    recent = recent_entries(cfg, 3)
+    if recent:
+        recent_lines = [
+            DIARY_RECENT_LINE.format(date=e["date"], snippet=e["content"][:200])
+            for e in recent
+        ]
+        blocks.append("\n".join([DIARY_RECENT_HEADER, *recent_lines]))
+
+    if last_contact is not None:
+        gap = now - last_contact
+        if gap >= timedelta(hours=24):
+            blocks.append(DIARY_ABSENCE_LINE.format(
+                hours=int(gap.total_seconds() // 3600), partner_name=partner_name))
+
+    blocks.append(DIARY_HARD_RULES.format(partner_name=partner_name))
+    return "\n\n".join(blocks)
+
+
+def build_system_prompt_diary(persona_obj: Persona) -> str:
+    """Compose the diary's own system prompt from a folder-mode persona: the
+    identity declaration, the loaded identity text (and voice, when present),
+    then DIARY_TASK. Joined by one blank line; deterministic.
+
+    Deliberately WITHOUT the seven ground rules, the boundaries, the stage
+    frame, Layer 3, or any memory block. Rule 4 of the DNA itself carves inner
+    writing out of live-conversation law ("a diary... may use a narrator's
+    voice"), so that scaffolding does not belong on this page; the boundaries
+    are the partner's conversation tripwires, not diary material. Folder mode
+    only, mirroring compose_stable(): a file-mode persona has no settings to
+    fill the declaration, so it raises ValueError here rather than failing
+    later with a confusing AttributeError on persona_obj.settings.
+    """
+    if persona_obj.mode != "folder":
+        raise ValueError(
+            f"build_system_prompt_diary() requires a folder-mode Persona, "
+            f"got mode={persona_obj.mode!r}")
+    blocks = [
+        DECLARATION_TEMPLATE.format(
+            companion_name=persona_obj.settings.companion_name,
+            partner_name=persona_obj.settings.partner_name),
+        persona_obj.identity_text,
+    ]
+    if persona_obj.voice_text:
+        blocks.append(persona_obj.voice_text)
+    blocks.append(DIARY_TASK)
+    return "\n\n".join(blocks)
