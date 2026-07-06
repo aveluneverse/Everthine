@@ -413,5 +413,19 @@ class TestGoldenCopyPins(unittest.TestCase):
         self.assertEqual(BOUNDARIES_TEMPLATE, _REFERENCE_BOUNDARIES_TEMPLATE)
 
 
+class TestAlbumNeverEntersPrompt(unittest.TestCase):
+    def test_prompt_chain_does_not_import_album(self):
+        # D1 ruling (2026-07-06): kept moments never enter live conversation.
+        # They reach the companion only through the inner pipelines (diary,
+        # self-portrait - later milestones). If this test turns red, someone
+        # wired the album into the prompt chain - stop and read the plan.
+        import everthine.persona, everthine.layers, everthine.dynamic_context
+        for mod in (everthine.persona, everthine.layers,
+                    everthine.dynamic_context):
+            source = Path(mod.__file__).read_text(encoding="utf-8")
+            self.assertNotIn("album", source,
+                             f"{mod.__name__} must stay album-free (D1)")
+
+
 if __name__ == "__main__":
     unittest.main()
