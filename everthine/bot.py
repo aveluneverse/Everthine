@@ -7,6 +7,14 @@ Handlers below it only translate Telegram updates in and out.
 
 stream_reply() is the streaming twin of produce_reply(); both share
 prepare_exchange().
+
+The heart-reaction pipeline (M4 T7) runs in both directions on top of
+that: her heart on a companion message flows into the keepsake album
+(make_app's handle_reaction, resolving the message via a short-lived
+_message_cache closure); his captured [react:emoji] tag -- T6 already
+stripped it out of the visible reply -- sets a real Telegram reaction on
+her message via _consume_react, flagging it into the album too when the
+emoji is a heart.
 """
 from __future__ import annotations
 
@@ -14,15 +22,18 @@ import asyncio
 import logging
 import queue
 import threading
+import time
 from datetime import datetime
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (BotCommand, InlineKeyboardButton, InlineKeyboardMarkup,
+                      ReactionTypeEmoji, Update)
 from telegram.constants import ChatAction
 from telegram.error import BadRequest
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
-                          CommandHandler, ContextTypes, MessageHandler, filters)
+                          CommandHandler, ContextTypes, MessageHandler,
+                          MessageReactionHandler, filters)
 
-from . import archive, chunking, engine, memory_recall, messages, persona, recent_context
+from . import album, archive, chunking, engine, memory_recall, messages, persona, recent_context
 from .config import Config, load_config
 from .engine import EngineReply
 from .messages import msg
@@ -30,6 +41,20 @@ from .session_store import SessionStore
 from .streaming_display import REACT_TAG, StreamingDisplay, cancel_markup
 
 logger = logging.getLogger("everthine")
+
+# Heart-reaction pipeline (M4 T7): the one emoji set that carries keepsake
+# semantics on both sides (her heart on his message, his heart-tagged reply
+# on hers). Two glyphs because "❤️" (heart + variation selector,
+# what most clients send) and the bare "❤" both read as "heart" to a
+# person and Telegram treats them as distinct reaction strings.
+_HEART_EMOJIS = frozenset({"❤️", "❤"})
+
+# make_app's _message_cache: how long a companion message stays resolvable
+# to its text after a heart on it (TTL), and how many entries the cache
+# holds at once (cap) before the oldest survivors get pruned. Both are
+# lazily enforced on insert -- see _cache_sent's docstring.
+MESSAGE_CACHE_TTL_S = 24 * 3600
+MESSAGE_CACHE_MAX = 500
 
 
 def decide_start_buttons(has_session: bool) -> list:
@@ -78,8 +103,18 @@ def _extract_react(text: str) -> tuple[str | None, str]:
     return match.group(1), text[match.end():]
 
 
+def _reaction_emoji_set(reactions) -> set[str]:
+    """The plain-emoji strings out of a sequence of telegram.ReactionType
+    objects (a MessageReactionUpdated's old_reaction/new_reaction). A
+    custom-emoji reaction (ReactionTypeCustomEmoji, no .emoji of its own)
+    is silently excluded rather than guessed at -- this project's keepsake
+    hearts are plain Unicode emoji only."""
+    return {r.emoji for r in reactions if isinstance(r, ReactionTypeEmoji)}
+
+
 def produce_reply(cfg: Config, store: SessionStore, text: str,
-                  now: datetime | None = None, engine_mod=engine) -> list:
+                  now: datetime | None = None, engine_mod=engine,
+                  on_react=None) -> list:
     now = now or datetime.now().astimezone()
     prompt, data, memory_block = prepare_exchange(cfg, store, text, now)
 
@@ -90,7 +125,13 @@ def produce_reply(cfg: Config, store: SessionStore, text: str,
         return [msg(reply.error_kind or "generic_glitch")]
 
     emoji, cleaned = _extract_react(reply.text)
-    # reaction consumption lands in the next task
+    # T7: on_text (which owns update.message, needed to set the Telegram
+    # reaction and to flag a heart into the album) learns the captured
+    # emoji through this sink -- produce_reply's own return value stays
+    # exactly the plain chunk list every existing caller already depends
+    # on, so this is opt-in and invisible when the caller passes nothing.
+    if on_react is not None:
+        on_react(emoji)
 
     store.stamp_session_started(reply.session_id, now)
     if cfg.archive_enabled and cleaned:
@@ -111,10 +152,23 @@ def produce_reply(cfg: Config, store: SessionStore, text: str,
 async def stream_reply(cfg: Config, store: SessionStore, text: str,
                        display, cancel_flag: threading.Event,
                        now: datetime | None = None,
-                       engine_mod=engine):
+                       engine_mod=engine, sent_sink: list | None = None):
     """Streaming twin of produce_reply(): drive the engine on a worker
     thread and forward text deltas to the display. Returns the final
-    EngineReply, or None when the user cancelled."""
+    EngineReply, or None when the user cancelled.
+
+    sent_sink (T7), when given, is extended with whatever display.finalize()
+    hands back -- the Message objects StreamingDisplay actually sent. A
+    cancelled turn never reaches finalize() and so never populates it: a
+    cancelled reply is a dead end here exactly as it already is for the
+    archive write and the session stamp below, so on_text has nothing to
+    cache. Callers must pair each entry positionally with
+    display.message_texts, not read .text off it directly -- a real
+    telegram.Message.edit_text() returns a NEW Message rather than mutating
+    the one it was called on, so the placeholder object finalize() returns
+    still carries whatever text it was constructed with, never the text it
+    was progressively edited to show.
+    """
     now = now or datetime.now().astimezone()
     # Off-loop: prepare_exchange touches disk (archive writes + memory
     # recall), so it must never run synchronously on the event loop.
@@ -171,7 +225,9 @@ async def stream_reply(cfg: Config, store: SessionStore, text: str,
                             error_kind="nonzero")
     if not reply.ok and not display.full_text:
         await display.append(msg(reply.error_kind or "generic_glitch"))
-    await display.finalize()
+    sent = await display.finalize()
+    if sent_sink is not None:
+        sent_sink.extend(sent)
 
     if reply.ok:
         store.stamp_session_started(reply.session_id, now)
@@ -186,6 +242,35 @@ async def stream_reply(cfg: Config, store: SessionStore, text: str,
         # After-reply sync, off-loop (mirrors produce_reply; see its comment).
         await asyncio.to_thread(memory_recall.sync, cfg, now)
     return reply
+
+
+async def _consume_react(cfg: Config, update: Update, emoji: str | None,
+                         now: datetime) -> None:
+    """His half of the reaction pipeline (T7). T6 already captured and
+    stripped a leading [react:emoji] tag out of the visible reply; this
+    sets it as a real Telegram reaction on her message and, for a heart,
+    keeps the moment in the album. update.message is HERS -- the message
+    this turn is replying to -- so her text and message_id are already in
+    hand; no cache lookup belongs here (contrast handle_reaction below,
+    which reacts to a message of the bot's OWN sending and has only a
+    message_id to recover the text from). Both reply paths call this with
+    whatever emoji they captured: produce_reply's on_react sink for the
+    non-streaming path, display.reaction_emoji directly for the streaming
+    one.
+    """
+    if not emoji:
+        return
+    try:
+        await update.message.set_reaction([ReactionTypeEmoji(emoji)])
+    except Exception:
+        # Telegram's accepted reaction set is neither fixed nor under this
+        # project's control; a persona emitting one it no longer recognizes
+        # must never take the whole reply down with it.
+        logger.warning("could not set a Telegram reaction on the partner's "
+                       "message", exc_info=True)
+    if emoji in _HEART_EMOJIS:
+        album.add_companion_flag(cfg, update.message.text,
+                                 update.message.message_id, now)
 
 
 def _authorized(cfg: Config, update: Update) -> bool:
@@ -231,6 +316,40 @@ def make_app(cfg: Config):
     store = SessionStore(cfg.session_path)
     busy = {"active": False}
     cancel_flag = threading.Event()
+
+    # Heart-reaction pipeline (M4 T7): companion message_id -> (text,
+    # monotonic send time), so a later heart on it (handle_reaction below)
+    # can recover what it was without ever reading it back off a Telegram
+    # Message object (see stream_reply's sent_sink docstring for why that
+    # would be wrong for anything that was edited in place). Local to this
+    # make_app call, like busy/cancel_flag/store above -- never shared
+    # across app instances, e.g. between tests.
+    _message_cache: dict[int, tuple[str, float]] = {}
+
+    def _cache_sent(message, text: str) -> None:
+        """Record one companion message actually sent this turn. Callers
+        pass the text they already know they sent rather than trusting
+        message.text: a real telegram.Message is an immutable snapshot, so
+        the placeholder object a streamed reply progressively edits still
+        reports whatever text it was first constructed with, never its
+        final content, if anyone tried to read it back that way.
+
+        Lazily pruned on every insert: entries older than
+        MESSAGE_CACHE_TTL_S are dropped first, then -- if still over
+        MESSAGE_CACHE_MAX -- the oldest survivors, oldest first. Insertion
+        order is chronological order here: every message_id is unique and
+        inserted exactly once, so the dict's own iteration order (Python
+        dicts preserve insertion order) already sorts oldest to newest.
+        """
+        if message is None or not text:
+            return
+        now_mono = time.monotonic()
+        for stale_id in [mid for mid, (_, ts) in _message_cache.items()
+                         if now_mono - ts > MESSAGE_CACHE_TTL_S]:
+            del _message_cache[stale_id]
+        _message_cache[message.message_id] = (text, now_mono)
+        while len(_message_cache) > MESSAGE_CACHE_MAX:
+            del _message_cache[next(iter(_message_cache))]
 
     async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _authorized(cfg, update):
@@ -288,10 +407,19 @@ def make_app(cfg: Config):
             if not cfg.streaming_enabled:
                 await context.bot.send_chat_action(
                     chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+                # T7: produce_reply's on_react sink is how this branch learns
+                # the emoji it captured -- produce_reply's return value stays
+                # the plain chunk list every other caller depends on.
+                react_sink: list = []
                 chunks = await asyncio.to_thread(produce_reply, cfg, store,
-                                                 update.message.text)
+                                                 update.message.text,
+                                                 on_react=react_sink.append)
                 for chunk in chunks:
-                    await update.message.reply_text(chunk)
+                    sent = await update.message.reply_text(chunk)
+                    _cache_sent(sent, chunk)
+                await _consume_react(cfg, update,
+                                    react_sink[0] if react_sink else None,
+                                    datetime.now().astimezone())
                 return
 
             placeholder = await update.message.reply_text(
@@ -302,8 +430,18 @@ def make_app(cfg: Config):
                     text, parse_mode=parse_mode, reply_markup=reply_markup)
 
             display = StreamingDisplay(placeholder, send_new)
+            sent_sink: list = []
             reply = await stream_reply(cfg, store, update.message.text,
-                                       display, cancel_flag)
+                                       display, cancel_flag,
+                                       sent_sink=sent_sink)
+            # Zip, not read message.text: see stream_reply's sent_sink
+            # docstring for why the Message objects themselves cannot be
+            # trusted for this. A cancelled turn leaves sent_sink empty
+            # (stream_reply never populates it from display.cancel()), so
+            # this is a no-op there regardless of what display already
+            # tracked internally.
+            for sent, text in zip(sent_sink, display.message_texts):
+                _cache_sent(sent, text)
             if reply is None:
                 if not display.message_texts:
                     await update.message.reply_text(msg("cancel_ack"))
@@ -316,6 +454,8 @@ def make_app(cfg: Config):
                     msg(reply.error_kind or "generic_glitch"))
             if reply.ok and store.detect_bloat(cfg, reply.session_id):
                 await update.message.reply_text(msg("notebook_full"))
+            await _consume_react(cfg, update, display.reaction_emoji,
+                                datetime.now().astimezone())
         except Exception:
             logger.error("reply pipeline failed unexpectedly", exc_info=True)
             try:
@@ -325,6 +465,44 @@ def make_app(cfg: Config):
         finally:
             busy["active"] = False
             cancel_flag.clear()
+
+    async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Her half of the reaction pipeline (T7). A heart added on a
+        companion message still in _message_cache keeps it in the album,
+        silently -- her gesture IS the ritual, the bot never narrates it
+        (mirrors _consume_react's own silence on his side). A heart on a
+        message the cache no longer holds (past its TTL, over the cap, or
+        from before this process started) gets an honest album_expired
+        reply instead of a silent no-op, so she always knows whether it
+        landed. A heart removed un-keeps the same entry, also silently.
+        Registration itself is flag-gated below (defense in depth on top
+        of album.py's own cfg.album_enabled gate on every write).
+        """
+        reaction = update.message_reaction
+        if reaction is None:
+            return
+        # reaction.user is None on some reaction-count-only updates; this
+        # handler only ever sees MESSAGE_REACTION_UPDATED ones (the default
+        # message_reaction_types), but a missing user must still resolve to
+        # "not the authorized partner" rather than raise.
+        user_id = reaction.user.id if reaction.user else 0
+        if user_id != cfg.authorized_user_id:
+            return
+        old_emojis = _reaction_emoji_set(reaction.old_reaction)
+        new_emojis = _reaction_emoji_set(reaction.new_reaction)
+        added = new_emojis - old_emojis
+        removed = old_emojis - new_emojis
+        if added & _HEART_EMOJIS:
+            cached = _message_cache.get(reaction.message_id)
+            if cached is None:
+                await context.bot.send_message(reaction.chat.id,
+                                               msg("album_expired"))
+            else:
+                cached_text, _ = cached
+                album.add_partner_flag(cfg, cached_text, reaction.message_id,
+                                       datetime.now().astimezone())
+        if removed & _HEART_EMOJIS:
+            album.remove_by_message_id(cfg, reaction.message_id)
 
     # Flag off must reproduce M1's sequential update handling exactly: the
     # busy gate and cancel callback only make sense once updates run
@@ -336,7 +514,28 @@ def make_app(cfg: Config):
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    if cfg.album_enabled:
+        # Defense in depth with album.py's own write-time gate: flag off
+        # means this handler does not even exist, matching _allowed_updates
+        # never asking Telegram for reaction updates in the first place --
+        # byte-identical to M3's handler table at the registration level.
+        app.add_handler(MessageReactionHandler(handle_reaction))
     return app
+
+
+def _allowed_updates(cfg: Config) -> list[str]:
+    """The update kinds run_polling() should ask Telegram for. PTB's
+    long-polling default list does NOT include message reactions -- without
+    naming "message_reaction" here explicitly, her hearts never arrive at
+    all, silently, no matter how correctly handle_reaction itself is wired.
+    A standalone function (rather than inline in main()) so this
+    flag-conditioned list is directly testable without booting the whole
+    application.
+    """
+    updates = ["message", "callback_query"]
+    if cfg.album_enabled:
+        updates.append("message_reaction")
+    return updates
 
 
 def main() -> None:
@@ -348,4 +547,4 @@ def main() -> None:
     if not engine.check_claude_available(cfg):
         raise SystemExit(msg("cli_missing"))
     logger.info("everthine is online")
-    make_app(cfg).run_polling()
+    make_app(cfg).run_polling(allowed_updates=_allowed_updates(cfg))
