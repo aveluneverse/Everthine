@@ -144,5 +144,54 @@ class TestStageAlbumKnobs(unittest.TestCase):
                 self.assertIn(var, text)
 
 
+class TestDiaryReflectionKnobs(unittest.TestCase):
+    def test_defaults(self):
+        cfg = load_config(BASE)
+        self.assertTrue(cfg.diary_enabled)
+        self.assertTrue(cfg.reflection_enabled)
+        self.assertEqual(cfg.diary_window_start_hour, 21)
+        self.assertEqual(cfg.diary_max_daily, 1)
+        self.assertEqual(cfg.reflection_daily_cap, 12)
+
+    def test_paths_derive_from_data_dir(self):
+        cfg = load_config({**BASE, "DATA_DIR": "elsewhere"})
+        self.assertEqual(cfg.diary_dir, Path("elsewhere") / "diary")
+        self.assertEqual(cfg.diary_state_path, Path("elsewhere") / "diary_state.json")
+        self.assertEqual(cfg.reflections_path, Path("elsewhere") / "reflections.jsonl")
+        self.assertEqual(cfg.reflection_state_path, Path("elsewhere") / "reflection_state.json")
+
+    def test_flags_and_hour_round_trip(self):
+        cfg = load_config({**BASE, "DIARY_ENABLED": "false",
+                           "REFLECTION_ENABLED": "false",
+                           "DIARY_WINDOW_START_HOUR": "0"})
+        self.assertFalse(cfg.diary_enabled)
+        self.assertFalse(cfg.reflection_enabled)
+        self.assertEqual(cfg.diary_window_start_hour, 0)
+
+        cfg2 = load_config({**BASE, "DIARY_WINDOW_START_HOUR": "23"})
+        self.assertEqual(cfg2.diary_window_start_hour, 23)
+
+    def test_bad_values_raise(self):
+        for key, bad in (
+            ("DIARY_WINDOW_START_HOUR", "24"),
+            ("DIARY_WINDOW_START_HOUR", "-1"),
+            ("DIARY_WINDOW_START_HOUR", "abc"),
+            ("DIARY_MAX_DAILY", "0"),
+            ("REFLECTION_DAILY_CAP", "0"),
+        ):
+            with self.subTest(key=key, bad=bad):
+                with self.assertRaises(ConfigError):
+                    load_config({**BASE, key: bad})
+
+    def test_env_example_documents_inner_life_vars(self):
+        # Sibling of TestStageAlbumKnobs.test_env_example_documents_stage_album_vars,
+        # same shape: guards .env.example's 1:1 catalog for the diary/reflection knobs.
+        text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        for var in ("DIARY_ENABLED", "REFLECTION_ENABLED", "DIARY_WINDOW_START_HOUR",
+                    "DIARY_MAX_DAILY", "REFLECTION_DAILY_CAP"):
+            with self.subTest(var=var):
+                self.assertIn(var, text)
+
+
 if __name__ == "__main__":
     unittest.main()

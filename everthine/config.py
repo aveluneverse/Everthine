@@ -44,6 +44,13 @@ def _get_positive_int(env: Mapping, key: str, default: int) -> int:
     return value
 
 
+def _get_hour(env: Mapping, key: str, default: int) -> int:
+    value = _get_int(env, key, default)
+    if not 0 <= value <= 23:
+        raise ConfigError(f"{key} must be between 0 and 23, got: {value}")
+    return value
+
+
 @dataclass(frozen=True)
 class Config:
     bot_token: str
@@ -67,6 +74,11 @@ class Config:
     memory_embedding_model: str = "BAAI/bge-small-zh-v1.5"
     stages_enabled: bool = True
     album_enabled: bool = True
+    diary_enabled: bool = True
+    reflection_enabled: bool = True
+    diary_window_start_hour: int = 21
+    diary_max_daily: int = 1
+    reflection_daily_cap: int = 12
 
     @property
     def engine_home(self) -> Path:
@@ -91,6 +103,22 @@ class Config:
     @property
     def album_path(self) -> Path:
         return self.data_dir / "album.json"
+
+    @property
+    def diary_dir(self) -> Path:
+        return self.data_dir / "diary"
+
+    @property
+    def diary_state_path(self) -> Path:
+        return self.data_dir / "diary_state.json"
+
+    @property
+    def reflections_path(self) -> Path:
+        return self.data_dir / "reflections.jsonl"
+
+    @property
+    def reflection_state_path(self) -> Path:
+        return self.data_dir / "reflection_state.json"
 
 
 def load_config(env: Mapping | None = None) -> Config:
@@ -141,4 +169,9 @@ def load_config(env: Mapping | None = None) -> Config:
         memory_embedding_model=str(env.get("MEMORY_EMBEDDING_MODEL", "")).strip() or "BAAI/bge-small-zh-v1.5",
         stages_enabled=_get_bool(env, "STAGES_ENABLED", True),
         album_enabled=_get_bool(env, "ALBUM_ENABLED", True),
+        diary_enabled=_get_bool(env, "DIARY_ENABLED", True),
+        reflection_enabled=_get_bool(env, "REFLECTION_ENABLED", True),
+        diary_window_start_hour=_get_hour(env, "DIARY_WINDOW_START_HOUR", 21),
+        diary_max_daily=_get_positive_int(env, "DIARY_MAX_DAILY", 1),
+        reflection_daily_cap=_get_positive_int(env, "REFLECTION_DAILY_CAP", 12),
     )
