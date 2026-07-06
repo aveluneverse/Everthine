@@ -66,7 +66,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from telegram import CallbackQuery as TgCallbackQuery
 from telegram import InlineKeyboardMarkup, ReactionTypeEmoji
+from telegram import Update as TgUpdate
+from telegram import User as TgUser
 from telegram.error import BadRequest
 from telegram.ext import (CallbackQueryHandler, CommandHandler,
                           MessageHandler, MessageReactionHandler)
@@ -1056,6 +1059,54 @@ class TestStageAdvanceFlow(_StageAlbumUITestCase):
         # The stale "note" never landed -- state is untouched.
         self.assertIsNone(stages.load_state(cfg.stage_path)["current"])
 
+    def test_stale_advance_at_top_stage_discards_note_honestly(self):
+        """Fix round 1, Minor #3: Telegram keeps buttons alive on OLD
+        messages, and stg_adv arms the note prompt unconditionally -- so a
+        stale advance press can arrive with the state already at the top
+        stage. stages.advance() then returns None and writes nothing: the
+        typed note is discarded, and the old behavior of replying "Kept,
+        word for word." about it was a lie. The honest fallback chosen (per
+        the review's stated options): answer with the current /stage view
+        -- the same shape the cancel path restores -- which shows exactly
+        where things stand and why nothing advanced; the pending slot is
+        cleared either way."""
+        cfg = self._cfg()
+        for _ in range(len(STAGE_NAMES) - 1):
+            stages.advance(cfg.stage_path, STAGE_NAMES, "", NOW)  # to the top
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        callback = _stage_album_handler(app)
+        stale_stage_message = FakeMessage("old stage view")
+
+        # Arms the prompt even though the state is already at the top.
+        asyncio.run(callback(
+            FakeUpdate(stale_stage_message,
+                      callback_query=FakeCallbackQuery("stg_adv", stale_stage_message)),
+            FakeContext()))
+
+        note_message = FakeMessage("a note with nowhere to go")
+        with mock.patch.object(engine, "run_once") as run_once:
+            asyncio.run(on_text(FakeUpdate(note_message), FakeContext()))
+        run_once.assert_not_called()  # still intercepted, never an engine turn
+
+        reply_texts = [r.text for r in note_message.replies]
+        self.assertNotIn(messages.msg("note_saved_ack"), reply_texts)
+        date = NOW.date().isoformat()
+        expected_view = (messages.msg("stage_intro").format(stage="Deep water")
+                         + f"\n{date} · In rhythm"
+                         + f"\n{date} · Deep water")
+        self.assertEqual(reply_texts, [expected_view])
+        state = stages.load_state(cfg.stage_path)
+        self.assertEqual(state["current"], "Deep water")
+        self.assertEqual(len(state["history"]), 2)  # nothing new written
+
+        # Pending was cleared: the next message is ordinary chat again.
+        plain = FakeMessage("anyway, how was your day?")
+        with mock.patch.object(engine, "run_once",
+                               return_value=EngineReply("lovely", "sess", ok=True)):
+            asyncio.run(on_text(FakeUpdate(plain), FakeContext()))
+        self.assertEqual(plain.replies[0].text, "lovely")
+
 
 # --- /stage: the retreat flow (confirm -> yes / no) ------------------------
 
@@ -1155,6 +1206,108 @@ class TestStageBusyGating(_StageAlbumUITestCase):
         # Neither busy-blocked press armed a pending note or mutated state.
         self.assertIsNone(stages.load_state(cfg.stage_path)["current"])
 
+    def test_busy_blocks_retreat_confirm_yes_with_toast(self):
+        """Fix round 1, Important #1 (reviewer-reproduced breach): the
+        retreat CONFIRM is an already-armed mutation with no pending slot
+        to absorb an interleaving text -- so unlike the note flow, this
+        interleaving IS reachable through the real handler surface:
+        stg_ret pressed while idle opens the confirm; a plain text message
+        then starts a turn (busy=True); stg_ret_yes pressed mid-turn used
+        to sail straight through and persist the retreat under the running
+        prompt. It must be refused with the busy toast, no state change,
+        the confirm message left exactly as it was (so the yes stays live
+        for after the reply lands, mirroring btn_warm/btn_clean)."""
+        cfg = self._cfg()
+        stages.advance(cfg.stage_path, STAGE_NAMES, "", NOW)  # retreat exists
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        callback = _stage_album_handler(app)
+        stage_message = FakeMessage("stage view")
+
+        # Arm the confirm while idle -- legitimately past the stg_ret gate.
+        asyncio.run(callback(
+            FakeUpdate(stage_message, callback_query=FakeCallbackQuery("stg_ret", stage_message)),
+            FakeContext()))
+        self.assertEqual(
+            stage_message.edits,
+            [messages.msg("stage_retreat_confirm").format(stage="Settling in")])
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingEngine:
+            def run_once(self, cfg, prompt, session_id=None, system_prompt=None):
+                entered.set()
+                release.wait(5)
+                return EngineReply("a real reply", "sess-busy", ok=True)
+
+        busy_trigger = FakeMessage("oh wait, one more thing")
+
+        async def scenario():
+            with mock.patch.object(engine, "run_once", BlockingEngine().run_once):
+                turn_task = asyncio.create_task(on_text(FakeUpdate(busy_trigger), FakeContext()))
+                await asyncio.to_thread(entered.wait, 5)
+
+                query_yes = FakeCallbackQuery("stg_ret_yes", stage_message)
+                await callback(FakeUpdate(stage_message, callback_query=query_yes),
+                               FakeContext())
+                self.assertEqual(query_yes.answers, [messages.msg("busy")])
+
+                release.set()
+                await turn_task
+
+        asyncio.run(scenario())
+        # No mutation happened, and the confirm message was left as-is
+        # (still exactly the one edit from arming it).
+        self.assertEqual(stages.load_state(cfg.stage_path)["current"], "In rhythm")
+        self.assertEqual(len(stage_message.edits), 1)
+        self.assertEqual(busy_trigger.replies[0].text, "a real reply")
+
+    def test_busy_blocks_note_skip_with_toast(self):
+        """Fix round 1, Important #1 symmetry: stg_note_skip also mutates
+        stage state (advance with an empty note), so it sits behind the
+        same busy gate as stg_ret_yes. The armed-pending version of this
+        interleaving is not reachable today (see
+        test_pending_note_check_precedes_busy_gate_in_on_text below for
+        why pending and busy cannot currently coexist), so this gate is
+        defense in depth against the same future-writer scenario that test
+        pins -- but the gate itself IS directly observable: while busy the
+        press must answer with the toast and touch nothing, instead of
+        falling through into the skip branch at all."""
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        callback = _stage_album_handler(app)
+        stage_message = FakeMessage("stage view")
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingEngine:
+            def run_once(self, cfg, prompt, session_id=None, system_prompt=None):
+                entered.set()
+                release.wait(5)
+                return EngineReply("a real reply", "sess-busy", ok=True)
+
+        busy_trigger = FakeMessage("are you there?")
+
+        async def scenario():
+            with mock.patch.object(engine, "run_once", BlockingEngine().run_once):
+                turn_task = asyncio.create_task(on_text(FakeUpdate(busy_trigger), FakeContext()))
+                await asyncio.to_thread(entered.wait, 5)
+
+                query_skip = FakeCallbackQuery("stg_note_skip", stage_message)
+                await callback(FakeUpdate(stage_message, callback_query=query_skip),
+                               FakeContext())
+                self.assertEqual(query_skip.answers, [messages.msg("busy")])
+                self.assertEqual(stage_message.edits, [])
+
+                release.set()
+                await turn_task
+
+        asyncio.run(scenario())
+        self.assertIsNone(stages.load_state(cfg.stage_path)["current"])
+
     def test_pending_note_check_precedes_busy_gate_in_on_text(self):
         """Per the brief: a pending note never reaches the engine, and is
         orthogonal to busy -- it must never be blocked by the busy gate. A
@@ -1173,6 +1326,13 @@ class TestStageBusyGating(_StageAlbumUITestCase):
         this test tried to force it by starting a busy turn while a note was
         already pending, and the busy-triggering message itself got consumed
         as the note instead (proving the same point the hard way).
+
+        NOTE (fix round 1): this unreachability argument is specific to the
+        pending-NOTE slot, whose on_text interception absorbs any text that
+        could otherwise start a busy turn while it is armed. It does NOT
+        transfer to the retreat confirm, which has no such slot -- the
+        reviewer reproduced exactly that interleaving, fixed above in
+        test_busy_blocks_retreat_confirm_yes_with_toast.
 
         What the brief's claim actually reduces to, then, is a SOURCE-ORDER
         guarantee: on_text must check pending_note before it ever looks at
@@ -1223,6 +1383,77 @@ class TestOnButtonUnaffectedByStageAlbumHandler(_StageAlbumUITestCase):
 
         self.assertEqual(query.answers, [None])
         self.assertEqual(message.edits[-1], messages.msg("clean_ack"))
+
+
+# --- Dispatch order (fix round 1, Important #2): the two tests above are
+#     order-INDEPENDENT -- swapping the two add_handler calls keeps them
+#     green while every stg_/alb_ button silently dies (on_button, matching
+#     unconditionally and now first, would claim every callback update and
+#     log "unknown button callback"). These pin the order itself. ----------
+
+class TestCallbackDispatchOrder(_StageAlbumUITestCase):
+    """Which handler CLAIMS a given callback update, replayed with PTB's own
+    dispatch rule. process_update itself cannot be driven here -- it hard-
+    requires app.initialize(), which performs a live bot.get_me() network
+    call -- so _first_claimer replays the exact per-group algorithm read
+    from PTB 22.6's Application.process_update source: walk the group's
+    handlers in registration order, call each handler.check_update(update)
+    (a REAL telegram.Update carrying a REAL CallbackQuery, so every
+    handler's own isinstance/pattern logic runs for real), and the first
+    truthy result wins ("Only a max of 1 handler per group is handled").
+    RED-provability was demonstrated by temporarily swapping the two
+    add_handler calls in make_app: the stg_/alb_ test and the index test
+    below both go RED (on_button claims everything), while the two
+    order-independent tests in the class above stay green -- exactly the
+    blind spot the reviewer named."""
+
+    def _first_claimer(self, app, data):
+        query = TgCallbackQuery(
+            id="q1", from_user=TgUser(id=1, first_name="u", is_bot=False),
+            chat_instance="ci", data=data)
+        update = TgUpdate(update_id=1, callback_query=query)
+        for handler in app.handlers[0]:
+            check = handler.check_update(update)
+            if check is not None and check is not False:
+                return handler
+        return None
+
+    def test_stg_and_alb_callbacks_dispatch_to_stage_album_handler(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        for data in ("stg_adv", "stg_ret_yes", "stg_close",
+                     "alb_page:1", "alb_del:keep_x:0"):
+            claimer = self._first_claimer(app, data)
+            self.assertIsNotNone(claimer, f"no handler claimed {data!r}")
+            self.assertIsNotNone(
+                claimer.pattern,
+                f"{data!r} was claimed by the bare on_button handler -- "
+                "the patterned stage/album handler must be registered first")
+            self.assertIs(claimer.callback, _stage_album_handler(app))
+
+    def test_btn_callbacks_still_dispatch_to_on_button(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        for data in ("btn_clean", "btn_warm", "btn_resume", "btn_cancel"):
+            claimer = self._first_claimer(app, data)
+            self.assertIsNotNone(claimer, f"no handler claimed {data!r}")
+            self.assertIsNone(claimer.pattern)
+            self.assertIs(claimer.callback, _on_button_handler(app))
+
+    def test_patterned_handler_registered_before_bare_on_button(self):
+        # Belt to the semantic braces above: in group 0's registration
+        # order, the patterned CallbackQueryHandler's index is strictly
+        # less than the bare one's.
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        cq_handlers = [(i, h.pattern is not None)
+                       for i, h in enumerate(app.handlers[0])
+                       if isinstance(h, CallbackQueryHandler)]
+        self.assertEqual(len(cq_handlers), 2)
+        (first_idx, first_is_patterned), (second_idx, second_is_patterned) = cq_handlers
+        self.assertLess(first_idx, second_idx)
+        self.assertTrue(first_is_patterned)
+        self.assertFalse(second_is_patterned)
 
 
 # --- /album: paginated listing + delete + empty state ----------------------
@@ -1280,6 +1511,33 @@ class TestAlbumCommandUI(_StageAlbumUITestCase):
         page1_after = reply.markup_edits[-1].inline_keyboard
         self.assertEqual(len(page1_after), 2)  # 1 entry + nav row
         self.assertTrue(page1_after[0][0].text.endswith("moment number 0"))
+
+    def test_malformed_album_callback_data_is_refused_quietly(self):
+        """Fix round 1, Minor #4: callback data is client-supplied bytes,
+        not a trusted surface -- a crafted or truncated alb_ payload
+        ("alb_page:abc", a bare "alb_del:", a two-segment "alb_del:x") used
+        to escape the handler as an uncaught ValueError out of int()/tuple
+        unpacking. It must be refused quietly: a logged warning, no edit,
+        no crash -- and validation runs BEFORE any album mutation, so a
+        garbled page number can never half-apply a delete."""
+        cfg = self._cfg()
+        album.add_partner_flag(cfg, "a kept moment", 9100, NOW)
+        app = bot.make_app(cfg)
+        callback = _stage_album_handler(app)
+
+        for bad in ("alb_page:abc", "alb_del:", "alb_del:only_id_no_page",
+                    "alb_del:keep_x:not_a_page"):
+            message = FakeMessage("album view")
+            query = FakeCallbackQuery(bad, message)
+            with self.assertLogs("everthine", level="WARNING"):
+                asyncio.run(callback(
+                    FakeUpdate(message, callback_query=query), FakeContext()))
+            self.assertEqual(message.edits, [], f"{bad!r} produced an edit")
+            self.assertEqual(query.answers, [None])
+
+        # Nothing was deleted along the way, including by the alb_del
+        # variants whose page segment was garbage.
+        self.assertEqual(len(album.all_entries(cfg)), 1)
 
 
 # --- T7 review fold-in: _cache_sent gated on cfg.album_enabled ------------

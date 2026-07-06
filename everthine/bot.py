@@ -615,18 +615,31 @@ def make_app(cfg: Config):
         exactly as it was.
 
         One query.answer() per callback, same PTB rule on_button follows.
-        busy only gates the two entry points that ARM a mutation flow
-        (stg_adv, stg_ret) -- mirroring the M1.5 btn_warm/btn_clean
-        precedent (mid-turn stage mutation would tear the running prompt
-        away from the state it was built against) -- not the follow-up
-        confirm/skip/cancel presses, which by construction can only fire
-        once their entry point already got past that gate.
+        busy gates every press that MUTATES stage state: the two entry
+        points (stg_adv, stg_ret) AND the mutating follow-ups (stg_ret_yes,
+        stg_note_skip) -- all four toast msg("busy") and change nothing,
+        mirroring the M1.5 btn_warm/btn_clean precedent (a mid-turn stage
+        mutation would tear the running prompt away from the state it was
+        built against). The follow-ups genuinely need their own gate: an
+        earlier revision gated only the entry points on the claim that a
+        follow-up "can only fire once its entry point already got past the
+        gate", which is wrong for the confirm flow -- the confirm can be
+        opened while idle, a plain text message then starts a turn
+        (busy=True), and the yes press arrives mid-turn; the retreat path
+        has no pending slot to absorb that interleaving text the way the
+        note flow does (review-reproduced, fix round 1). The view-only
+        presses (stg_note_cancel, stg_ret_no, stg_close) stay live: they
+        mutate nothing a running prompt was built from. The alb_ presses
+        stay live too: the album never enters a live conversation prompt
+        at all (design ruling D1), so a mid-turn album edit cannot tear
+        anything.
         """
         if not _authorized(cfg, update):
             return
         query = update.callback_query
         data = query.data
-        if busy["active"] and data in ("stg_adv", "stg_ret"):
+        if busy["active"] and data in ("stg_adv", "stg_ret",
+                                       "stg_ret_yes", "stg_note_skip"):
             await query.answer(msg("busy"))
             return
         await query.answer()
@@ -674,13 +687,26 @@ def make_app(cfg: Config):
                 text, _unused_markup = _stage_view(cfg, names)
                 await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([]))
             elif data.startswith("alb_del:"):
-                _prefix, entry_id, page_str = data.split(":", 2)
+                # Callback data is client-supplied bytes, not a trusted
+                # surface: refuse crafted/truncated payloads quietly, and
+                # validate BOTH segments before the delete runs so a
+                # garbled page number can never half-apply a removal.
+                try:
+                    _prefix, entry_id, page_str = data.split(":", 2)
+                    page = int(page_str)
+                except ValueError:
+                    logger.warning("malformed album callback data: %r", data)
+                    return
                 album.remove_by_id(cfg, entry_id)
-                text, markup = _album_view(cfg, int(page_str))
+                text, markup = _album_view(cfg, page)
                 await query.edit_message_text(text, reply_markup=markup)
             elif data.startswith("alb_page:"):
-                _prefix, page_str = data.split(":", 1)
-                text, markup = _album_view(cfg, int(page_str))
+                try:
+                    page = int(data.split(":", 1)[1])
+                except ValueError:
+                    logger.warning("malformed album callback data: %r", data)
+                    return
+                text, markup = _album_view(cfg, page)
                 await query.edit_message_text(text, reply_markup=markup)
             else:
                 logger.warning("unknown stage/album callback: %r", data)
@@ -698,10 +724,20 @@ def make_app(cfg: Config):
                 now = datetime.now().astimezone()
                 new_stage = stages.advance(cfg.stage_path, _stage_names(cfg),
                                            update.message.text, now)
-                await update.message.reply_text(msg("note_saved_ack"))
                 if new_stage is not None:
+                    await update.message.reply_text(msg("note_saved_ack"))
                     await update.message.reply_text(
                         msg("stage_advanced_ack").format(stage=new_stage))
+                else:
+                    # Already at the top stage: a stale advance press on an
+                    # OLD /stage message can arm the prompt regardless of
+                    # where the state has moved since (Telegram keeps old
+                    # buttons alive). advance() wrote nothing and the note
+                    # was discarded, so claiming it was kept would be a
+                    # lie -- answer with the current view instead, which
+                    # shows exactly where things stand (fix round 1).
+                    text, markup = _stage_view(cfg, _stage_names(cfg))
+                    await update.message.reply_text(text, reply_markup=markup)
                 return
             # Stale: the slot silently expires and this message falls
             # through to ordinary chat below, exactly like any other text.
@@ -837,6 +873,8 @@ def make_app(cfg: Config):
         # every callback query unconditionally and, registered first, would
         # otherwise swallow every stg_/alb_ press before this ever ran. See
         # on_stage_album_button's own docstring for the full reasoning.
+        # This order is pinned by TestCallbackDispatchOrder, which replays
+        # PTB's first-truthy-check_update-wins dispatch over real Updates.
         app.add_handler(CallbackQueryHandler(on_stage_album_button,
                                              pattern=r"^(stg|alb)_"))
     app.add_handler(CallbackQueryHandler(on_button))
