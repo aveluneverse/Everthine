@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from everthine.config import Config
 from everthine import engine
@@ -123,6 +124,81 @@ class TestRunOnce(EngineTestBase):
             r = engine.run_once(self.cfg(claude_cmd=[td]), "hi")
         self.assertFalse(r.ok)
         self.assertIn(r.error_kind, ("nonzero", "cli_missing"))
+
+
+class TestTryRunOnce(EngineTestBase):
+    def test_busy_lock_returns_none_without_attempt(self):
+        self.assertTrue(engine._reply_lock.acquire(blocking=False))
+        self.addCleanup(engine._reply_lock.release)
+        with mock.patch.object(engine, "_run_attempt") as attempt:
+            reply = engine.try_run_once(self.cfg(), "hi")
+        self.assertIsNone(reply)
+        attempt.assert_not_called()
+
+    def test_free_lock_returns_attempt_result_and_releases(self):
+        sentinel = engine.EngineReply("fine", "s1", ok=True)
+        with mock.patch.object(engine, "_run_attempt", return_value=sentinel) as attempt:
+            reply = engine.try_run_once(self.cfg(), "hi")
+        self.assertIs(reply, sentinel)
+        attempt.assert_called_once()
+        self.assertTrue(engine._reply_lock.acquire(blocking=False))
+        engine._reply_lock.release()
+
+    def test_lock_released_even_when_attempt_raises(self):
+        with mock.patch.object(engine, "_run_attempt", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                engine.try_run_once(self.cfg(), "hi")
+        self.assertTrue(engine._reply_lock.acquire(blocking=False))
+        engine._reply_lock.release()
+
+    def test_auth_failure_retried_once_without_real_sleep(self):
+        auth = engine.EngineReply("", None, ok=False, error_kind="auth")
+        good = engine.EngineReply("fine", "s1", ok=True)
+        with mock.patch.object(engine, "_run_attempt", side_effect=[auth, good]) as attempt, \
+                mock.patch.object(engine.time, "sleep") as fake_sleep:
+            reply = engine.try_run_once(self.cfg(), "hi")
+        self.assertIs(reply, good)
+        self.assertEqual(attempt.call_count, 2)
+        fake_sleep.assert_called_once_with(1.5)
+
+    def test_timeout_s_forwarded_verbatim_to_attempt(self):
+        cfg = self.cfg()
+        sentinel = engine.EngineReply("fine", "s1", ok=True)
+        with mock.patch.object(engine, "_run_attempt", return_value=sentinel) as attempt:
+            engine.try_run_once(cfg, "hi", timeout_s=90)
+        attempt.assert_called_once_with(cfg, "hi", None, None, 90)
+
+    def test_run_once_reaches_attempt_with_none_timeout(self):
+        cfg = self.cfg()
+        sentinel = engine.EngineReply("fine", "s1", ok=True)
+        with mock.patch.object(engine, "_run_attempt", return_value=sentinel) as attempt:
+            engine.run_once(cfg, "hi")
+        attempt.assert_called_once_with(cfg, "hi", None, None, None)
+
+
+class TestRunAttemptTimeoutResolution(EngineTestBase):
+    def _communicate_timeout_for(self, cfg, timeout_s):
+        captured = {}
+
+        class FakeProc:
+            returncode = 0
+
+            def communicate(self, input=None, timeout=None):
+                captured["timeout"] = timeout
+                return '{"result": "hi", "session_id": "s"}', ""
+
+        with mock.patch.object(engine.subprocess, "Popen", return_value=FakeProc()):
+            reply = engine._run_attempt(cfg, "prompt", None, None, timeout_s)
+        self.assertTrue(reply.ok)
+        return captured["timeout"]
+
+    def test_default_none_resolves_to_cfg_command_timeout(self):
+        cfg = self.cfg(command_timeout_s=7)
+        self.assertEqual(self._communicate_timeout_for(cfg, None), 7)
+
+    def test_explicit_timeout_reaches_communicate_unchanged(self):
+        cfg = self.cfg(command_timeout_s=7)
+        self.assertEqual(self._communicate_timeout_for(cfg, 90), 90)
 
 
 if __name__ == "__main__":

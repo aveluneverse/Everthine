@@ -3,6 +3,9 @@
 One blocking call per user message: prompt goes in via stdin (avoids OS
 argv length limits), the reply comes back as a single JSON document.
 A reply lock serializes calls; an auth-race is retried once.
+try_run_once() is the non-blocking twin background inner activities use:
+it gives up immediately when the lock is busy, so an inner write always
+yields to live conversation instead of queueing ahead of it.
 stream_once() streams one reply as queue events for progressive display.
 """
 from __future__ import annotations
@@ -74,7 +77,8 @@ def check_claude_available(cfg: Config) -> bool:
 
 
 def _run_attempt(cfg: Config, prompt: str, session_id: str | None,
-                 system_prompt: str | None) -> EngineReply:
+                 system_prompt: str | None,
+                 timeout_s: int | None = None) -> EngineReply:
     cfg.engine_home.mkdir(parents=True, exist_ok=True)
     cmd = build_cmd(cfg, session_id, system_prompt)
     try:
@@ -87,7 +91,9 @@ def _run_attempt(cfg: Config, prompt: str, session_id: str | None,
         return EngineReply("", session_id, ok=False, error_kind="nonzero")
 
     try:
-        stdout, stderr = proc.communicate(input=prompt, timeout=cfg.command_timeout_s)
+        stdout, stderr = proc.communicate(
+            input=prompt,
+            timeout=timeout_s if timeout_s is not None else cfg.command_timeout_s)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.communicate()
@@ -114,15 +120,36 @@ def _run_attempt(cfg: Config, prompt: str, session_id: str | None,
                            error_kind=None if text else "nonzero")
 
 
+def _locked_run(cfg: Config, prompt: str, session_id: str | None,
+                system_prompt: str | None,
+                timeout_s: int | None) -> EngineReply:
+    """Auth-retry loop shared by run_once/try_run_once. Caller holds _reply_lock."""
+    for attempt in range(2):
+        reply = _run_attempt(cfg, prompt, session_id, system_prompt, timeout_s)
+        if reply.error_kind == "auth" and attempt == 0:
+            time.sleep(1.5)
+            continue
+        return reply
+
+
 def run_once(cfg: Config, prompt: str, session_id: str | None = None,
              system_prompt: str | None = None) -> EngineReply:
     with _reply_lock:
-        for attempt in range(2):
-            reply = _run_attempt(cfg, prompt, session_id, system_prompt)
-            if reply.error_kind == "auth" and attempt == 0:
-                time.sleep(1.5)
-                continue
-            return reply
+        return _locked_run(cfg, prompt, session_id, system_prompt, None)
+
+
+def try_run_once(cfg: Config, prompt: str, session_id: str | None = None,
+                 system_prompt: str | None = None,
+                 timeout_s: int | None = None) -> EngineReply | None:
+    """Non-blocking twin of run_once: returns None immediately when the
+    reply lock is busy. For background inner activities that must always
+    yield to live conversation."""
+    if not _reply_lock.acquire(blocking=False):
+        return None
+    try:
+        return _locked_run(cfg, prompt, session_id, system_prompt, timeout_s)
+    finally:
+        _reply_lock.release()
 
 
 def _stream_attempt(cfg: Config, prompt: str, session_id: str | None,

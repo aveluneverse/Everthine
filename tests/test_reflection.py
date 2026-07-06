@@ -7,10 +7,13 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from everthine import reflection
 from everthine.config import load_config
+from everthine.engine import EngineReply
 from everthine.persona import Persona, PersonaSettings
+from everthine.persona import reset_persona_cache
 
 BASE_ENV = {"BOT_TOKEN": "123456789:" + "A" * 35, "AUTHORIZED_USER_ID": "42"}
 
@@ -332,6 +335,111 @@ class TestPrune(unittest.TestCase):
             reflection.prune(cfg, NOW)  # must not raise; naive compared as local
             lines = cfg.reflections_path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 1)
+
+
+# ---------------------------------------------------------------------
+# M5 T5: reflect_once -- the execution line. The engine seam is mocked
+# at the consumer side (everthine.reflection's own engine reference);
+# persona loading runs against a real tmp persona folder, never a model.
+# ---------------------------------------------------------------------
+
+REFLECT_SEAM = "everthine.reflection.engine.try_run_once"
+LONG_MSG = "a message long enough to pass"
+
+
+def _persona_folder(td):
+    """Write a minimal valid folder-mode persona under td and return it."""
+    folder = Path(td) / "persona"
+    folder.mkdir()
+    (folder / "identity.md").write_text(IDENTITY_TEXT, encoding="utf-8")
+    (folder / "settings.yaml").write_text(
+        "companion:\n  name: Alex\npartner:\n  name: Sam\n", encoding="utf-8")
+    return folder
+
+
+class TestReflectOnce(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(reset_persona_cache)
+
+    def _folder_cfg(self, td):
+        return _cfg(td, PERSONA_PATH=str(_persona_folder(td)))
+
+    def test_engine_exception_swallowed_with_warning(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            with mock.patch(REFLECT_SEAM, side_effect=RuntimeError("boom")), \
+                    self.assertLogs("everthine", level="WARNING") as cm:
+                result = reflection.reflect_once(cfg, LONG_MSG, "a reply", NOW)
+        self.assertIsNone(result)
+        self.assertTrue(any("reflection: swallowed RuntimeError" in line
+                            for line in cm.output))
+
+    def test_short_message_gate_blocks_engine(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            with mock.patch(REFLECT_SEAM) as run:
+                reflection.reflect_once(cfg, "hello", "a reply", NOW)
+        run.assert_not_called()
+
+    def test_busy_engine_appends_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            with mock.patch(REFLECT_SEAM, return_value=None) as run:
+                reflection.reflect_once(cfg, LONG_MSG, "a reply", NOW)
+            jsonl_exists = cfg.reflections_path.exists()
+            state = reflection.load_state(cfg.reflection_state_path)
+        run.assert_called_once()
+        self.assertFalse(jsonl_exists)
+        self.assertEqual(state["count_today"], 0)
+
+    def test_success_appends_counts_and_pins_engine_kwargs(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            good = EngineReply('{"text": "a small ripple"}', None, ok=True)
+            with mock.patch(REFLECT_SEAM, return_value=good) as run, \
+                    self.assertLogs("everthine", level="INFO") as cm:
+                reflection.reflect_once(cfg, LONG_MSG, "a reply", NOW)
+            lines = cfg.reflections_path.read_text(encoding="utf-8").splitlines()
+            state = reflection.load_state(cfg.reflection_state_path)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])["text"], "a small ripple")
+        self.assertEqual(state["count_today"], 1)
+        self.assertEqual(state["count_date"], TODAY)
+        kwargs = run.call_args.kwargs
+        self.assertIsNone(kwargs["session_id"])
+        self.assertEqual(kwargs["timeout_s"], reflection.REFLECTION_TIMEOUT_S)
+        self.assertTrue(any("reflection: recorded" in line for line in cm.output))
+
+    def test_sensitive_text_redacted_before_append(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            leaky = EngineReply('{"text": "she pasted api_key=abc123 today"}',
+                                None, ok=True)
+            with mock.patch(REFLECT_SEAM, return_value=leaky):
+                reflection.reflect_once(cfg, LONG_MSG, "a reply", NOW)
+            raw = cfg.reflections_path.read_text(encoding="utf-8")
+        self.assertNotIn("abc123", raw)
+        self.assertIn("[REDACTED]", raw)
+
+    def test_failed_engine_reply_never_enters_texture(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            failed = EngineReply("", None, ok=False, error_kind="auth")
+            with mock.patch(REFLECT_SEAM, return_value=failed):
+                reflection.reflect_once(cfg, LONG_MSG, "a reply", NOW)
+            jsonl_exists = cfg.reflections_path.exists()
+            state = reflection.load_state(cfg.reflection_state_path)
+        self.assertFalse(jsonl_exists)
+        self.assertEqual(state["count_today"], 0)
+
+    def test_file_mode_skips_engine_entirely(self):
+        with tempfile.TemporaryDirectory() as td:
+            persona_file = Path(td) / "persona.md"
+            persona_file.write_text("You are Testbot.", encoding="utf-8")
+            cfg = _cfg(td, PERSONA_PATH=str(persona_file))
+            with mock.patch(REFLECT_SEAM) as run:
+                reflection.reflect_once(cfg, LONG_MSG, "a reply", NOW)
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

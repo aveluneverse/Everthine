@@ -10,10 +10,13 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from everthine import album, archive, diary
 from everthine.config import load_config
+from everthine.engine import EngineReply
 from everthine.persona import Persona, PersonaSettings
+from everthine.persona import reset_persona_cache
 
 BASE_ENV = {"BOT_TOKEN": "123456789:" + "A" * 35, "AUTHORIZED_USER_ID": "42"}
 
@@ -592,6 +595,202 @@ class TestSaveEntryKeywordsGuard(unittest.TestCase):
             path = diary.save_entry(cfg, {"content": "hi", "keywords": [1, "ok"]}, NOW)
             data = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(data["keywords"], ["ok"])
+
+
+# ---------------------------------------------------------------------
+# M5 T5: write_once -- the execution line. The engine seam is mocked at
+# the consumer side (everthine.diary's own engine reference); persona
+# loading runs against a real tmp persona folder, never a model.
+# ---------------------------------------------------------------------
+
+ENGINE_SEAM = "everthine.diary.engine.try_run_once"
+
+
+def _persona_folder(td):
+    """Write a minimal valid folder-mode persona under td and return it."""
+    folder = Path(td) / "persona"
+    folder.mkdir()
+    (folder / "identity.md").write_text(IDENTITY_TEXT, encoding="utf-8")
+    (folder / "settings.yaml").write_text(
+        "companion:\n  name: Alex\npartner:\n  name: Sam\n", encoding="utf-8")
+    return folder
+
+
+class TestWriteOnce(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(reset_persona_cache)
+
+    def _folder_cfg(self, td):
+        return _cfg(td, PERSONA_PATH=str(_persona_folder(td)))
+
+    def _seed_live_contact(self, cfg, minutes=60):
+        """One real archive entry `minutes` before NOW: recent enough for
+        the 24h material lookback, old enough for the 30-minute idle gate."""
+        archive.write_entry(cfg.archive_dir, "user", "hi there",
+                            ts=NOW - timedelta(minutes=minutes))
+
+    def _entry_names(self, cfg):
+        if not cfg.diary_dir.is_dir():
+            return []
+        return sorted(p.name for p in cfg.diary_dir.iterdir() if p.is_file())
+
+    def test_eligibility_window_blocks_without_engine_call(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            self._seed_live_contact(cfg)
+            noon = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+            with mock.patch(ENGINE_SEAM) as run, \
+                    self.assertLogs("everthine", level="DEBUG") as cm:
+                result = diary.write_once(cfg, noon)
+        self.assertFalse(result)
+        run.assert_not_called()
+        self.assertTrue(any("diary: skip (window)" in line for line in cm.output))
+
+    def test_file_mode_skips_without_engine_call(self):
+        with tempfile.TemporaryDirectory() as td:
+            persona_file = Path(td) / "persona.md"
+            persona_file.write_text("You are Testbot.", encoding="utf-8")
+            cfg = _cfg(td, PERSONA_PATH=str(persona_file))
+            with mock.patch(ENGINE_SEAM) as run, \
+                    self.assertLogs("everthine", level="DEBUG") as cm:
+                result = diary.write_once(cfg, NOW)
+        self.assertFalse(result)
+        run.assert_not_called()
+        self.assertTrue(any("diary: skip (file_mode)" in line for line in cm.output))
+
+    def test_empty_material_logs_info_without_engine_call(self):
+        # A 30h-old entry: contact_signals still finds a last_contact, but
+        # the 24h material lookback comes back empty -> honest skip.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            archive.write_entry(cfg.archive_dir, "user", "an old hello",
+                                ts=NOW - timedelta(hours=30))
+            with mock.patch(ENGINE_SEAM) as run, \
+                    self.assertLogs("everthine", level="INFO") as cm:
+                result = diary.write_once(cfg, NOW)
+        self.assertFalse(result)
+        run.assert_not_called()
+        self.assertTrue(any("diary: skip (material_empty)" in line for line in cm.output))
+
+    def test_busy_engine_skips_with_info_log(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            self._seed_live_contact(cfg)
+            with mock.patch(ENGINE_SEAM, return_value=None) as run, \
+                    self.assertLogs("everthine", level="INFO") as cm:
+                result = diary.write_once(cfg, NOW)
+        self.assertFalse(result)
+        run.assert_called_once()
+        self.assertTrue(any("diary: skip (engine_busy)" in line for line in cm.output))
+
+    def test_failed_engine_reply_logs_warning(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            self._seed_live_contact(cfg)
+            failed = EngineReply("", None, ok=False, error_kind="timeout")
+            with mock.patch(ENGINE_SEAM, return_value=failed), \
+                    self.assertLogs("everthine", level="WARNING") as cm:
+                result = diary.write_once(cfg, NOW)
+        self.assertFalse(result)
+        self.assertTrue(any("diary: engine failed (timeout)" in line for line in cm.output))
+
+    def test_unparseable_output_logs_warning_and_saves_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            self._seed_live_contact(cfg)
+            garbage = EngineReply("just rambling, no structure here at all", "s", ok=True)
+            with mock.patch(ENGINE_SEAM, return_value=garbage), \
+                    self.assertLogs("everthine", level="WARNING") as cm:
+                result = diary.write_once(cfg, NOW)
+            entries = self._entry_names(cfg)
+        self.assertFalse(result)
+        self.assertTrue(any("diary: unparseable engine output" in line for line in cm.output))
+        self.assertEqual(entries, [])
+
+    def test_decline_records_date_without_file_or_count(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            self._seed_live_contact(cfg)
+            decline = EngineReply('{"want_to_write": false}', "s", ok=True)
+            with mock.patch(ENGINE_SEAM, return_value=decline), \
+                    self.assertLogs("everthine", level="INFO") as cm:
+                result = diary.write_once(cfg, NOW)
+            state = diary.load_state(cfg.diary_state_path)
+            entries = self._entry_names(cfg)
+        self.assertFalse(result)
+        self.assertEqual(state["declined_date"], TODAY)
+        self.assertEqual(state["count_today"], 0)
+        self.assertEqual(entries, [])
+        self.assertTrue(any("diary: declined" in line for line in cm.output))
+
+    def test_success_saves_entry_counts_and_pins_engine_kwargs(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            self._seed_live_contact(cfg)
+            good = EngineReply(
+                '{"want_to_write": true, "mood": "calm", "keywords": ["rain"], '
+                '"content": "a quiet page about today", "reflection": "enough"}',
+                "s", ok=True)
+            with mock.patch(ENGINE_SEAM, return_value=good) as run, \
+                    self.assertLogs("everthine", level="INFO") as cm:
+                result = diary.write_once(cfg, NOW)
+            state = diary.load_state(cfg.diary_state_path)
+            entries = self._entry_names(cfg)
+        self.assertTrue(result)
+        self.assertEqual(len(entries), 1)
+        self.assertRegex(entries[0], r"^\d{4}-\d{2}-\d{2}_\d{6}\.json$")
+        self.assertEqual(state["count_today"], 1)
+        self.assertEqual(state["count_date"], TODAY)
+        kwargs = run.call_args.kwargs
+        self.assertIsNone(kwargs["session_id"])
+        self.assertEqual(kwargs["timeout_s"], diary.DIARY_TIMEOUT_S)
+        self.assertIn("# Your private page", kwargs["system_prompt"])
+        self.assertTrue(any("diary: wrote" in line for line in cm.output))
+
+    def test_sensitive_content_redacted_on_disk(self):
+        # Pipeline-level check of save_entry's existing redaction behavior.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            self._seed_live_contact(cfg)
+            leaky = EngineReply(
+                '{"want_to_write": true, "content": "she pasted api_key=abc123 today"}',
+                "s", ok=True)
+            with mock.patch(ENGINE_SEAM, return_value=leaky):
+                result = diary.write_once(cfg, NOW)
+            entries = self._entry_names(cfg)
+            raw = (cfg.diary_dir / entries[0]).read_text(encoding="utf-8")
+        self.assertTrue(result)
+        self.assertNotIn("abc123", raw)
+        self.assertIn("[REDACTED]", raw)
+
+    def test_naive_last_contact_normalized_against_aware_archive(self):
+        """Regression pin for the tz handoff: contact_signals returns
+        naive-local while eligibility/build_material require aware, so
+        write_once normalizes at the handoff. With real aware timestamps
+        on disk, a 31-minute-old contact must sail past the idle gate
+        (no TypeError) and reach the engine; a 5-minute-old contact must
+        be caught by it."""
+        cases = (
+            (31, True),   # 31 minutes idle -> proceeds to the engine call
+            (5, False),   # 5 minutes idle -> skip (not_idle)
+        )
+        for minutes, reaches_engine in cases:
+            with self.subTest(minutes=minutes):
+                with tempfile.TemporaryDirectory() as td:
+                    cfg = self._folder_cfg(td)
+                    self._seed_live_contact(cfg, minutes=minutes)
+                    with mock.patch(ENGINE_SEAM, return_value=None) as run, \
+                            self.assertLogs("everthine", level="DEBUG") as cm:
+                        result = diary.write_once(cfg, NOW)
+                self.assertFalse(result)  # busy mock / not_idle both end False
+                if reaches_engine:
+                    run.assert_called_once()
+                    self.assertTrue(any("diary: skip (engine_busy)" in line
+                                        for line in cm.output))
+                else:
+                    run.assert_not_called()
+                    self.assertTrue(any("diary: skip (not_idle)" in line
+                                        for line in cm.output))
 
 
 if __name__ == "__main__":

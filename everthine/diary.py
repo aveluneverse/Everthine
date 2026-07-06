@@ -12,9 +12,10 @@ material assembly: build_material() gathers what a write draws from --
 the day's conversation record, the moments either side chose to keep,
 the last few pages, an absence line, and the anti-fabrication hard
 rules -- and build_system_prompt_diary() composes the diary's own
-system prompt from the persona. A milestone after this one calls the
-engine and wires the result into the running companion; nothing here
-calls out to an engine or a bot yet.
+system prompt from the persona. The third piece, write_once(), is the
+execution line built on both halves: one complete eligibility-to-save
+attempt, engine call included, that a later task hangs off the bot's
+background tick.
 
 Fail-soft is the whole design for the state file, exactly as in
 stages.py and album.py: a missing diary_state.json quietly becomes a
@@ -37,10 +38,12 @@ sibling state modules -- archive (the day's conversation) and album,
 whose docstring names an inner pipeline like this one a legitimate
 consumer of kept moments -- and borrows one Layer 1 constant
 (layers.DECLARATION_TEMPLATE) so the diary prompt's opening declaration
-stays byte-identical to the live one. The engine, bot, and persona
-modules are still never imported; `Config` and `Persona` appear only in
-type hints under TYPE_CHECKING, costing nothing at runtime, and a
-Persona is consumed purely by attribute access.
+stays byte-identical to the live one. write_once() reaches further, by
+design: it imports the engine (try_run_once only, the non-blocking
+call) and persona's function surface (current_settings /
+contact_signals / load_persona). The bot module is still never
+imported; `Config` and `Persona` remain in TYPE_CHECKING type hints,
+and a Persona is consumed purely by attribute access.
 """
 from __future__ import annotations
 
@@ -54,7 +57,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import album, archive
+from . import album, archive, engine, persona
 from .layers import DECLARATION_TEMPLATE
 
 if TYPE_CHECKING:
@@ -71,7 +74,7 @@ DIARY_WINDOW_END_HOUR = 8        # the nightly window always closes at 08:00
 DIARY_MIN_INTERVAL_HOURS = 4     # min spacing between entries (matters when DIARY_MAX_DAILY > 1)
 DIARY_LOOKBACK_HOURS = 24        # how much conversation the page draws from (a later task uses this)
 DIARY_CONTEXT_MAX_CHARS = 24000  # material cap before tail-truncation (a later task uses this)
-DIARY_TIMEOUT_S = 90             # engine budget for one entry (a later task uses this)
+DIARY_TIMEOUT_S = 90             # engine budget for one entry (write_once's call)
 
 _DIARY_FILENAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{6}\.json$")
 
@@ -608,3 +611,91 @@ def build_system_prompt_diary(persona_obj: Persona) -> str:
         blocks.append(persona_obj.voice_text)
     blocks.append(DIARY_TASK)
     return "\n\n".join(blocks)
+
+
+# ---------------------------------------------------------------------
+# Execution: one complete write attempt (the background tick's worker)
+# ---------------------------------------------------------------------
+
+def write_once(cfg: Config, now: datetime) -> bool:
+    """One complete attempt to write tonight's page. True only when an
+    entry was actually saved; every other outcome returns False behind
+    its own named log line, so a quiet night is always explainable
+    after the fact.
+
+    The engine call is try_run_once -- never run_once -- with a fresh
+    session (session_id=None, always: his page must never share a
+    session with, or leak into, the live conversation) and the diary's
+    own timeout budget. A busy engine is not a failure: inner writing
+    always yields to live conversation, and a later tick simply tries
+    again.
+
+    Deliberately does NOT swallow unexpected exceptions: the background
+    tick that calls this (a later task) wraps every round in its own
+    try/except and logs it loudly; swallowing here too would only bury
+    bugs.
+
+    `now` must be timezone-aware, the same contract eligibility() and
+    build_material() document.
+    """
+    settings = persona.current_settings(cfg)
+    if settings is None:
+        # Defensive second layer: the tick gates folder mode at boot; a
+        # file-mode persona has no settings to voice a page with.
+        logger.debug("diary: skip (file_mode)")
+        return False
+
+    state = load_state(cfg.diary_state_path)
+    hours = hours_since_last_diary(cfg.diary_dir)
+    # contact_signals returns naive-local (the shape its live-prompt
+    # consumers want); eligibility and build_material require
+    # timezone-aware operands. A naive datetime's astimezone() presumes
+    # system local time -- exactly what the naive value is -- so this is
+    # a lossless wall-clock conversion, made once at this handoff and
+    # nowhere deeper.
+    last_contact, _ = persona.contact_signals(cfg, now)
+    if last_contact is not None:
+        last_contact = last_contact.astimezone()
+
+    reason = eligibility(cfg, now, last_contact, state, hours)
+    if reason is not None:
+        # DEBUG on purpose: the tick fires every few minutes and
+        # window/not_idle are all-day normal -- INFO would flood the log.
+        logger.debug("diary: skip (%s)", reason)
+        return False
+
+    material = build_material(cfg, now, last_contact, settings.partner_name)
+    if material is None:
+        # INFO: a thin day honestly left unwritten is normal, but worth
+        # seeing in the log.
+        logger.info("diary: skip (material_empty)")
+        return False
+
+    persona_obj = persona.load_persona(cfg)
+    sys_prompt = build_system_prompt_diary(persona_obj)
+
+    reply = engine.try_run_once(cfg, material, session_id=None,
+                                system_prompt=sys_prompt,
+                                timeout_s=DIARY_TIMEOUT_S)
+    if reply is None:
+        logger.info("diary: skip (engine_busy)")
+        return False
+    if not reply.ok:
+        logger.warning("diary: engine failed (%s)", reply.error_kind)
+        return False
+
+    entry = parse_output(reply.text)
+    if entry is None:
+        logger.warning("diary: unparseable engine output")
+        return False
+
+    if is_decline(entry):
+        record_declined(cfg.diary_state_path, now)
+        logger.info("diary: declined (nothing to keep today)")
+        return False
+
+    path = save_entry(cfg, entry, now)
+    record_written(cfg.diary_state_path, now)
+    # The filename only -- what his page says never goes into a log.
+    logger.info("diary: wrote %s", path.name)
+    return True

@@ -12,8 +12,10 @@ without the seven ground rules, the boundaries file, the stage frame, or
 any memory/diary material, the same way diary.py's own system prompt stays
 narrow. Parsing validates whatever the engine hands back, and the store
 appends entries to a jsonl file and prunes it of anything expired or
-malformed. Calling the engine (reflect_once) and wiring the result into a
-live reply are later milestones' work; nothing here does either.
+malformed. reflect_once() is the execution line on top of all of it:
+gate, one non-blocking engine call that always yields to live
+conversation, parse, redact, append -- never letting any of it raise.
+Wiring it onto the bot's reply hook is a later task's work.
 
 Fail-soft is the whole design for the state file, exactly as in
 stages.py and diary.py: a missing reflection_state.json quietly becomes a
@@ -31,9 +33,12 @@ reflection gets skipped can be tested in isolation, and at call sites logged
 verbatim: every skip is one of a small fixed set of strings, so a quiet turn
 is always explainable after the fact, never a silent no-op.
 
-This module takes plain paths, dicts, and datetimes and imports none of the
-engine or bot at runtime; `Config` and `Persona` appear only in type hints
-under TYPE_CHECKING, costing nothing at runtime. One Layer 1 constant
+The pure-logic half takes plain paths, dicts, and datetimes. reflect_once()
+imports the engine (try_run_once only, the non-blocking call) and persona's
+function surface, and borrows diary.filter_sensitive so the redaction
+patterns keep a single source of truth; the bot module is never imported.
+`Config` and `Persona` appear only in type hints under TYPE_CHECKING,
+costing nothing at runtime. One Layer 1 constant
 (layers.DECLARATION_TEMPLATE) is borrowed so the reflection prompt's opening
 declaration stays byte-identical to the live one; a Persona is otherwise
 consumed purely by attribute access.
@@ -50,6 +55,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from . import engine, persona
+from .diary import filter_sensitive
 from .layers import DECLARATION_TEMPLATE
 
 if TYPE_CHECKING:
@@ -61,7 +68,7 @@ logger = logging.getLogger("everthine")
 # --- Module constants ---------------------------------------------------
 
 REFLECTION_MIN_MSG_LEN = 20     # her message must be at least this long (strip'd)
-REFLECTION_TIMEOUT_S = 60       # engine budget for one reflection (a later task uses this)
+REFLECTION_TIMEOUT_S = 60       # engine budget for one reflection (reflect_once's call)
 REFLECTION_RETENTION_DAYS = 60  # entries older than this are pruned at boot
 
 _BARE_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -394,3 +401,63 @@ def prune(cfg: Config, now: datetime) -> None:
         if os.path.exists(tmp):
             os.unlink(tmp)
     logger.info("reflection: pruned %d entries (expired or malformed)", dropped)
+
+
+# ---------------------------------------------------------------------
+# Execution: one complete reflection attempt (the reply hook's worker)
+# ---------------------------------------------------------------------
+
+def reflect_once(cfg: Config, user_msg: str, reply_text: str, now: datetime) -> None:
+    """One complete attempt at a post-reply beat of thought. It hangs off
+    the reply path as fire-and-forget (a later task wires it there), so
+    the whole body is wrapped: NO exception may ever propagate out of
+    here -- a broken reflection must never touch a reply. Every quiet
+    return logs its own named reason at DEBUG (skipping is per-turn
+    routine); only a recorded entry speaks at INFO.
+
+    The engine call is try_run_once with a fresh session
+    (session_id=None: one private thought, never the live conversation's
+    session) and the reflection's own timeout budget. A busy engine
+    simply means this thought goes unwritten -- yielding to live
+    conversation is the design, not a failure. A failed reply (ok=False)
+    is discarded whole: engine error text must never enter the texture
+    file. What does get kept passes through diary.filter_sensitive
+    first, so a credential she pasted in conversation can never surface
+    in the jsonl.
+    """
+    try:
+        settings = persona.current_settings(cfg)
+        if settings is None:
+            logger.debug("reflection: skip (file_mode)")
+            return
+
+        state = load_state(cfg.reflection_state_path)
+        reason = should_reflect(cfg, user_msg, state, now)
+        if reason is not None:
+            logger.debug("reflection: skip (%s)", reason)
+            return
+
+        persona_obj = persona.load_persona(cfg)
+        system, user = build_reflection_prompt(persona_obj, user_msg, reply_text)
+
+        reply = engine.try_run_once(cfg, user, session_id=None,
+                                    system_prompt=system,
+                                    timeout_s=REFLECTION_TIMEOUT_S)
+        if reply is None:
+            logger.debug("reflection: skip (engine_busy)")
+            return
+        if not reply.ok:
+            logger.debug("reflection: engine failed (%s)", reply.error_kind)
+            return
+
+        text = parse_output(reply.text)
+        if text is None:
+            logger.debug("reflection: unparseable engine output")
+            return
+
+        text = filter_sensitive(text)
+        append_entry(cfg, text, now)
+        record_written(cfg.reflection_state_path, now)
+        logger.info("reflection: recorded")
+    except Exception as exc:
+        logger.warning("reflection: swallowed %s: %s", type(exc).__name__, exc)
