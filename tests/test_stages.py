@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 from everthine import stages
 
@@ -51,6 +52,26 @@ class TestLoadState(unittest.TestCase):
             state = stages.load_state(p)
             self.assertEqual(state, {"current": None, "history": []})
             self.assertEqual(len(list(Path(td).glob("stage.json.corrupt-*"))), 1)
+
+    def test_corpse_rename_failure_is_swallowed_and_still_degrades(self):
+        """T5c: when preserving the broken file as a .corrupt corpse fails
+        (a permissions problem, a target collision, the file vanishing
+        underneath us), _quarantine_corpse swallows the OSError with its own
+        warning and load_state still returns a fresh state -- corpse
+        preservation is a courtesy, never a reason to crash a reply. The
+        broken original is left in place rather than lost."""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "stage.json"
+            p.write_text("{not json", encoding="utf-8")
+            with mock.patch.object(Path, "rename",
+                                   side_effect=OSError("rename blocked")):
+                with self.assertLogs("everthine", level="WARNING") as cm:
+                    state = stages.load_state(p)  # must not raise
+            self.assertEqual(state, {"current": None, "history": []})
+            # Rename failed, so no corpse exists and the broken file stays.
+            self.assertEqual(list(Path(td).glob("stage.json.corrupt-*")), [])
+            self.assertTrue(p.exists())
+            self.assertTrue(any("could not preserve" in line for line in cm.output))
 
 
 class TestResolveIndex(unittest.TestCase):

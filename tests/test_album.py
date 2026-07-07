@@ -5,6 +5,8 @@ tests/test_stages.py (corrupt-file assertions) and tests/test_config.py
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest import mock
 
 from everthine import album
 from everthine.config import load_config
@@ -72,6 +74,26 @@ class TestWriteAndDedup(unittest.TestCase):
             self.assertEqual(entries, [])
             corpses = list(cfg.album_path.parent.glob("album.json.corrupt-*"))
             self.assertEqual(len(corpses), 1)  # her kept moments are never overwritten silently
+
+    def test_corpse_rename_failure_is_swallowed_and_still_degrades(self):
+        """T5c: a rename failure while preserving the broken album as a
+        .corrupt corpse is swallowed with its own warning; load_album still
+        returns a fresh, empty album and never crashes. The broken original
+        is left in place rather than lost -- corpse preservation is a
+        courtesy, never a reason to crash a reply."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            cfg.album_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg.album_path.write_text("{not json", encoding="utf-8")
+            with mock.patch.object(Path, "rename",
+                                   side_effect=OSError("rename blocked")):
+                with self.assertLogs("everthine", level="WARNING") as cm:
+                    entries = album.all_entries(cfg)  # must not raise
+            self.assertEqual(entries, [])
+            self.assertEqual(
+                list(cfg.album_path.parent.glob("album.json.corrupt-*")), [])
+            self.assertTrue(cfg.album_path.exists())
+            self.assertTrue(any("could not preserve" in line for line in cm.output))
 
     def test_album_disabled_writes_nothing(self):
         with tempfile.TemporaryDirectory() as td:
