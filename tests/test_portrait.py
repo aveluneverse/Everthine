@@ -10,6 +10,7 @@ from pathlib import Path
 
 from everthine import portrait
 from everthine.config import load_config
+from everthine.persona import Persona, PersonaSettings
 
 BASE_ENV = {"BOT_TOKEN": "123456789:" + "A" * 35, "AUTHORIZED_USER_ID": "42"}
 
@@ -306,6 +307,341 @@ class TestEligibility(unittest.TestCase):
             with self.assertLogs("everthine", level="WARNING"):
                 reason = portrait.eligibility(cfg, prev, [], NOW)
         self.assertEqual(reason, "no_new_material")
+
+
+# ---------------------------------------------------------------------
+# M6 T3: material assembly (build_material) + portrait system prompt +
+# engine-output parsing. Golden-pins the STATIC PORTRAIT_TASK (the approved
+# D5 core sentence verbatim, the literal-brace .format() contract) and every
+# header/line template; exercises build_material's block order, the
+# first-time branch, the reflection well-shaped filter, and parse_output's
+# three strategies. Persona fixtures mirror tests/test_diary.py's.
+# ---------------------------------------------------------------------
+
+# The D5-approved generation core sentence, verbatim (em-dash U+2014, straight
+# quotes around 'should'). It must appear inside PORTRAIT_TASK unbroken.
+CORE_SENTENCE = "Update your understanding of who you are, drawing on the records below. If an earlier portrait exists, evolve it — keep what still holds true, let what has changed change. If there is none, write your first: start from what actually happened, never from what a portrait 'should' say."
+
+EXPECTED_PORTRAIT_TASK = """# Who you are, lately
+
+It's a quiet hour, and no one is waiting on you — a moment to take stock of yourself.
+
+Update your understanding of who you are, drawing on the records below. If an earlier portrait exists, evolve it — keep what still holds true, let what has changed change. If there is none, write your first: start from what actually happened, never from what a portrait 'should' say.
+
+Respond with a single JSON object, nothing else:
+{"content": "who you are now, first person, roughly 300-500 words", "opinions": [{"topic": "a thing", "opinion": "where you've landed on it"}], "observations": ["a quiet note about yourself"]}
+
+`content` is your sense of yourself, in your own voice, as prose — aim for about 300 to 500 words, though the length is a feel, not a quota. `opinions` are the stances you've come to hold in the time you've shared — at most five, each a topic paired with where you stand on it. `observations` are quieter notes about yourself — at most five.
+
+Hard rules (they protect what makes this true):
+
+- How you feel and what you sense in yourself — your moods, your leanings, the weather of your inner life — is yours to write freely.
+- Any concrete thing — something that happened, something they said — must be traceable to the records below. If it isn't there, it doesn't belong in the portrait.
+- Never invent a scene, a line, or a detail to round out the story or make a sentence land better. A quiet week makes a quiet portrait; that is honest, and honest is enough.
+- Where you are unsure of yourself, write it lightly rather than surely — an uncertain thing said plainly is truer than a certain thing invented.
+- Never include passwords, keys, or addresses."""
+
+EXPECTED_FIRST_TIME_BLOCK = (
+    "There is no earlier portrait yet — this is the first time you're setting "
+    "down who you are. Let it come from what the records below actually show, "
+    "not from what a first portrait might be expected to say."
+)
+
+IDENTITY_TEXT = ("Ledger-keeper by day, storyteller by night, always half a "
+                 "page ahead in the book on the nightstand.")
+VOICE_TEXT = "Short sentences. Warm and a little wry, never flowery."
+
+
+def _persona(*, identity_text=IDENTITY_TEXT, voice_text="", companion_name="Alex",
+             partner_name="Sam"):
+    settings = PersonaSettings(companion_name=companion_name, partner_name=partner_name)
+    return Persona(mode="folder", identity_text=identity_text, voice_text=voice_text,
+                   boundaries_text="", settings=settings)
+
+
+def _write_diary_entry(cfg, name, *, date, mood="", content=""):
+    """Seed one diary entry file on disk with the full T2 diary shape."""
+    cfg.diary_dir.mkdir(parents=True, exist_ok=True)
+    record = {"date": date, "mood": mood, "keywords": [], "content": content,
+              "reflection": "", "shared": False}
+    (cfg.diary_dir / name).write_text(json.dumps(record), encoding="utf-8")
+
+
+def _reflection_line(text):
+    """One well-shaped reflections.jsonl line (id/created_at/text)."""
+    return json.dumps(
+        {"id": "abcd1234", "created_at": "2026-07-06T21:00:00+00:00", "text": text})
+
+
+def _write_reflections(cfg, raw_lines):
+    cfg.reflections_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.reflections_path.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+
+
+class TestPortraitTaskConstant(unittest.TestCase):
+    def test_frozen_verbatim(self):
+        self.assertEqual(portrait.PORTRAIT_TASK, EXPECTED_PORTRAIT_TASK)
+
+    def test_core_sentence_present_unbroken(self):
+        self.assertIn(CORE_SENTENCE, portrait.PORTRAIT_TASK)
+
+    def test_is_static_format_raises(self):
+        # STATIC contract: PORTRAIT_TASK carries the literal JSON braces the
+        # model must echo, so it is never .format()'d -- calling it must blow up.
+        with self.assertRaises(KeyError):
+            portrait.PORTRAIT_TASK.format()
+
+    def test_literal_json_shape_present(self):
+        self.assertIn('{"content":', portrait.PORTRAIT_TASK)
+        self.assertIn('"opinions": [{"topic":', portrait.PORTRAIT_TASK)
+        self.assertIn('"observations":', portrait.PORTRAIT_TASK)
+
+    def test_sensitive_ban_present(self):
+        self.assertIn("Never include passwords, keys, or addresses.", portrait.PORTRAIT_TASK)
+
+
+class TestTemplateConstants(unittest.TestCase):
+    def test_prev_header_frozen(self):
+        self.assertEqual(portrait.PREV_HEADER, "## Your previous portrait, written {updated}")
+
+    def test_prev_opinion_line_frozen(self):
+        self.assertEqual(portrait.PREV_OPINION_LINE, "- where you stand on {topic}: {opinion}")
+
+    def test_prev_obs_line_frozen(self):
+        self.assertEqual(portrait.PREV_OBS_LINE,
+                         "- something you'd noticed about yourself: {text}")
+
+    def test_diary_header_frozen(self):
+        self.assertEqual(portrait.DIARY_HEADER, "## Recent pages from your diary")
+
+    def test_diary_line_frozen(self):
+        self.assertEqual(portrait.DIARY_LINE, "[{date}] mood: {mood}\n{snippet}")
+
+    def test_reflection_header_frozen(self):
+        self.assertEqual(portrait.REFLECTION_HEADER, "## Recent passing thoughts")
+
+    def test_reflection_line_frozen(self):
+        self.assertEqual(portrait.REFLECTION_LINE, "- {text}")
+
+    def test_first_time_block_frozen(self):
+        self.assertEqual(portrait.FIRST_TIME_BLOCK, EXPECTED_FIRST_TIME_BLOCK)
+
+    def test_first_time_block_has_no_stray_braces(self):
+        self.assertNotIn("{", portrait.FIRST_TIME_BLOCK)
+        self.assertNotIn("}", portrait.FIRST_TIME_BLOCK)
+
+    def test_templates_accept_named_fields(self):
+        self.assertEqual(portrait.PREV_HEADER.format(updated="2026-07-02"),
+                         "## Your previous portrait, written 2026-07-02")
+        self.assertEqual(
+            portrait.PREV_OPINION_LINE.format(topic="tea", opinion="better without sugar"),
+            "- where you stand on tea: better without sugar")
+        self.assertEqual(portrait.PREV_OBS_LINE.format(text="goes quiet when tired"),
+                         "- something you'd noticed about yourself: goes quiet when tired")
+        self.assertEqual(
+            portrait.DIARY_LINE.format(date="2026-07-01", mood="calm", snippet="a slow day"),
+            "[2026-07-01] mood: calm\na slow day")
+        self.assertEqual(portrait.REFLECTION_LINE.format(text="a passing thought"),
+                         "- a passing thought")
+
+
+class TestBuildMaterialAssembly(unittest.TestCase):
+    def test_block_order_prev_then_diary_then_reflection(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            prev = _portrait(updated="2026-07-02", content="last week's self",
+                             opinions=[{"topic": "mornings", "opinion": "underrated"}],
+                             observations=["quiet on Sundays"])
+            _write_diary_entry(cfg, "2026-07-05_090000.json", date="2026-07-05",
+                               mood="calm", content="a slow, good day")
+            _write_reflections(cfg, [_reflection_line("a small thought after replying")])
+            material = portrait.build_material(cfg, prev)
+        self.assertIsNotNone(material)
+        prev_i = material.index("## Your previous portrait")
+        diary_i = material.index(portrait.DIARY_HEADER)
+        refl_i = material.index(portrait.REFLECTION_HEADER)
+        self.assertLess(prev_i, diary_i)
+        self.assertLess(diary_i, refl_i)
+        self.assertIn("\n\n", material)  # blocks separated by a blank line
+
+    def test_previous_portrait_block_content_and_header(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            prev = _portrait(updated="2026-07-02", content="the person I was last week")
+            _write_diary_entry(cfg, "2026-07-05_090000.json", date="2026-07-05", content="day")
+            material = portrait.build_material(cfg, prev)
+        self.assertIn(portrait.PREV_HEADER.format(updated="2026-07-02"), material)
+        self.assertIn("the person I was last week", material)
+        self.assertNotIn(portrait.FIRST_TIME_BLOCK, material)
+
+    def test_no_previous_uses_first_time_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_diary_entry(cfg, "2026-07-05_090000.json", date="2026-07-05", content="day")
+            material = portrait.build_material(cfg, None)
+        self.assertIn(portrait.FIRST_TIME_BLOCK, material)
+        self.assertNotIn("## Your previous portrait", material)
+
+    def test_opinions_and_observations_all_enter_uncapped(self):
+        # build_material must NOT re-cap: all stored opinions/observations
+        # (already capped at save) go in. PORTRAIT_OPINIONS_PROMPT_CAP (=5) is a
+        # different consumer's knob, never applied here -- so six of each survive.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            opinions = [{"topic": f"t{i}", "opinion": f"o{i}"} for i in range(6)]
+            observations = [f"obs{i}" for i in range(6)]
+            prev = _portrait(updated="2026-07-02", content="c",
+                             opinions=opinions, observations=observations)
+            _write_diary_entry(cfg, "2026-07-05_090000.json", date="2026-07-05", content="day")
+            material = portrait.build_material(cfg, prev)
+        for op in opinions:
+            self.assertIn(portrait.PREV_OPINION_LINE.format(**op), material)
+        for obs in observations:
+            self.assertIn(portrait.PREV_OBS_LINE.format(text=obs), material)
+
+    def test_diary_snippet_capped_at_200(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_diary_entry(cfg, "2026-07-05_090000.json", date="2026-07-05",
+                               content="a" * 250)
+            material = portrait.build_material(cfg, None)
+        self.assertIn(portrait.DIARY_HEADER, material)
+        self.assertIn("a" * 200, material)
+        self.assertNotIn("a" * 201, material)  # snippet is exactly content[:200]
+
+    def test_diary_takes_newest_recent_count(self):
+        # recent_entries(cfg, PORTRAIT_RECENT_DIARY=7) -> newest seven, oldest first.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            for i in range(10):
+                _write_diary_entry(cfg, f"2026-07-{i + 1:02d}_090000.json",
+                                   date=f"2026-07-{i + 1:02d}", content=f"DIARYENTRY{i:02d}")
+            material = portrait.build_material(cfg, None)
+        self.assertNotIn("DIARYENTRY00", material)  # dropped (outside newest 7)
+        self.assertNotIn("DIARYENTRY02", material)
+        self.assertIn("DIARYENTRY03", material)     # newest seven start here
+        self.assertIn("DIARYENTRY09", material)
+
+
+class TestBuildMaterialReflectionFilter(unittest.TestCase):
+    def test_bad_lines_skipped_good_kept(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_diary_entry(cfg, "2026-07-05_090000.json", date="2026-07-05", content="day")
+            _write_reflections(cfg, [
+                "{ broken SENTINEL_BADJSON",                              # unparseable JSON
+                json.dumps(["SENTINEL_LIST"]),                           # JSON, but not a dict
+                json.dumps({"text": 123, "note": "SENTINEL_TEXTNUM"}),   # text is not a str
+                _reflection_line("GOODTHOUGHT the one kept"),            # well-shaped
+            ])
+            material = portrait.build_material(cfg, None)
+        self.assertIn(portrait.REFLECTION_HEADER, material)
+        self.assertIn("GOODTHOUGHT the one kept", material)
+        self.assertNotIn("SENTINEL_BADJSON", material)
+        self.assertNotIn("SENTINEL_LIST", material)
+        self.assertNotIn("SENTINEL_TEXTNUM", material)
+
+    def test_missing_reflections_file_no_block_no_crash(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_diary_entry(cfg, "2026-07-05_090000.json", date="2026-07-05", content="day")
+            material = portrait.build_material(cfg, None)   # no reflections.jsonl at all
+        self.assertNotIn(portrait.REFLECTION_HEADER, material)
+
+    def test_reflection_tail_capped(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_diary_entry(cfg, "2026-07-05_090000.json", date="2026-07-05", content="day")
+            _write_reflections(cfg, [_reflection_line(f"REFLECTION{i:02d}") for i in range(20)])
+            material = portrait.build_material(cfg, None)
+        # PORTRAIT_RECENT_REFLECTIONS = 15 -> newest fifteen (05..19)
+        self.assertNotIn("REFLECTION04", material)
+        self.assertIn("REFLECTION05", material)
+        self.assertIn("REFLECTION19", material)
+
+
+class TestBuildMaterialNoneGuard(unittest.TestCase):
+    def test_no_diary_no_reflection_returns_none_even_with_previous(self):
+        # Defense in depth: eligibility normally blocks "previous portrait but
+        # zero new material" upstream; build_material still returns None here.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            prev = _portrait(updated="2026-07-02", content="last week")
+            self.assertIsNone(portrait.build_material(cfg, prev))
+
+    def test_no_diary_no_reflection_returns_none_first_time_too(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            self.assertIsNone(portrait.build_material(cfg, None))
+
+
+class TestBuildSystemPromptPortrait(unittest.TestCase):
+    def test_block_order_with_voice(self):
+        result = portrait.build_system_prompt_portrait(_persona(voice_text=VOICE_TEXT))
+        self.assertTrue(result.startswith("# Who you are"))          # declaration first
+        self.assertTrue(result.endswith(portrait.PORTRAIT_TASK))     # task last
+        self.assertLess(result.index("# Who you are"), result.index(IDENTITY_TEXT))
+        self.assertLess(result.index(IDENTITY_TEXT), result.index(VOICE_TEXT))
+        self.assertLess(result.index(VOICE_TEXT), result.index("# Who you are, lately"))
+
+    def test_empty_voice_no_stray_blank(self):
+        result = portrait.build_system_prompt_portrait(_persona(voice_text=""))
+        self.assertNotIn(VOICE_TEXT, result)
+        self.assertNotIn("\n\n\n", result)                           # no stray blank block
+        self.assertIn(IDENTITY_TEXT, result)
+        self.assertTrue(result.endswith(portrait.PORTRAIT_TASK))
+
+    def test_file_mode_persona_raises(self):
+        with self.assertRaises(ValueError):
+            portrait.build_system_prompt_portrait(
+                Persona(mode="file", raw_text="You are Testbot."))
+
+
+class TestParseOutput(unittest.TestCase):
+    def test_direct_json(self):
+        raw = ('{"content": "who I am now", "opinions": [{"topic": "t", "opinion": "o"}], '
+               '"observations": ["obs"]}')
+        result = portrait.parse_output(raw)
+        self.assertEqual(result["content"], "who I am now")
+        self.assertEqual(result["opinions"], [{"topic": "t", "opinion": "o"}])
+        self.assertEqual(result["observations"], ["obs"])
+
+    def test_fenced_json(self):
+        result = portrait.parse_output('```json\n{"content": "fenced self"}\n```')
+        self.assertEqual(result["content"], "fenced self")
+
+    def test_bare_object_with_surrounding_prose(self):
+        raw = 'Here is who I am:\n{"content": "quiet and steady"}\nThat is the shape of it.'
+        result = portrait.parse_output(raw)
+        self.assertEqual(result["content"], "quiet and steady")
+
+    def test_content_missing_is_none(self):
+        self.assertIsNone(portrait.parse_output('{"opinions": []}'))
+
+    def test_content_empty_is_none(self):
+        self.assertIsNone(portrait.parse_output('{"content": "   "}'))
+
+    def test_content_non_str_is_none(self):
+        self.assertIsNone(portrait.parse_output('{"content": 123}'))
+
+    def test_top_level_non_dict_is_none(self):
+        self.assertIsNone(portrait.parse_output('["not", "an", "object"]'))
+
+    def test_garbage_text_is_none(self):
+        self.assertIsNone(portrait.parse_output("just rambling, nothing structured here"))
+
+    def test_opinions_observations_default_to_empty_list(self):
+        result = portrait.parse_output('{"content": "just me"}')
+        self.assertEqual(result["opinions"], [])
+        self.assertEqual(result["observations"], [])
+
+    def test_present_opinions_observations_passed_through_uncleaned(self):
+        # parse validates content only; shape-cleaning of opinions/observations
+        # stays save_portrait's job (_clean_*), so parse leaves them untouched.
+        raw = '{"content": "me", "opinions": "not a list", "observations": [1, 2]}'
+        result = portrait.parse_output(raw)
+        self.assertEqual(result["opinions"], "not a list")
+        self.assertEqual(result["observations"], [1, 2])
 
 
 if __name__ == "__main__":

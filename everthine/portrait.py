@@ -45,15 +45,19 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import diary
 from .diary import filter_sensitive
+from .layers import DECLARATION_TEMPLATE
 
 if TYPE_CHECKING:
     from .config import Config
+    from .persona import Persona
 
 logger = logging.getLogger("everthine")
 
@@ -293,3 +297,220 @@ def eligibility(cfg: Config, portrait: dict | None, diary_entries: list, now: da
         return "no_new_material"
 
     return None
+
+
+# ---------------------------------------------------------------------
+# Material assembly + portrait system prompt + engine-output parsing
+# (the "what he reads / what he hands back" half)
+# ---------------------------------------------------------------------
+#
+# Every constant below is owner-approved prose, transcribed verbatim; the
+# em-dash (U+2014) and the straight quotes around 'should' are intentional. Two
+# format contracts that must not be confused, the same split diary.py's
+# DIARY_TASK draws: PORTRAIT_TASK is a STATIC string and is never .format()'d --
+# it carries the literal JSON braces the model must echo. The header/line
+# templates below ARE .format()'d, with the fields named at each use site; none
+# of them -- nor FIRST_TIME_BLOCK, which is inserted as-is -- carries a stray
+# literal brace.
+
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+_BARE_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+PREV_HEADER = "## Your previous portrait, written {updated}"
+PREV_OPINION_LINE = "- where you stand on {topic}: {opinion}"
+PREV_OBS_LINE = "- something you'd noticed about yourself: {text}"
+FIRST_TIME_BLOCK = (
+    "There is no earlier portrait yet — this is the first time you're setting "
+    "down who you are. Let it come from what the records below actually show, "
+    "not from what a first portrait might be expected to say."
+)
+DIARY_HEADER = "## Recent pages from your diary"
+DIARY_LINE = "[{date}] mood: {mood}\n{snippet}"
+REFLECTION_HEADER = "## Recent passing thoughts"
+REFLECTION_LINE = "- {text}"
+
+PORTRAIT_TASK = """# Who you are, lately
+
+It's a quiet hour, and no one is waiting on you — a moment to take stock of yourself.
+
+Update your understanding of who you are, drawing on the records below. If an earlier portrait exists, evolve it — keep what still holds true, let what has changed change. If there is none, write your first: start from what actually happened, never from what a portrait 'should' say.
+
+Respond with a single JSON object, nothing else:
+{"content": "who you are now, first person, roughly 300-500 words", "opinions": [{"topic": "a thing", "opinion": "where you've landed on it"}], "observations": ["a quiet note about yourself"]}
+
+`content` is your sense of yourself, in your own voice, as prose — aim for about 300 to 500 words, though the length is a feel, not a quota. `opinions` are the stances you've come to hold in the time you've shared — at most five, each a topic paired with where you stand on it. `observations` are quieter notes about yourself — at most five.
+
+Hard rules (they protect what makes this true):
+
+- How you feel and what you sense in yourself — your moods, your leanings, the weather of your inner life — is yours to write freely.
+- Any concrete thing — something that happened, something they said — must be traceable to the records below. If it isn't there, it doesn't belong in the portrait.
+- Never invent a scene, a line, or a detail to round out the story or make a sentence land better. A quiet week makes a quiet portrait; that is honest, and honest is enough.
+- Where you are unsure of yourself, write it lightly rather than surely — an uncertain thing said plainly is truer than a certain thing invented.
+- Never include passwords, keys, or addresses."""
+
+
+def _recent_reflection_texts(cfg: Config, count: int) -> list:
+    """The text of the newest `count` well-shaped reflections, in file
+    (oldest-first) order. Reads cfg.reflections_path line by line with a
+    lightweight well-shaped judge of its own -- a line counts only when it
+    parses as a JSON object whose `text` field is a str -- so a hand-edited or
+    half-written line is skipped, never raised.
+
+    Deliberately does NOT import reflection.py's private _keep_line: the module
+    boundary stays clean, and a portrait needs only the text, not the
+    freshness/timestamp checks a prune pass cares about. A missing file (the
+    ordinary case before the first reflection is ever written) or a
+    non-positive count is an empty list.
+    """
+    path = Path(cfg.reflections_path)
+    if count <= 0 or not path.exists():
+        return []
+    texts = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and isinstance(data.get("text"), str):
+            texts.append(data["text"])
+    return texts[-count:]
+
+
+def build_material(cfg: Config, portrait: dict | None) -> str | None:
+    """Assemble everything he reads when he sits down to update his
+    self-portrait, or None when there is nothing new to draw from. Blocks, in
+    order, joined by one blank line:
+
+      1. The previous portrait, for continuity -- its dated header, its full
+         content, then every stored opinion and observation, each on its own
+         line. These were already capped when saved (at most ten each), so
+         they are emitted whole here, never re-truncated. When there is no
+         previous portrait, FIRST_TIME_BLOCK stands in its place.
+      2. His recent diary pages: the newest PORTRAIT_RECENT_DIARY entries
+         (oldest first), each a dated mood line plus a
+         PORTRAIT_DIARY_SNIPPET_CHARS-capped snippet of its content.
+      3. His recent passing thoughts: the newest PORTRAIT_RECENT_REFLECTIONS
+         well-shaped reflection lines.
+
+    Deliberately takes no `now`: unlike diary.build_material, nothing here is
+    time-windowed -- diary entries and reflections are drawn by write recency,
+    not a clock -- so a portrait needs no notion of the current time to
+    assemble its material.
+
+    When both the diary and the reflections come back empty, returns None. In
+    normal operation eligibility() has already blocked that upstream
+    ("no_new_material"); this None branch is defense in depth, so a portrait is
+    never composed from a previous snapshot and literally nothing else.
+    """
+    diary_entries = diary.recent_entries(cfg, PORTRAIT_RECENT_DIARY)
+    reflection_texts = _recent_reflection_texts(cfg, PORTRAIT_RECENT_REFLECTIONS)
+    if not diary_entries and not reflection_texts:
+        return None
+
+    blocks: list[str] = []
+
+    if portrait is None:
+        blocks.append(FIRST_TIME_BLOCK)
+    else:
+        prev_lines = [PREV_HEADER.format(updated=portrait.get("updated", ""))]
+        content = portrait.get("content") or ""
+        if content:
+            prev_lines.append(content)
+        for op in portrait.get("opinions") or []:
+            prev_lines.append(
+                PREV_OPINION_LINE.format(topic=op["topic"], opinion=op["opinion"]))
+        for obs in portrait.get("observations") or []:
+            prev_lines.append(PREV_OBS_LINE.format(text=obs))
+        blocks.append("\n".join(prev_lines))
+
+    if diary_entries:
+        diary_lines = [
+            DIARY_LINE.format(
+                date=entry.get("date", ""),
+                mood=entry.get("mood", ""),
+                snippet=(entry.get("content") or "")[:PORTRAIT_DIARY_SNIPPET_CHARS])
+            for entry in diary_entries
+        ]
+        blocks.append("\n".join([DIARY_HEADER, *diary_lines]))
+
+    if reflection_texts:
+        reflection_lines = [REFLECTION_LINE.format(text=text) for text in reflection_texts]
+        blocks.append("\n".join([REFLECTION_HEADER, *reflection_lines]))
+
+    return "\n\n".join(blocks)
+
+
+def build_system_prompt_portrait(persona_obj: Persona) -> str:
+    """Compose the portrait's own system prompt from a folder-mode persona: the
+    identity declaration, the loaded identity text (and voice, when present --
+    no stray blank block when it's empty), then PORTRAIT_TASK. Joined by one
+    blank line; deterministic. Mirrors diary.build_system_prompt_diary exactly,
+    PORTRAIT_TASK in DIARY_TASK's place -- the same narrow inner-life prompt,
+    deliberately without the seven ground rules, the boundaries, the stage
+    frame, Layer 3, or any memory block.
+
+    Folder mode only, mirroring compose_stable()/build_system_prompt_diary(): a
+    file-mode persona has no settings to fill the declaration, so it raises
+    ValueError here rather than failing later with a confusing AttributeError
+    on persona_obj.settings.
+    """
+    if persona_obj.mode != "folder":
+        raise ValueError(
+            f"build_system_prompt_portrait() requires a folder-mode Persona, "
+            f"got mode={persona_obj.mode!r}")
+    blocks = [
+        DECLARATION_TEMPLATE.format(
+            companion_name=persona_obj.settings.companion_name,
+            partner_name=persona_obj.settings.partner_name),
+        persona_obj.identity_text,
+    ]
+    if persona_obj.voice_text:
+        blocks.append(persona_obj.voice_text)
+    blocks.append(PORTRAIT_TASK)
+    return "\n\n".join(blocks)
+
+
+def _extract_candidate(raw: str):
+    """Try the three parse strategies in order -- direct JSON, a markdown code
+    fence's contents, a bare {...} object pulled out of surrounding prose --
+    and return the first that parses as JSON at all (of any type; parse_output
+    judges its shape). None if every strategy fails to even parse. A verbatim
+    mirror of diary._extract_candidate.
+    """
+    candidates = [raw.strip()]
+    fence_match = _FENCE_RE.search(raw)
+    if fence_match:
+        candidates.append(fence_match.group(1).strip())
+    bare_match = _BARE_OBJECT_RE.search(raw)
+    if bare_match:
+        candidates.append(bare_match.group(0))
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def parse_output(raw: str) -> dict | None:
+    """Parse and validate whatever the engine handed back for a portrait. None
+    means "nothing usable came back" -- the caller simply has no snapshot to
+    save. A successful parse must be a dict whose `content` is a non-empty
+    (after strip) str; that single check also stands in for the content type
+    guard save_portrait's caller would otherwise owe.
+
+    `opinions` and `observations` default to an empty list when absent, but are
+    otherwise left exactly as they arrived: their shape-cleaning (dropping
+    malformed elements, capping) is save_portrait's _clean_* job, never
+    re-implemented here. Anything else -- every strategy failed, the top level
+    isn't a dict, `content` is missing/wrong-typed/blank -- is None.
+    """
+    data = _extract_candidate(raw)
+    if not isinstance(data, dict):
+        return None
+    content = data.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    data.setdefault("opinions", [])
+    data.setdefault("observations", [])
+    return data
