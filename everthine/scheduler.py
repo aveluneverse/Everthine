@@ -104,7 +104,7 @@ PROACTIVE_TIMEOUT_S = 120        # engine budget for one proactive message; a la
 # (15 open hours/day), 15 * 12 = 180. 180 * 0.02 ~= 3.6 expected share
 # rolls a day, in practice capped by share_max_daily (2 by default). The
 # chance of at least one hit within the first 4 open hours (48 ticks) is
-# 1 - (1 - 0.02)**48 ~= 63%: the distribution is naturally front-loaded,
+# 1 - (1 - 0.02)**48 ~= 62%: the distribution is naturally front-loaded,
 # but a chance to share persists all day long.
 SHARE_CHANCE_PER_TICK = 0.02
 

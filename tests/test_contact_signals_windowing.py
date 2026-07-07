@@ -8,7 +8,7 @@ became wasteful. The scan now reads the newest CONTACT_SCAN_RECENT_FILES day
 files first and only falls back to the full archive when that window holds no
 user entry -- correctness never yields to the fast path.
 
-Two kinds of test live here, deliberately kept apart:
+Three kinds of test live here, deliberately kept apart:
 
 * Equivalence pins (TestContactSignalsEquivalencePins) lock behavior that must
   NOT change. They reference only the public contact_signals surface and a local
@@ -20,11 +20,19 @@ Two kinds of test live here, deliberately kept apart:
   (the RED) and go green once the window exists. The performance guarantee is a
   read-count seam, never a wall-clock assertion.
 
+* Malformed-line tolerance parity (TestMalformedLineToleranceParity) pins that
+  the window's own parser, _iter_day_files, skips a broken line exactly like
+  archive.iter_entries (the full-scan fallback's parser) does. The two are
+  separate functions that happen to share one try/except tuple by hand-kept
+  convention, not by calling into a single shared parser, so nothing stops a
+  future edit to one from silently drifting away from the other.
+
 Conventions follow tests/test_persona_assembly_wiring.py: an explicit aware
 `now` fixed to mid-afternoon (far from midnight, so the first_today date math is
 never disturbed) and explicit entry timestamps, so nothing depends on the wall
 clock.
 """
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -189,6 +197,39 @@ class TestContactScanReadCount(unittest.TestCase):
 
             self.assertTrue(called)                                  # fallback engaged
             self.assertEqual(last_contact, _naive_local(orphan_ts))  # correctness kept
+
+
+class TestMalformedLineToleranceParity(unittest.TestCase):
+    """_iter_day_files (the recent-window parser) must tolerate a malformed
+    line exactly like archive.iter_entries (the full-scan/fallback parser)
+    does: skip it and keep going, never surface it as a crash. Both parsers
+    reach the same try/except (json.JSONDecodeError, KeyError, ValueError,
+    TypeError) shape today, kept in step by convention rather than by
+    sharing one function -- this regression-pins that parity so a future
+    edit narrowing one tuple without the other cannot drift silently.
+    """
+
+    def test_malformed_line_in_recent_window_file_is_skipped_not_fatal(self):
+        # A single day file, comfortably inside the (up to) _WINDOW-file
+        # recent window on its own: a broken line followed by one valid
+        # user entry. The window scan must recover that entry's timestamp,
+        # proving the broken line was skipped rather than raising -- were
+        # it to raise, contact_signals' own outer try/except would still
+        # swallow it, but last_contact would come back None instead of the
+        # valid entry's timestamp, which is exactly what this pins against.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(Path(td))
+            d = cfg.archive_dir
+            d.mkdir(parents=True, exist_ok=True)
+            valid_ts = NOW - timedelta(hours=1)
+            day_file = d / f"{valid_ts.date().isoformat()}.jsonl"
+            valid_line = json.dumps(
+                {"timestamp": valid_ts.isoformat(), "speaker": "user", "text": "hi"})
+            day_file.write_text(f'{{"broken\n{valid_line}\n', encoding="utf-8")
+
+            last_contact, _ = persona.contact_signals(cfg, NOW)
+
+            self.assertEqual(last_contact, _naive_local(valid_ts))
 
 
 if __name__ == "__main__":

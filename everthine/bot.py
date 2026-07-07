@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import queue
 import re
 import threading
@@ -1219,11 +1220,71 @@ def _install_token_mask_filter() -> None:
         handler.addFilter(TokenMaskFilter())
 
 
+# ---------------------------------------------------------------------
+# LOG_LEVEL env knob (M7 whole-branch final review)
+# ---------------------------------------------------------------------
+
+# M7's named-skip design routes the routine reasons a tick stays quiet --
+# quiet hours, a missed dice roll, an active cooldown, a still-active
+# partner window -- down to DEBUG, so "why didn't he say anything just
+# now" has an answer. That answer is invisible at the production default
+# (INFO) unless something can raise the root logger's level without a
+# code change. LOG_LEVEL is that switch: unset or empty keeps today's INFO
+# default, DEBUG surfaces every named skip reason each tick, and an
+# unrecognized value falls back to INFO with a one-line warning naming it.
+
+def _resolve_log_level(raw: str | None) -> tuple[int, str | None]:
+    """Resolve a LOG_LEVEL env value to (numeric level, bad_value).
+
+    bad_value is None on success, including the unset/empty case, which
+    quietly resolves to logging.INFO -- config.py's own _get_bool /
+    _get_int helpers treat an absent or blank env var the same way, as
+    "use the default," not as an error. A non-empty value that does not
+    name a real level (case-insensitive: "debug" / "Debug" / "DEBUG" all
+    resolve alike) also falls back to logging.INFO, but is returned as
+    bad_value instead of None so the caller -- which has an active
+    logger, this function does not -- can warn about it. A plain function
+    with no I/O and no global state, so it is directly testable without
+    touching real logging.
+    """
+    if raw is None or str(raw).strip() == "":
+        return logging.INFO, None
+    name = str(raw).strip().upper()
+    level = getattr(logging, name, None)
+    if isinstance(level, int):
+        return level, None
+    return logging.INFO, raw
+
+
+def _apply_log_level(raw: str | None) -> None:
+    """Resolve LOG_LEVEL and apply it to the root logger, warning once if
+    the value did not name a real level. Split from _resolve_log_level so
+    that stays a plain, I/O-free function while this thin wrapper is what
+    main() actually calls -- directly testable the same way
+    _install_token_mask_filter() is, against the real root logger, without
+    booting the whole application.
+    """
+    level, bad = _resolve_log_level(raw)
+    logging.getLogger().setLevel(level)
+    if bad is not None:
+        logger.warning("LOG_LEVEL=%r is not a valid logging level name; using INFO", bad)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     _install_token_mask_filter()
     cfg = load_config()
+    # LOG_LEVEL is applied here, not folded into the basicConfig() call
+    # above: .env loads inside load_config() (config.py's load_dotenv()),
+    # which runs AFTER basicConfig(). Reading os.environ at the
+    # basicConfig() call site would only ever see a shell-exported
+    # LOG_LEVEL, never one that lives solely in .env. basicConfig() keeps
+    # its INFO bootstrap default -- logging starts exactly when it always
+    # has -- and this adjusts the level moments later, once .env is
+    # actually loaded; nothing logs in between, so no message is ever
+    # emitted at the wrong level in the gap.
+    _apply_log_level(os.environ.get("LOG_LEVEL"))
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     cfg.engine_home.mkdir(parents=True, exist_ok=True)
     if not engine.check_claude_available(cfg):
