@@ -52,9 +52,10 @@ above. `.env` is gitignored; leave it that way.
   (`GREETING_HOUR` and friends). Only write keys the user actually
   chose to change; ship defaults are good defaults.
 - Check: run
-  `python -c "from pathlib import Path; from everthine.persona import load_persona; load_persona(Path('personas/mine')); print('persona OK')"`
-  and confirm it prints `persona OK`. Any error names the exact file
-  and key to fix — fix it and re-run.
+  `python -c "from everthine.config import load_config; from everthine.persona import load_persona; load_persona(load_config()); print('persona OK')"`
+  and confirm it prints `persona OK`. It reads `.env` (so Step 2 must
+  be done first) and validates the persona folder; any error names
+  the exact file and key to fix — fix it and re-run.
 
 ## Step 4 — first boot
 
