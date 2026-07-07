@@ -49,12 +49,13 @@ not files.
    If you believe you found a real bug, say so and point them to the
    project's issue page instead of hot-patching their copy.
 5. **Isolation guarantee.**
-   The companion's engine runs with its working directory inside data/engine
-   — so this file, the skills, and everything else in the repo root
-   are never loaded into *his* context. He doesn't know this file
-   exists. Keep it that way: never point the engine's working
-   directory at the repo root, and never copy setup documents into
-   `data/`.
+   The companion's engine runs in a neutral working directory outside this repo
+   (a small folder inside the user's home directory) — so this file,
+   the skills, and everything else in the repo root are never on the
+   engine's memory path. He doesn't know this file exists. Keep it
+   that way: never point the engine's working directory back into
+   the repo, and never copy setup documents into `data/` or the
+   engine's folder.
 6. **Honest costs.** Every reply, diary entry, reflection, and
    portrait costs the user's own Claude quota. When they ask about
    frequency knobs, tell them the truth about cost (see

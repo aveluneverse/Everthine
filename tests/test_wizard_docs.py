@@ -20,13 +20,13 @@ TROUBLESHOOT = REPO / ".claude" / "skills" / "everthine-troubleshoot" / "SKILL.m
 README = REPO / "README.md"
 
 # The engine-isolation guarantee CLAUDE.md must keep stating verbatim.
-ISOLATION_ANCHOR = ("The companion's engine runs with its working directory "
-                    "inside data/engine")
+ISOLATION_ANCHOR = ("The companion's engine runs in a neutral working "
+                    "directory outside this repo")
 
 # Paths quoted in wizard prose that intentionally do not exist yet
 # (created for the user during setup, or created at first boot).
 EXPECTED_ABSENT = {"personas/mine", "personas/mine/", "data", "data/",
-                   "data/engine", "data/portrait_timeline.html"}
+                   "data/portrait_timeline.html"}
 
 _PATH_RE = re.compile(r"`([A-Za-z0-9_.][A-Za-z0-9_./-]*)`")
 _ENV_ASSIGN_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})=")

@@ -20,9 +20,12 @@ class EngineTestBase(unittest.TestCase):
         self.addCleanup(os.environ.pop, "FAKE_CLAUDE_STATE", None)
 
     def cfg(self, **kw):
+        # engine_home is pinned inside the tmp dir: its default now lives
+        # under the real user home, which unit tests must never touch.
         base = dict(bot_token="x", authorized_user_id=1,
                     claude_cmd=[sys.executable, FAKE], command_timeout_s=3,
-                    data_dir=self.data_dir)
+                    data_dir=self.data_dir,
+                    engine_home=Path(self._td.name) / "engine-home")
         base.update(kw)
         return Config(**base)
 

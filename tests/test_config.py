@@ -1,3 +1,4 @@
+import dataclasses
 import unittest
 from pathlib import Path
 
@@ -61,9 +62,23 @@ class TestConfig(unittest.TestCase):
 
     def test_derived_paths(self):
         cfg = load_config({**BASE, "DATA_DIR": "companion-data"})
-        self.assertEqual(cfg.engine_home, Path("companion-data") / "engine")
         self.assertEqual(cfg.archive_dir, Path("companion-data") / "archive")
         self.assertEqual(cfg.session_path, Path("companion-data") / "session.json")
+
+    def test_engine_home_defaults_outside_the_repo(self):
+        cfg = load_config({"BOT_TOKEN": "t", "AUTHORIZED_USER_ID": "1"})
+        home = Path.home()
+        self.assertEqual(cfg.engine_home, home / ".everthine" / "engine")
+        # The isolation guarantee: the repo (and the data dir) must not
+        # be an ancestor of the engine's working directory.
+        repo = Path(__file__).resolve().parents[1]
+        self.assertNotIn(repo, cfg.engine_home.parents)
+        self.assertNotIn(cfg.data_dir.resolve(), cfg.engine_home.parents)
+
+    def test_engine_home_is_injectable(self):
+        cfg = load_config({"BOT_TOKEN": "t", "AUTHORIZED_USER_ID": "1"})
+        override = dataclasses.replace(cfg, engine_home=Path("elsewhere"))
+        self.assertEqual(override.engine_home, Path("elsewhere"))
 
     def test_streaming_defaults(self):
         cfg = load_config(BASE)

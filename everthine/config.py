@@ -91,10 +91,13 @@ class Config:
     quiet_start_hour: int = 23
     quiet_end_hour: int = 8
     proactive_daily_max: int = 4
-
-    @property
-    def engine_home(self) -> Path:
-        return self.data_dir / "engine"
+    # The engine's working directory. Deliberately OUTSIDE the repo:
+    # the Claude CLI loads CLAUDE.md memory files from the working
+    # directory and every ancestor directory, so a cwd inside the
+    # repo would leak the repo-root CLAUDE.md (the wizard playbook)
+    # into the companion's context. A neutral folder in the user's
+    # home keeps the repo out of that ancestor chain entirely.
+    engine_home: Path = field(default_factory=lambda: Path.home() / ".everthine" / "engine")
 
     @property
     def archive_dir(self) -> Path:

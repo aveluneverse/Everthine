@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import queue
 import sys
@@ -21,10 +22,13 @@ class StreamTestBase(unittest.TestCase):
         self.addCleanup(os.environ.pop, "FAKE_CLAUDE_STATE", None)
 
     def cfg(self, **kw):
+        # engine_home is pinned inside the tmp dir: its default now lives
+        # under the real user home, which unit tests must never touch.
         base = dict(bot_token="x", authorized_user_id=1,
                     claude_cmd=[sys.executable, FAKE], command_timeout_s=15,
                     stream_stall_timeout_s=60,
-                    data_dir=Path(self._td.name) / "data")
+                    data_dir=Path(self._td.name) / "data",
+                    engine_home=Path(self._td.name) / "engine-home")
         base.update(kw)
         return Config(**base)
 
@@ -125,11 +129,12 @@ class TestStreamOnce(StreamTestBase):
         # engine_home's parent is an existing FILE, so mkdir() raises before
         # any subprocess exists; the consumer must still get its done event.
         os.environ["FAKE_CLAUDE_MODE"] = "stream_ok"
-        occupied = Path(self._td.name) / "data-as-file"
+        occupied = Path(self._td.name) / "engine-parent-as-file"
         occupied.write_text("not a directory", encoding="utf-8")
+        bad = dataclasses.replace(self.cfg(), engine_home=occupied / "engine")
         events = queue.Queue()
         with self.assertLogs("everthine", level="ERROR"):
-            engine.stream_once(self.cfg(data_dir=occupied), "hi", events=events)
+            engine.stream_once(bad, "hi", events=events)
         e = events.get(timeout=5)
         self.assertEqual(e["type"], "done")
         self.assertFalse(e["reply"].ok)
