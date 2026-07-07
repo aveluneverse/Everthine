@@ -4,6 +4,7 @@ import unittest
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from telegram.error import NetworkError, RetryAfter
 from telegram.warnings import PTBDeprecationWarning
@@ -261,7 +262,67 @@ class TestConcurrencyScope(unittest.TestCase):
         # Application (PTB 22.6) stores the builder's .post_init(...) callback
         # verbatim on this public attribute - confirmed by reading
         # telegram.ext.Application.__init__ in the installed package.
-        self.assertIs(self._app(False).post_init, bot.register_commands)
+        # M5 T6 (authorized pin update): the object handed to .post_init is
+        # now the composite startup hook bot.post_init -- register the
+        # command menu, then start the inner-life tick. Its behavior pins
+        # (menu awaited, neither half able to take boot down) live in
+        # TestPostInitComposite below; the cfg side channel the original pin
+        # existed to protect (register_commands reads app.bot_data["cfg"],
+        # never a bound parameter) is unchanged and still pinned by
+        # test_bot_stage_album_wiring.py's TestCommandMenuOrganWiring.
+        self.assertIs(self._app(False).post_init, bot.post_init)
+
+
+class FakeStartupApp(FakeCommandApp):
+    """FakeCommandApp plus the bot_data side channel post_init's tick half
+    reads. diary_enabled=False in the cfg keeps that half a quiet early
+    return (checked before any persona or filesystem access) in the tests
+    where the menu half is the point."""
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.bot_data = {"cfg": cfg}
+
+
+class TestPostInitComposite(unittest.IsolatedAsyncioTestCase):
+    """M5 T6 (authorized pin update, behavior half): post_init is now a
+    composite -- register the command menu, then start the inner-life tick
+    -- and neither half may ever take the bot's boot down with it (PTB 22.6
+    awaits post_init via run_until_complete outside any exception guard, so
+    anything escaping here crashes the whole process at startup)."""
+
+    def _cfg(self):
+        return Config(bot_token="x", authorized_user_id=1, diary_enabled=False)
+
+    async def test_post_init_awaits_register_commands(self):
+        app = FakeStartupApp(self._cfg())
+        with mock.patch.object(bot, "register_commands",
+                               new_callable=mock.AsyncMock) as reg:
+            await bot.post_init(app)
+        reg.assert_awaited_once_with(app)
+
+    async def test_menu_network_error_does_not_take_boot_down(self):
+        # The original pin's NetworkError semantics, carried into the new
+        # composite: register_commands' own guard swallows the failure and
+        # post_init as a whole survives it.
+        class FailingCommandBot(FakeCommandBot):
+            async def set_my_commands(self, commands):
+                raise NetworkError("boom")
+
+        app = FakeStartupApp(self._cfg())
+        app.bot = FailingCommandBot()
+        with self.assertLogs("everthine", level="WARNING"):
+            await bot.post_init(app)  # must not raise
+
+    async def test_tick_start_failure_does_not_take_boot_down(self):
+        app = FakeStartupApp(self._cfg())
+        with mock.patch.object(bot, "_start_inner_tick",
+                               side_effect=RuntimeError("boom")):
+            with self.assertLogs("everthine", level="WARNING") as cm:
+                await bot.post_init(app)  # must not raise
+        self.assertTrue(any("tick failed to start" in m for m in cm.output))
+        # The menu was still published before the tick attempt blew up.
+        self.assertEqual(len(app.bot.set_my_commands_calls), 1)
 
 
 if __name__ == "__main__":

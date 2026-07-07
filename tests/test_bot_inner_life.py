@@ -1,0 +1,501 @@
+"""Tests for M5 Task 6: bot.py's inner-life wiring.
+
+Two execution lines from the earlier tasks are hung off the bot here:
+
+  * the background diary tick -- the composite post_init (its own pin lives
+    in tests/test_bot_stream.py, this milestone's one authorized existing-
+    test update) starts an asyncio loop that calls diary.write_once every
+    TICK_INTERVAL_S and NEVER sends a Telegram message; the loop is
+    unkillable by design (every round is wrapped, only CancelledError
+    escapes), and it is armed only for a diary-enabled, folder-mode persona;
+
+  * the post-reply reflection -- after a SUCCESSFUL reply on either path,
+    on_text fires reflection.reflect_once fire-and-forget through
+    context.application.create_task(asyncio.to_thread(...)), never awaiting
+    it, never letting a scheduling failure touch the reply.
+
+L1 rollback pins: reflection_enabled False schedules nothing at all (not
+even a task), and diary_enabled False arms no tick -- so with both off the
+bot's observable behavior is exactly M4's.
+
+Conventions follow tests/test_bot_stage_album_wiring.py (the on_text closure
+is pulled out of app.handlers[0] and driven directly with hand-rolled
+Update/Context fakes; the engine is swapped at engine.run_once /
+engine.stream_once, the only seam on_text's default engine_mod leaves open)
+and tests/test_bot_memory_wiring.py (tmp dir + the full set of process-global
+resets a make_app call can touch, registered in Windows-safe LIFO order so
+the memory sqlite handle closes before the tmp dir is deleted).
+
+_start_inner_tick itself is driven directly against a fake app (a bot_data
+dict is its whole surface -- it schedules with asyncio.create_task, see its
+own docstring for why not Application.create_task), so no real Application
+is ever built for the tick scenarios; the armed case runs inside
+IsolatedAsyncioTestCase's loop and cancels the real task it created. The
+reflection context carries a RecordingApplication whose create_task captures
+the fire-and-forget coroutine so a test can drive it deterministically after
+on_text returns instead of racing asyncio.run's loop teardown.
+"""
+import asyncio
+import itertools
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from telegram.ext import MessageHandler
+
+from everthine import (bot, diary, engine, memory_embed, memory_recall,
+                       messages, persona, reflection)
+from everthine.config import Config
+from everthine.engine import EngineReply
+
+
+# --- shared fixtures --------------------------------------------------------
+
+def _install_resets(tc):
+    """Every process-global a make_app / _start_inner_tick call can touch,
+    reset around the test in Windows-safe LIFO order: the tmp-dir cleanup is
+    registered FIRST so it runs LAST, after memory_recall.reset() has closed
+    the sqlite handle living inside that same tmp dir."""
+    tc._td = tempfile.TemporaryDirectory()
+    tc.addCleanup(tc._td.cleanup)
+    tc.addCleanup(memory_recall.reset)
+    tc.addCleanup(memory_embed.set_embed_fn, None)
+    tc.addCleanup(persona.reset_persona_cache)
+    tc.addCleanup(messages.reset_overrides)
+    memory_recall.reset()
+    memory_embed.set_embed_fn(lambda text: [1.0, 0.0])
+    persona.reset_persona_cache()
+    messages.reset_overrides()
+    tc.root = Path(tc._td.name)
+
+
+def _folder_cfg(root, **overrides):
+    """A folder-mode persona (settings present -> current_settings != None, so
+    the diary tick and reflection are both live) with memory off."""
+    folder = root / "persona"
+    if not (folder / "identity.md").exists():
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "identity.md").write_text(
+            "I am Theo, warm and steady.\n", encoding="utf-8")
+        (folder / "settings.yaml").write_text(
+            "companion:\n  name: Theo\npartner:\n  name: Wren\n", encoding="utf-8")
+    kwargs = dict(bot_token="x", authorized_user_id=1,
+                  data_dir=root / "data", persona_path=folder,
+                  memory_enabled=False, streaming_enabled=False)
+    kwargs.update(overrides)
+    return Config(**kwargs)
+
+
+def _file_cfg(root, **overrides):
+    """A single-file persona (current_settings -> None): the file-mode / L1
+    persona-rollback state in which the diary tick refuses to arm."""
+    persona_file = root / "persona.md"
+    if not persona_file.exists():
+        persona_file.write_text("You are Testbot, warm and steady.",
+                                encoding="utf-8")
+    kwargs = dict(bot_token="x", authorized_user_id=1,
+                  data_dir=root / "data-file", persona_path=persona_file,
+                  memory_enabled=False, streaming_enabled=False)
+    kwargs.update(overrides)
+    return Config(**kwargs)
+
+
+def _handler(app, handler_cls):
+    """Pull the registered callback for a handler class out of app.handlers[0]
+    -- on_text is a closure with no existence outside a built Application."""
+    for h in app.handlers[0]:
+        if isinstance(h, handler_cls):
+            return h.callback
+    raise AssertionError(f"no {handler_cls.__name__} registered")
+
+
+async def _run_captured(coros):
+    """Await the fire-and-forget coroutines a RecordingApplication captured --
+    driving reflect_once deterministically, off the turn that scheduled it."""
+    for coro in coros:
+        await coro
+
+
+class FakeUser:
+    def __init__(self, id):
+        self.id = id
+
+
+class FakeChat:
+    def __init__(self, id):
+        self.id = id
+
+
+class FakeMessage:
+    _counter = itertools.count(7001)
+
+    def __init__(self, text):
+        self.text = text
+        self.message_id = next(FakeMessage._counter)
+        self.replies = []
+        self.edits = []
+        self.reactions_set = []
+
+    async def reply_text(self, text, parse_mode=None, reply_markup=None):
+        reply = FakeMessage(text)
+        self.replies.append(reply)
+        return reply
+
+    async def edit_text(self, text, parse_mode=None, reply_markup=None):
+        self.edits.append(text)
+        return FakeMessage(text)
+
+    async def set_reaction(self, reaction, is_big=None):
+        self.reactions_set.append(reaction)
+        return True
+
+
+class FakeUpdate:
+    def __init__(self, message, user_id=1, chat_id=1):
+        self.message = message
+        self.effective_user = FakeUser(user_id)
+        self.effective_chat = FakeChat(chat_id)
+        self.message_reaction = None
+        self.callback_query = None
+
+
+class FakeBot:
+    async def send_chat_action(self, chat_id, action):
+        pass
+
+    async def send_message(self, chat_id, text):
+        pass
+
+
+class RecordingApplication:
+    """Stands in for context.application: create_task records the coroutine
+    (never runs it here) so a test can await it after on_text returns."""
+
+    def __init__(self):
+        self.created = []
+
+    def create_task(self, coro, update=None):
+        self.created.append(coro)
+        return coro
+
+
+class FakeContext:
+    def __init__(self, application=None):
+        self.bot = FakeBot()
+        self.application = (application if application is not None
+                            else RecordingApplication())
+
+
+class FakeTickApp:
+    """Minimal app for _start_inner_tick: a bot_data dict carrying cfg (the
+    same side channel register_commands reads) is its entire surface."""
+
+    def __init__(self, cfg):
+        self.bot_data = {"cfg": cfg}
+
+
+class ScriptedEngine:
+    """stream_once stand-in: pushes a scripted event list onto the queue."""
+
+    def __init__(self, script):
+        self.script = script
+
+    def stream_once(self, cfg, prompt, session_id=None, system_prompt=None,
+                    events=None, cancel=None):
+        for event in self.script:
+            events.put(event)
+
+
+def ok_script(text_chunks, session_id="sess-stream"):
+    full = "".join(text_chunks)
+    return [{"type": "text", "text": c} for c in text_chunks] + [
+        {"type": "done", "reply": EngineReply(full, session_id, ok=True)}]
+
+
+# --- 1. tick mounting: armed for a diary-enabled folder persona, refused for
+#        a disabled flag or a file-mode persona ------------------------------
+
+class TestInnerTickMounting(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        _install_resets(self)
+
+    async def test_tick_armed_with_folder_persona_and_flag_on(self):
+        cfg = _folder_cfg(self.root)
+        app = FakeTickApp(cfg)
+        with self.assertLogs("everthine", level="INFO") as cm:
+            bot._start_inner_tick(app)
+        self.assertTrue(any("tick started" in m for m in cm.output))
+        task = app.bot_data.get("_inner_tick_task")
+        # The task reference is held in bot_data on purpose: a bare
+        # asyncio.create_task result nobody keeps can be garbage-collected
+        # mid-flight (asyncio keeps only a weak reference).
+        self.assertIsInstance(task, asyncio.Task)
+        self.assertFalse(task.done())
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task  # CancelledError passes through the loop uncaught
+
+    async def test_tick_not_armed_when_diary_disabled(self):
+        cfg = _folder_cfg(self.root, diary_enabled=False)
+        app = FakeTickApp(cfg)
+        bot._start_inner_tick(app)
+        self.assertNotIn("_inner_tick_task", app.bot_data)
+
+    async def test_tick_not_armed_in_file_mode_persona_and_says_so(self):
+        cfg = _file_cfg(self.root)
+        app = FakeTickApp(cfg)
+        with self.assertLogs("everthine", level="INFO") as cm:
+            bot._start_inner_tick(app)
+        self.assertNotIn("_inner_tick_task", app.bot_data)
+        self.assertTrue(any("file-mode persona" in m for m in cm.output))
+
+
+# --- 2. the tick loop is unkillable: a raising iteration is logged and the
+#        loop keeps going; write_once always receives an aware now -----------
+
+class TestInnerTickLoopSurvives(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        _install_resets(self)
+
+    async def test_loop_survives_a_failing_iteration_and_passes_aware_now(self):
+        cfg = Config(bot_token="x", authorized_user_id=1,
+                     data_dir=self.root / "data")
+        seen = []
+        done = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def fake_write_once(cfg_arg, now):
+            # write_once runs in a worker thread (to_thread); wake the loop
+            # thread-safely rather than touching the asyncio.Event directly.
+            seen.append(now)
+            if len(seen) == 1:
+                raise RuntimeError("first iteration explodes")
+            loop.call_soon_threadsafe(done.set)
+            return False
+
+        with mock.patch.object(bot, "TICK_INTERVAL_S", 0), \
+             mock.patch.object(diary, "write_once", fake_write_once), \
+             self.assertLogs("everthine", level="WARNING") as cm:
+            task = asyncio.create_task(bot._inner_tick_loop(cfg))
+            try:
+                await asyncio.wait_for(done.wait(), timeout=5)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        self.assertGreaterEqual(len(seen), 2)  # survived the RuntimeError
+        self.assertIsNotNone(seen[0].utcoffset())  # aware now, first round
+        self.assertIsNotNone(seen[1].utcoffset())  # aware now, second round
+        self.assertTrue(any("tick iteration failed" in m for m in cm.output))
+
+
+# --- 3. reflection hook, non-streaming path --------------------------------
+
+class TestReflectionHookNonStreaming(unittest.TestCase):
+    def setUp(self):
+        _install_resets(self)
+
+    def test_success_fires_reflection_with_joined_chunks_and_aware_now(self):
+        cfg = _folder_cfg(self.root, streaming_enabled=False)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her = FakeMessage("tell me about your day, i really missed you")
+        context = FakeContext()
+        with mock.patch.object(reflection, "reflect_once") as reflect, \
+             mock.patch.object(engine, "run_once",
+                               return_value=EngineReply("it was quiet and warm",
+                                                        "s1", ok=True)):
+            asyncio.run(on_text(FakeUpdate(her), context))
+            self.assertEqual(len(context.application.created), 1)
+            asyncio.run(_run_captured(context.application.created))
+        reflect.assert_called_once()
+        args = reflect.call_args.args
+        self.assertEqual(args[0], cfg)
+        self.assertEqual(args[1], "tell me about your day, i really missed you")
+        self.assertEqual(args[2], "it was quiet and warm")  # "\n".join(chunks)
+        self.assertIsNotNone(args[3].utcoffset())
+
+    def test_engine_failure_fires_no_reflection(self):
+        cfg = _folder_cfg(self.root, streaming_enabled=False)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her = FakeMessage("are you there? i want to talk")
+        context = FakeContext()
+        with mock.patch.object(reflection, "reflect_once") as reflect, \
+             mock.patch.object(engine, "run_once",
+                               return_value=EngineReply("", "s", ok=False,
+                                                        error_kind="timeout")):
+            asyncio.run(on_text(FakeUpdate(her), context))
+        self.assertEqual(context.application.created, [])
+        reflect.assert_not_called()
+
+
+# --- 4. reflection hook, streaming path ------------------------------------
+
+class TestReflectionHookStreaming(unittest.TestCase):
+    def setUp(self):
+        _install_resets(self)
+
+    def test_success_fires_reflection_with_full_text(self):
+        cfg = _folder_cfg(self.root, streaming_enabled=True)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her = FakeMessage("did you sleep okay last night, love?")
+        context = FakeContext()
+        with mock.patch.object(reflection, "reflect_once") as reflect, \
+             mock.patch.object(engine, "stream_once",
+                               ScriptedEngine(ok_script(["I did, ",
+                                                         "thank you."])).stream_once):
+            asyncio.run(on_text(FakeUpdate(her), context))
+            self.assertEqual(len(context.application.created), 1)
+            asyncio.run(_run_captured(context.application.created))
+        reflect.assert_called_once()
+        args = reflect.call_args.args
+        self.assertEqual(args[1], "did you sleep okay last night, love?")
+        self.assertEqual(args[2], "I did, thank you.")  # display.full_text
+        self.assertIsNotNone(args[3].utcoffset())
+
+    def test_cancelled_turn_fires_no_reflection(self):
+        cfg = _folder_cfg(self.root, streaming_enabled=True)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her = FakeMessage("never mind, i changed my mind")
+        context = FakeContext()
+
+        async def fake_stream_reply(*a, **k):
+            return None  # a cancelled turn yields None
+
+        with mock.patch.object(reflection, "reflect_once") as reflect, \
+             mock.patch.object(bot, "stream_reply", new=fake_stream_reply):
+            asyncio.run(on_text(FakeUpdate(her), context))
+        self.assertEqual(context.application.created, [])
+        reflect.assert_not_called()
+
+    def test_engine_failure_fires_no_reflection(self):
+        cfg = _folder_cfg(self.root, streaming_enabled=True)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her = FakeMessage("i had the strangest dream last night")
+        context = FakeContext()
+        script = [{"type": "text", "text": "partial"},
+                  {"type": "done",
+                   "reply": EngineReply("partial", None, ok=False,
+                                        error_kind="nonzero")}]
+        with mock.patch.object(reflection, "reflect_once") as reflect, \
+             mock.patch.object(engine, "stream_once",
+                               ScriptedEngine(script).stream_once):
+            asyncio.run(on_text(FakeUpdate(her), context))
+        self.assertEqual(context.application.created, [])
+        reflect.assert_not_called()
+
+
+# --- 5. L1 pins: reflection off schedules nothing; both off == M4 behavior --
+
+class TestReflectionL1Pin(unittest.TestCase):
+    def setUp(self):
+        _install_resets(self)
+
+    def test_flag_off_nonstream_creates_no_task(self):
+        cfg = _folder_cfg(self.root, streaming_enabled=False,
+                          reflection_enabled=False)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her = FakeMessage("a perfectly good message to reflect on")
+        context = FakeContext()
+        with mock.patch.object(reflection, "reflect_once") as reflect, \
+             mock.patch.object(engine, "run_once",
+                               return_value=EngineReply("mm, warm", "s", ok=True)):
+            asyncio.run(on_text(FakeUpdate(her), context))
+        self.assertEqual(context.application.created, [])
+        reflect.assert_not_called()
+
+    def test_flag_off_streaming_creates_no_task(self):
+        cfg = _folder_cfg(self.root, streaming_enabled=True,
+                          reflection_enabled=False)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her = FakeMessage("a perfectly good message to reflect on")
+        context = FakeContext()
+        with mock.patch.object(reflection, "reflect_once") as reflect, \
+             mock.patch.object(engine, "stream_once",
+                               ScriptedEngine(ok_script(["all good here."])).stream_once):
+            asyncio.run(on_text(FakeUpdate(her), context))
+        self.assertEqual(context.application.created, [])
+        reflect.assert_not_called()
+
+    def test_both_flags_off_no_tick_and_no_reflection(self):
+        cfg = _folder_cfg(self.root, streaming_enabled=False,
+                          diary_enabled=False, reflection_enabled=False)
+        app = bot.make_app(cfg)
+        # Tick gate: _start_inner_tick arms nothing with the diary disabled
+        # (early return runs before any coroutine or task exists, so this is
+        # safe to drive without a running loop -- creating a task here would
+        # itself fail the test loudly with "no running event loop").
+        tick_app = FakeTickApp(cfg)
+        bot._start_inner_tick(tick_app)
+        self.assertNotIn("_inner_tick_task", tick_app.bot_data)
+        # Reflection gate: a successful reply schedules nothing either.
+        on_text = _handler(app, MessageHandler)
+        context = FakeContext()
+        her = FakeMessage("a long enough ordinary message here")
+        with mock.patch.object(reflection, "reflect_once") as reflect, \
+             mock.patch.object(engine, "run_once",
+                               return_value=EngineReply("ok love", "s", ok=True)):
+            asyncio.run(on_text(FakeUpdate(her), context))
+        self.assertEqual(context.application.created, [])
+        reflect.assert_not_called()
+
+
+# --- reflection scheduling robustness (self-review): the reply must survive
+#     a create_task that throws, and a context with no Application at all ----
+
+class TestReflectionSchedulingRobustness(unittest.TestCase):
+    def setUp(self):
+        _install_resets(self)
+
+    def test_scheduling_failure_never_breaks_the_reply(self):
+        cfg = _folder_cfg(self.root, streaming_enabled=False)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+
+        class BoomApplication:
+            def create_task(self, coro, update=None):
+                raise RuntimeError("scheduler down")
+
+        context = FakeContext(application=BoomApplication())
+        her = FakeMessage("a nice long message to reflect upon")
+        with mock.patch.object(reflection, "reflect_once") as reflect, \
+             mock.patch.object(engine, "run_once",
+                               return_value=EngineReply("still here", "s", ok=True)):
+            with self.assertLogs("everthine", level="WARNING") as cm:
+                asyncio.run(on_text(FakeUpdate(her), context))  # must not raise
+        # The reply landed and the error path never fired (one reply, no
+        # generic_glitch tacked on behind it).
+        self.assertEqual([r.text for r in her.replies], ["still here"])
+        reflect.assert_not_called()
+        self.assertTrue(any("schedule the post-reply reflection" in m
+                            for m in cm.output))
+
+    def test_bare_context_without_application_is_a_silent_no_op(self):
+        cfg = _folder_cfg(self.root, streaming_enabled=False)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+
+        class BareContext:
+            def __init__(self):
+                self.bot = FakeBot()  # no .application, like pre-M5 handler tests
+
+        context = BareContext()
+        her = FakeMessage("a nice long message to reflect upon")
+        with mock.patch.object(reflection, "reflect_once") as reflect, \
+             mock.patch.object(engine, "run_once",
+                               return_value=EngineReply("here", "s", ok=True)):
+            asyncio.run(on_text(FakeUpdate(her), context))  # no AttributeError
+        reflect.assert_not_called()
+        self.assertEqual(her.replies[0].text, "here")
+
+
+if __name__ == "__main__":
+    unittest.main()

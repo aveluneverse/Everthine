@@ -27,6 +27,15 @@ album_enabled) and share a SECOND CallbackQueryHandler
 on_button in the same PTB group -- see make_app's handler-registration
 comment for why that ordering, not just the pattern, is what keeps
 on_button's own bare CallbackQueryHandler from swallowing these presses.
+
+The inner life (M5 T6) hangs off two hooks. post_init is now a composite
+startup hook: the command menu first, then _start_inner_tick's background
+diary tick -- a TICK_INTERVAL_S heartbeat that hands diary.write_once one
+complete attempt per round and never sends a Telegram message. And both of
+on_text's reply paths fire reflection.reflect_once after a SUCCESSFUL
+reply, fire-and-forget through _schedule_reflection. With the flags off
+(diary_enabled / reflection_enabled) both are structurally absent -- no
+task, no tick, behavior identical to M4.
 """
 from __future__ import annotations
 
@@ -45,8 +54,8 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, ContextTypes, MessageHandler,
                           MessageReactionHandler, filters)
 
-from . import (album, archive, chunking, engine, memory_recall, messages,
-              persona, recent_context, stages)
+from . import (album, archive, chunking, diary, engine, memory_recall,
+              messages, persona, recent_context, reflection, stages)
 from .config import Config, load_config
 from .engine import EngineReply
 from .messages import msg
@@ -81,6 +90,12 @@ NOTE_TIMEOUT_S = 300
 # the message-cache knobs above are: one obvious place to tune them.
 ALBUM_PAGE_SIZE = 5
 ALBUM_SNIPPET_CHARS = 30
+
+# M5 T6: the inner-life heartbeat -- how often the background tick wakes to
+# hand diary.write_once one complete attempt (the diary task deferred this
+# constant here, next to the module's other tuning knobs). The tick itself
+# never sends a message; everything user-visible stays in the reply paths.
+TICK_INTERVAL_S = 300
 
 
 def decide_start_buttons(has_session: bool) -> list:
@@ -309,6 +324,48 @@ async def _consume_react(cfg: Config, update: Update, emoji: str | None,
                                  update.message.message_id, now)
 
 
+def _schedule_reflection(context, cfg: Config, user_msg: str,
+                         reply_text: str) -> None:
+    """Fire-and-forget the post-reply reflection (M5 T6): one private beat
+    of thought, scheduled off the reply path and never awaited by it.
+
+    Call sites gate on SUCCESS (produce_reply's on_react sink fired for the
+    non-streaming path; reply.ok for the streaming one) -- this helper owns
+    the rest: the reflection_enabled L1 gate (flag off creates NOTHING, not
+    even a task; should_reflect's own "disabled" reason is the second line
+    of defense), the nothing-to-reflect-on gate (an empty reply_text is a
+    gesture, not language), and the guarantee that scheduling can never
+    break the reply it trails -- a context without an application (this
+    project's own pre-M5 handler tests drive on_text exactly that way,
+    mirroring register_commands' bare-app tolerance) degrades to a no-op,
+    and a create_task that itself blows up is logged and swallowed, the
+    orphaned coroutine closed so it never warns at garbage collection.
+
+    reflect_once never raises (its own contract) and yields to a live
+    conversation by itself (try_run_once inside), so the task needs no
+    supervision once it exists; asyncio.to_thread keeps its blocking engine
+    call off the event loop. Application.create_task is the right scheduler
+    HERE, in contrast to the tick (see _start_inner_tick): by the time any
+    reply succeeds the application is running, so PTB tracks the task and a
+    graceful stop() waits for an in-flight reflection (bounded by the
+    reflection's own engine timeout) instead of tearing the loop down under
+    its engine call.
+    """
+    if not cfg.reflection_enabled or not reply_text:
+        return
+    application = getattr(context, "application", None)
+    if application is None:
+        return
+    coro = asyncio.to_thread(reflection.reflect_once, cfg, user_msg,
+                             reply_text, datetime.now().astimezone())
+    try:
+        application.create_task(coro)
+    except Exception:
+        coro.close()
+        logger.warning("could not schedule the post-reply reflection",
+                       exc_info=True)
+
+
 def _authorized(cfg: Config, update: Update) -> bool:
     user = update.effective_user
     return bool(user) and user.id == cfg.authorized_user_id
@@ -467,6 +524,74 @@ async def register_commands(app) -> None:
     except Exception:
         logger.warning("could not publish the command menu; continuing without it",
                        exc_info=True)
+
+
+async def post_init(app) -> None:
+    """Startup hook: registers the command menu, then starts the inner-life
+    tick. Both halves guard themselves -- a cosmetic or background feature
+    must never take the bot's boot down with it."""
+    await register_commands(app)          # keeps its own internal guard
+    try:
+        _start_inner_tick(app)
+    except Exception:
+        logger.warning("inner-life tick failed to start", exc_info=True)
+
+
+def _start_inner_tick(app) -> None:
+    """Arm the background inner-life tick (M5 T6), if this run wants one:
+    diary_enabled off means no task at all (the L1 rollback -- nothing
+    ticking, nothing to cancel), and a file-mode persona has no settings to
+    voice a page with, said once here at boot (INFO: it is the L1
+    persona-rollback state, worth one line) rather than rediscovered every
+    five minutes by write_once's own defensive gate.
+
+    asyncio.create_task, not Application.create_task, on two measured PTB
+    22.6 facts (read from the installed package): post_init is awaited via
+    run_until_complete BEFORE Application.start() flips `running`, so
+    Application.create_task here would warn ("won't be automatically
+    awaited") and skip its own tracking anyway; and stop() awaits every
+    task that tracking DOES hold (asyncio.gather, no cancellation), which
+    for an infinite loop would hang shutdown forever. The loop post_init
+    runs on is already the application's own, so plain asyncio.create_task
+    is both sufficient and honest. The Task reference is parked in bot_data
+    because asyncio holds only a weak reference to running tasks -- an
+    unparked tick could be garbage-collected mid-flight.
+    """
+    cfg = app.bot_data["cfg"]
+    if not cfg.diary_enabled:
+        logger.debug("diary: tick not started (disabled)")
+        return
+    if persona.current_settings(cfg) is None:
+        logger.info("diary: disabled (file-mode persona)")
+        return
+    app.bot_data["_inner_tick_task"] = asyncio.create_task(_inner_tick_loop(cfg))
+    logger.info("diary: inner-life tick started")
+
+
+async def _inner_tick_loop(cfg: Config) -> None:
+    """The inner-life heartbeat: sleep first (the moment of boot is never
+    writing time), then hand diary.write_once one complete attempt on a
+    worker thread (it reads the archive and calls the engine -- never on
+    the event loop), forever. The tick NEVER sends a Telegram message:
+    whatever the diary produces stays on disk.
+
+    Unkillable by design: write_once propagates unexpected exceptions on
+    purpose (its docstring defers the catch to this loop), so every round
+    is wrapped and logged, and only CancelledError -- the one exit anyone
+    ever means -- passes through. Known and accepted: on a conversation-
+    free day, every in-window round logs "diary: skip (material_empty)" at
+    INFO; that visibility is deliberate (the skip line is the observable
+    proof the tick is alive), not duplication to suppress.
+    """
+    while True:
+        try:
+            await asyncio.sleep(TICK_INTERVAL_S)
+            await asyncio.to_thread(diary.write_once, cfg,
+                                    datetime.now().astimezone())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("diary: tick iteration failed", exc_info=True)
 
 
 def make_app(cfg: Config):
@@ -772,6 +897,19 @@ def make_app(cfg: Config):
                 await _consume_react(cfg, update,
                                     react_sink[0] if react_sink else None,
                                     datetime.now().astimezone())
+                if react_sink:
+                    # Success signal (the same one _consume_react's docstring
+                    # names): produce_reply's failure path early-returns
+                    # before its on_react sink ever fires. Known transitional
+                    # bloat, accepted rather than patched here: chunks may
+                    # carry a trailing notebook_full system line (a later
+                    # task moves it out of the chunk list), and a tag-only
+                    # success is currently [generic_glitch] (a later task
+                    # returns it to an empty list, at which point the
+                    # empty-join gate inside _schedule_reflection skips it
+                    # naturally).
+                    _schedule_reflection(context, cfg, update.message.text,
+                                         "\n".join(chunks))
                 return
 
             placeholder = await update.message.reply_text(
@@ -814,6 +952,11 @@ def make_app(cfg: Config):
                 # message right next to the error notice above.
                 await _consume_react(cfg, update, display.reaction_emoji,
                                      datetime.now().astimezone())
+                # display.full_text is the tag-free ground truth of what she
+                # actually saw; empty means a tag-only turn -- a gesture,
+                # with no language to reflect on (the helper's own gate).
+                _schedule_reflection(context, cfg, update.message.text,
+                                     display.full_text)
         except Exception:
             logger.error("reply pipeline failed unexpectedly", exc_info=True)
             try:
@@ -870,10 +1013,12 @@ def make_app(cfg: Config):
     # one-update-at-a-time, byte-identical to M1 (which never enabled it).
     app = (ApplicationBuilder().token(cfg.bot_token)
            .concurrent_updates(cfg.streaming_enabled)
-           .post_init(register_commands).build())
-    # register_commands is passed above by bare reference (a test pins that
-    # exact identity -- see its own docstring); cfg reaches it at call time
-    # through this side channel instead of a parameter.
+           .post_init(post_init).build())
+    # post_init (M5 T6) is the composite startup hook -- the command menu
+    # first, then the inner-life tick, each half self-guarded -- and a test
+    # pins that the object handed to .post_init above IS bot.post_init.
+    # cfg still reaches both halves at call time through this side channel
+    # instead of a parameter (see register_commands' own docstring).
     app.bot_data["cfg"] = cfg
     app.add_handler(CommandHandler("start", start_cmd))
     if stage_active or cfg.album_enabled:
