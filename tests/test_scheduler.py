@@ -1350,7 +1350,8 @@ class TestNudgeOnceRecentContextPrefix(unittest.TestCase):
 # M7 T5: deliver -- account first (stamp + archive), then best-effort send.
 # The order is this task's soul: the archive (an unforgeable record of what
 # he really said) is written whether the send later succeeds or not, and
-# whether the optimistic stamp was skipped or not, so a failed send can only
+# whether the optimistic stamp was skipped or not (though always behind the
+# repo-wide archive_enabled gate), so a failed send can only
 # ever cost "a line she never received" (true), never "a line he insists he
 # sent that never existed" (false). Async tests follow the bot-test harness:
 # a fake app whose .bot.send_message is an AsyncMock, driven with
@@ -1527,6 +1528,34 @@ class TestDeliverArchiveOffLoop(unittest.TestCase):
             entries = [e for e in archive.iter_entries(cfg.archive_dir)
                        if e["speaker"] == "companion"]
             self.assertEqual(len(entries), 1)
+
+
+class TestDeliverArchiveFlagOff(unittest.TestCase):
+    def test_archive_disabled_still_stamps_and_sends_but_records_nothing(self):
+        # Symmetry with the conversation path (bot.py gates every
+        # archive.write_entry on cfg.archive_enabled): archiving off means
+        # speak but do not record. The stamp is a session fact and the send
+        # is transport -- neither is the archive's business, so both still
+        # happen; only the write is gated.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td, ARCHIVE_ENABLED="false")
+            now = _aware(12)
+            store = _store(cfg, session_id="s1")
+            result = _nudge_result(text="spoken, never recorded",
+                                   session_id="s2", expected_session_id="s1")
+            app = _FakeApp()
+            with self.assertLogs("everthine", level="INFO") as cm:
+                asyncio.run(scheduler.deliver(app, cfg, store, result, now))
+            # the stamp still advanced the pointer -- a session fact
+            self.assertEqual(store.load()["session_id"], "s2")
+            # the send still went out, and the sent log still fired
+            self.assertEqual(_sent_texts(app), ["spoken, never recorded"])
+            self.assertTrue(any("scheduler: sent" in m for m in cm.output))
+            # NO archive file was created -- a real on-disk assertion:
+            # write_entry is what mkdirs the archive dir, so with the gate
+            # honored the dir itself must not even exist.
+            self.assertFalse(cfg.archive_dir.exists())
+            self.assertEqual(list(archive.iter_entries(cfg.archive_dir)), [])
 
 
 class TestDeliverLongTextChunks(unittest.TestCase):

@@ -865,7 +865,9 @@ async def deliver(app, cfg: Config, store: SessionStore, result: NudgeResult,
        moved, and stamping would silently resurrect a notebook she chose to
        zero; skip it, and log that the session changed hands.
 
-    2. Archive, ALWAYS -- whether or not the stamp was skipped. He generated
+    2. Archive -- whether or not the stamp was skipped, behind the same
+       repo-wide cfg.archive_enabled gate every conversation-path write sits
+       behind (archiving off means: speak, but do not record). He generated
        these words, so they are an unforgeable fact; the archive is the single
        record every downstream consumer (the warm recent-context prefix,
        memory sync, the diary's raw material) reads as "what he really said".
@@ -898,11 +900,13 @@ async def deliver(app, cfg: Config, store: SessionStore, result: NudgeResult,
             "scheduler: session changed hands mid-generation; not stamping "
             "the proactive message (%s)", result.job)
 
-    # File IO off the event loop (the M4 T7b convention). Always runs, even
-    # when the stamp above was skipped: the archive records what he said, and
-    # he said it regardless of which notebook it lands in.
-    await asyncio.to_thread(archive.write_entry, cfg.archive_dir,
-                            "companion", result.text, now)
+    # File IO off the event loop (the M4 T7b convention). Runs even when the
+    # stamp above was skipped -- the archive records what he said, and he said
+    # it regardless of which notebook it lands in -- but honors the repo-wide
+    # archive gate exactly as every conversation-path write does.
+    if cfg.archive_enabled:
+        await asyncio.to_thread(archive.write_entry, cfg.archive_dir,
+                                "companion", result.text, now)
 
     for chunk in chunking.split_message(result.text):
         for attempt in range(2):  # the original send, then one retry
