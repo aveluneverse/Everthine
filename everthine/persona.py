@@ -40,7 +40,8 @@ DEFAULT_PERSONA = (
 )
 
 
-def build_system_prompt(cfg: Config, memory_block: str | None = None) -> str:
+def build_system_prompt(cfg: Config, memory_block: str | None = None,
+                        inner_block: str | None = None) -> str:
     """Assemble the per-turn system prompt from cfg.persona_path.
 
     Folder mode: compose the three layers (static Layer 1/2 + the dynamic
@@ -53,7 +54,10 @@ def build_system_prompt(cfg: Config, memory_block: str | None = None) -> str:
     None) is the M3 recall seam: folder mode threads it straight through to
     assemble_folder_prompt; file mode is the L1 rollback target (the
     pre-memory behavior) and carries no recall block by design, so it
-    ignores the argument entirely.
+    ignores the argument entirely. `inner_block` (optional, default None)
+    is the M5 diary seam and threads through exactly the same way: folder
+    mode passes it to assemble_folder_prompt; file mode ignores it too, for
+    the same L1-rollback reason.
 
     Folder mode also builds the M4 stage block here, when cfg.stages_enabled
     and the persona actually defines stages (a persona with no stages.md
@@ -82,7 +86,7 @@ def build_system_prompt(cfg: Config, memory_block: str | None = None) -> str:
                                exc_info=True)
         return assemble_folder_prompt(
             persona_obj, now_naive, last_contact, first_today, memory_block,
-            stage_block=stage_blk)
+            stage_block=stage_blk, inner_block=inner_block)
 
     # --- Legacy file mode: pinned byte-for-byte (do not "improve") ---------
     # Per-call read, strip, non-empty -> return verbatim; otherwise fall back.
@@ -593,16 +597,20 @@ def assemble_folder_prompt(
     first_today: bool,
     memory_block: str | None = None,
     stage_block: str | None = None,
+    inner_block: str | None = None,
 ) -> str:
     """Join the static Layer 1/2 composition and the dynamic Layer 3 block with
     a single blank line. Pure and deterministic given its arguments -- directly
     testable without a clock or filesystem. `memory_block` (optional, default
     None) threads straight through to build_dynamic_context(); see that
     function's docstring for where it lands and its None/empty no-op contract.
+    `inner_block` (optional, default None) threads through the same way and
+    lands just before the memory block (his own recent days ahead of her
+    long-term memory), with the identical None/empty no-op contract.
     `stage_block` (optional, default None) threads straight through to
     compose_stable(), which prepends it ahead of the declaration when truthy
     and is a no-op (byte-identical to the pre-M4 composition) when it is None
-    or empty. Building the block -- reading stage state off disk, calling
+    or empty. Building the blocks -- reading stage state off disk, calling
     stages.stage_block() -- is build_system_prompt()'s job; this function
     stays pure and does no I/O of its own.
     """
@@ -614,4 +622,5 @@ def assemble_folder_prompt(
 
     return (compose_stable(persona_obj, stage_block=stage_block) + "\n\n"
             + build_dynamic_context(
-                persona_obj.settings, now_naive, last_contact, first_today, memory_block))
+                persona_obj.settings, now_naive, last_contact, first_today,
+                memory_block, inner_block=inner_block))

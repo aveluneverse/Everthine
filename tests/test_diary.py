@@ -793,5 +793,149 @@ class TestWriteOnce(unittest.TestCase):
                                         for line in cm.output))
 
 
+# ---------------------------------------------------------------------
+# M5 T7: the Layer 3 "recent days" injection block (unshared_block) and
+# the shared-marking that retires it (mark_shared). The soul of this task
+# is the RC-A mechanical pin below: the diary's `content` field is never
+# read into the block, so the diarist's voice can never bleed into a live
+# conversation prompt -- only mood + one closing thought (reflection) do.
+# ---------------------------------------------------------------------
+
+
+def _write_entry_file(cfg, name, *, date="2026-07-06", mood="", keywords=None,
+                      content="", reflection="", shared=False):
+    """Seed one diary entry file on disk with the full T2 shape."""
+    cfg.diary_dir.mkdir(parents=True, exist_ok=True)
+    record = {"date": date, "mood": mood, "keywords": keywords or [],
+              "content": content, "reflection": reflection, "shared": shared}
+    (cfg.diary_dir / name).write_text(json.dumps(record), encoding="utf-8")
+
+
+class TestUnsharedBlockFormat(unittest.TestCase):
+    def test_header_and_line_format_with_reflection_snippet(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_entry_file(cfg, "2026-07-06_090000.json", date="2026-07-06",
+                              mood="tender", content="body one",
+                              reflection="a small closing thought", shared=False)
+            _write_entry_file(cfg, "2026-07-07_090000.json", date="2026-07-07",
+                              mood="restless", content="body two",
+                              reflection="another thought", shared=False)
+            block = diary.unshared_block(cfg)
+        line_1 = diary.DIARY_UNSHARED_LINE.format(
+            date="2026-07-06", mood="tender", snippet="a small closing thought")
+        line_2 = diary.DIARY_UNSHARED_LINE.format(
+            date="2026-07-07", mood="restless", snippet="another thought")
+        # header + newline + lines, oldest-to-newest (recent_entries' order)
+        self.assertEqual(
+            block, "\n".join([diary.DIARY_UNSHARED_HEADER, line_1, line_2]))
+        self.assertTrue(block.startswith(diary.DIARY_UNSHARED_HEADER))
+        self.assertIn("- [diary, 2026-07-07] mood: restless. A thought: another thought", block)
+
+    def test_reflection_snippet_capped_at_100(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_entry_file(cfg, "2026-07-06_090000.json",
+                              reflection="z" * 150, shared=False)
+            block = diary.unshared_block(cfg)
+        self.assertIn("z" * 100, block)
+        self.assertNotIn("z" * 101, block)  # snippet is exactly reflection[:100]
+
+    def test_empty_mood_and_reflection_printed_blank_not_faked(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_entry_file(cfg, "2026-07-06_090000.json", date="2026-07-06",
+                              mood="", reflection="", shared=False)
+            block = diary.unshared_block(cfg)
+        self.assertIn("- [diary, 2026-07-06] mood: . A thought: ", block)
+
+
+class TestUnsharedBlockNeverLeaksContent(unittest.TestCase):
+    """The soul of M5 T7 (7/4 RC-A mechanical root-fix): the diary's full
+    prose lives in `content`, and this block must never read it. The snippet
+    is drawn from `reflection`, proving the source is the closing thought,
+    not the page body."""
+
+    def test_content_sentinel_never_in_block_but_reflection_is(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_entry_file(
+                cfg, "2026-07-06_090000.json", date="2026-07-06", mood="quiet",
+                content="SENTINEL_DIARY_BODY_XYZZY the whole private page text",
+                reflection="SENTINEL_REFLECTION_KEEPS one closing line",
+                shared=False)
+            block = diary.unshared_block(cfg)
+        self.assertNotIn("SENTINEL_DIARY_BODY_XYZZY", block)   # content NEVER leaks
+        self.assertIn("SENTINEL_REFLECTION_KEEPS", block)      # snippet IS the reflection
+
+
+class TestUnsharedBlockNoneConditions(unittest.TestCase):
+    def test_all_shared_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_entry_file(cfg, "2026-07-06_090000.json", shared=True)
+            _write_entry_file(cfg, "2026-07-07_090000.json", shared=True)
+            self.assertIsNone(diary.unshared_block(cfg))
+
+    def test_no_diary_dir_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            self.assertIsNone(diary.unshared_block(cfg))
+
+    def test_only_unshared_entries_surface(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_entry_file(cfg, "2026-07-05_090000.json", date="2026-07-05",
+                              reflection="already shared thought", shared=True)
+            _write_entry_file(cfg, "2026-07-06_090000.json", date="2026-07-06",
+                              reflection="fresh unshared thought", shared=False)
+            block = diary.unshared_block(cfg)
+        self.assertIn("fresh unshared thought", block)
+        self.assertNotIn("already shared thought", block)
+
+
+class TestMarkShared(unittest.TestCase):
+    def test_flips_only_unshared_and_is_byte_idempotent(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_entry_file(cfg, "2026-07-05_090000.json", shared=True)   # already shared
+            _write_entry_file(cfg, "2026-07-06_090000.json", shared=False)  # unshared
+            _write_entry_file(cfg, "2026-07-07_090000.json", shared=False)  # unshared
+            diary.mark_shared(cfg)
+            shared_now = [json.loads(p.read_text(encoding="utf-8"))["shared"]
+                          for p in sorted(cfg.diary_dir.iterdir())]
+            self.assertEqual(shared_now, [True, True, True])
+            # Idempotent: a second call finds nothing to flip and rewrites nothing.
+            first_bytes = {p.name: p.read_bytes() for p in cfg.diary_dir.iterdir()}
+            diary.mark_shared(cfg)
+            second_bytes = {p.name: p.read_bytes() for p in cfg.diary_dir.iterdir()}
+        self.assertEqual(first_bytes, second_bytes)
+
+    def test_block_empty_after_mark_shared(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_entry_file(cfg, "2026-07-06_090000.json", reflection="x", shared=False)
+            self.assertIsNotNone(diary.unshared_block(cfg))
+            diary.mark_shared(cfg)
+            self.assertIsNone(diary.unshared_block(cfg))
+
+    def test_corrupt_entry_skipped_with_warning_others_flip(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            cfg.diary_dir.mkdir(parents=True, exist_ok=True)
+            (cfg.diary_dir / "2026-07-06_090000.json").write_text("{not json", encoding="utf-8")
+            _write_entry_file(cfg, "2026-07-07_090000.json", shared=False)
+            with self.assertLogs("everthine", level="WARNING"):
+                diary.mark_shared(cfg)
+            good = json.loads(
+                (cfg.diary_dir / "2026-07-07_090000.json").read_text(encoding="utf-8"))
+        self.assertTrue(good["shared"])  # the good entry still turned the page
+
+    def test_missing_dir_is_noop(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            diary.mark_shared(cfg)  # must not raise on a diary_dir that never existed
+
+
 if __name__ == "__main__":
     unittest.main()

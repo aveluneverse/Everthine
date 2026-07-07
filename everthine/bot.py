@@ -105,8 +105,14 @@ def decide_start_buttons(has_session: bool) -> list:
 
 
 def prepare_exchange(cfg: Config, store: SessionStore, text: str, now) -> tuple:
-    """Archive the user's turn, assemble the engine prompt, and recall
-    long-term memories relevant to it."""
+    """Archive the user's turn, assemble the engine prompt, recall long-term
+    memories relevant to it, and gather his own recent diary days.
+
+    Returns (prompt, session_data, memory_block, inner_block). Both blocks
+    are independently fail-soft: the reply proceeds without either one if it
+    cannot be built, and both are None-by-default so a flag-off run is
+    byte-identical to the pre-feature prompt.
+    """
     if cfg.archive_enabled:
         archive.write_entry(cfg.archive_dir, "user", text, ts=now)
     data = store.load()
@@ -127,7 +133,18 @@ def prepare_exchange(cfg: Config, store: SessionStore, text: str, now) -> tuple:
     except Exception:
         logger.warning("memory recall failed; continuing without it",
                        exc_info=True)
-    return recent_context.prepend(block, text), data, memory_block
+    # His own recent diary days (the Layer 3 inner-life block). Gated on the
+    # diary flag so flag-off stays byte-identical to the pre-feature prompt,
+    # and fail-soft the same way recall is: a broken diary read must never
+    # take the reply down with it.
+    inner_block = None
+    if cfg.diary_enabled:
+        try:
+            inner_block = diary.unshared_block(cfg)
+        except Exception:
+            logger.warning("diary block failed; continuing without it",
+                           exc_info=True)
+    return recent_context.prepend(block, text), data, memory_block, inner_block
 
 
 def _extract_react(text: str) -> tuple[str | None, str]:
@@ -157,11 +174,12 @@ def produce_reply(cfg: Config, store: SessionStore, text: str,
                   now: datetime | None = None, engine_mod=engine,
                   on_react=None) -> list:
     now = now or datetime.now().astimezone()
-    prompt, data, memory_block = prepare_exchange(cfg, store, text, now)
+    prompt, data, memory_block, inner_block = prepare_exchange(cfg, store, text, now)
 
     reply = engine_mod.run_once(
         cfg, prompt, session_id=data.get("session_id"),
-        system_prompt=persona.build_system_prompt(cfg, memory_block=memory_block))
+        system_prompt=persona.build_system_prompt(
+            cfg, memory_block=memory_block, inner_block=inner_block))
     if not reply.ok:
         return [msg(reply.error_kind or "generic_glitch")]
 
@@ -213,13 +231,14 @@ async def stream_reply(cfg: Config, store: SessionStore, text: str,
     now = now or datetime.now().astimezone()
     # Off-loop: prepare_exchange touches disk (archive writes + memory
     # recall), so it must never run synchronously on the event loop.
-    prompt, data, memory_block = await asyncio.to_thread(
+    prompt, data, memory_block, inner_block = await asyncio.to_thread(
         prepare_exchange, cfg, store, text, now)
     # Off-loop too: this retires the standing event-loop debt -- as the
     # archive grows, building the system prompt synchronously here would
     # block every other update.
     system_prompt = await asyncio.to_thread(
-        persona.build_system_prompt, cfg, memory_block)
+        persona.build_system_prompt, cfg, memory_block=memory_block,
+        inner_block=inner_block)
 
     events: queue.Queue = queue.Queue()
     worker = threading.Thread(
@@ -623,6 +642,15 @@ def make_app(cfg: Config):
     busy = {"active": False}
     cancel_flag = threading.Event()
 
+    # M5 T7: successful-reply counter for the diary page-turn. Once she has
+    # exchanged two successful replies (counted over this process's lifetime;
+    # a restart honestly resets it, mirroring the source architecture's own
+    # semantics), the unshared diary pages that surfaced in her prompt are
+    # marked shared so they stop repeating. Both success points gate the
+    # count and the page-turn on cfg.diary_enabled, so a flag-off run never
+    # counts and never marks -- byte-identical to the pre-feature behavior.
+    reply_turns = {"n": 0}
+
     # M4 T8: the single pending-note slot armed by stg_adv and consumed by
     # on_text's interception at the top of that function (before the busy
     # gate -- a note mutates no session state, so it must work even while a
@@ -910,6 +938,10 @@ def make_app(cfg: Config):
                     # naturally).
                     _schedule_reflection(context, cfg, update.message.text,
                                          "\n".join(chunks))
+                    if cfg.diary_enabled:
+                        reply_turns["n"] += 1
+                        if reply_turns["n"] >= 2:
+                            await asyncio.to_thread(diary.mark_shared, cfg)
                 return
 
             placeholder = await update.message.reply_text(
@@ -957,6 +989,10 @@ def make_app(cfg: Config):
                 # with no language to reflect on (the helper's own gate).
                 _schedule_reflection(context, cfg, update.message.text,
                                      display.full_text)
+                if cfg.diary_enabled:
+                    reply_turns["n"] += 1
+                    if reply_turns["n"] >= 2:
+                        await asyncio.to_thread(diary.mark_shared, cfg)
         except Exception:
             logger.error("reply pipeline failed unexpectedly", exc_info=True)
             try:

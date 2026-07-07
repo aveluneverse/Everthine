@@ -564,5 +564,63 @@ class TestMemoryBlockSeam(unittest.TestCase):
         self.assertNotIn("\n\n\n", result)
 
 
+class TestInnerBlockSeam(unittest.TestCase):
+    """M5 T7 seam: the optional inner_block parameter (his own recent diary
+    days). Placement (after milestones, BEFORE the memory block and the
+    final check -- his near-past first, her memory after), the "no argument
+    at all" vs. explicit None/"" byte-identity pin, and the exact
+    double-newline join. Mirrors TestMemoryBlockSeam above; the two seams
+    are independent (inner_block=None must not perturb the memory-only
+    output, and vice versa).
+    """
+
+    def test_inner_block_after_milestones_before_memory_and_final_check(self):
+        settings = _settings(anniversary=date(2021, 7, 5))  # on-day yearly trigger
+        now = datetime(2026, 7, 5, 14, 0)
+        inner_block = ("# Your own recent days\n\n"
+                       "- [diary, 2026-07-04] mood: quiet. A thought: enough")
+        memory_block = "# Things you remember\n\n- x"
+        result = build_dynamic_context(settings, now, None, False,
+                                       memory_block=memory_block, inner_block=inner_block)
+        i_milestones = result.index(MILESTONES_HEADER)
+        i_inner = result.index(inner_block)
+        i_memory = result.index(memory_block)
+        i_final = result.index(FINAL_CHECK_TEMPLATE)
+        self.assertLess(i_milestones, i_inner)
+        self.assertLess(i_inner, i_memory)      # his near-past before her memory
+        self.assertLess(i_memory, i_final)      # final check stays the last words
+        self.assertTrue(result.endswith(FINAL_CHECK_TEMPLATE))
+        self.assertNotIn("\n\n\n", result)
+
+    def test_inner_block_none_or_empty_is_byte_identical_to_omitted(self):
+        settings = _settings(anniversary=date(2021, 7, 5))
+        now = datetime(2026, 7, 5, 14, 0)
+        baseline = build_dynamic_context(settings, now, None, False)
+        self.assertEqual(
+            build_dynamic_context(settings, now, None, False, inner_block=None), baseline)
+        self.assertEqual(
+            build_dynamic_context(settings, now, None, False, inner_block=""), baseline)
+
+    def test_inner_block_joined_by_double_newline(self):
+        settings = _settings(anniversary=date(2021, 7, 5))
+        now = datetime(2026, 7, 5, 14, 0)
+        inner_block = ("# Your own recent days\n\n"
+                       "- [diary, 2026-07-04] mood: quiet. A thought: enough")
+        # no memory block -> inner sits immediately before the final check
+        result = build_dynamic_context(settings, now, None, False, inner_block=inner_block)
+        self.assertIn("\n\n" + inner_block + "\n\n" + FINAL_CHECK_TEMPLATE, result)
+        self.assertNotIn("\n\n\n", result)
+
+    def test_inner_none_leaves_memory_only_output_unperturbed(self):
+        settings = _settings(anniversary=date(2021, 7, 5))
+        now = datetime(2026, 7, 5, 14, 0)
+        memory_block = "# Things you remember\n\n- x"
+        with_inner_none = build_dynamic_context(
+            settings, now, None, False, memory_block=memory_block, inner_block=None)
+        memory_only = build_dynamic_context(
+            settings, now, None, False, memory_block=memory_block)
+        self.assertEqual(with_inner_none, memory_only)
+
+
 if __name__ == "__main__":
     unittest.main()

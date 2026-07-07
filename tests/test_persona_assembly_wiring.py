@@ -485,5 +485,63 @@ class TestFileModeMemoryBlockIgnored(_CacheResetTest):
             self.assertIsNone(persona.current_settings(cfg))
 
 
+# --- 11. M5 T7 seam: inner_block threading (his own recent diary days) ----
+
+class TestInnerBlockWiring(_CacheResetTest):
+    """Folder mode: build_system_prompt threads inner_block straight through
+    to assemble_folder_prompt -> build_dynamic_context (positioned before
+    the memory block and the final check, per dynamic_context's ordering
+    pin), and omitting it stays byte-identical to passing inner_block=None
+    explicitly -- the same seam-silence contract memory_block already honors,
+    now proven at the outer wiring layer for the new seam too.
+    """
+
+    def _setup(self, td) -> Config:
+        folder = _write_folder(Path(td) / "persona", companion="Alex", partner="Sam")
+        return Config(bot_token="x", authorized_user_id=1,
+                      persona_path=folder, data_dir=Path(td) / "state")
+
+    def test_folder_mode_inner_block_before_final_check(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._setup(td)
+            result = persona.build_system_prompt(cfg, inner_block="INNERBLOCK-SENTINEL")
+            self.assertIn("INNERBLOCK-SENTINEL", result)
+            self.assertLess(result.index("INNERBLOCK-SENTINEL"),
+                            result.index(FINAL_CHECK_TEMPLATE))
+
+    def test_folder_mode_inner_before_memory_when_both_present(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._setup(td)
+            result = persona.build_system_prompt(
+                cfg, memory_block="MEMBLOCK-SENTINEL", inner_block="INNERBLOCK-SENTINEL")
+            self.assertLess(result.index("INNERBLOCK-SENTINEL"),
+                            result.index("MEMBLOCK-SENTINEL"))
+
+    def test_folder_mode_inner_block_none_byte_identical_to_no_arg(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._setup(td)
+            a = persona.build_system_prompt(cfg, inner_block=None)
+            b = persona.build_system_prompt(cfg)
+            self.assertEqual(a, b)
+
+
+class TestFileModeInnerBlockIgnored(_CacheResetTest):
+    """File mode is the L1 rollback target: inner_block must be a no-op,
+    byte-identical to the no-arg call, exactly like memory_block."""
+
+    def _cfg(self, persona_path: Path) -> Config:
+        return Config(bot_token="x", authorized_user_id=1, persona_path=persona_path)
+
+    def test_file_mode_inner_block_ignored_and_byte_identical(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "p.md"
+            p.write_text("You are Testbot.", encoding="utf-8")
+            cfg = self._cfg(p)
+            with_block = persona.build_system_prompt(cfg, inner_block="INNERBLOCK-SENTINEL")
+            without_block = persona.build_system_prompt(cfg)
+            self.assertNotIn("INNERBLOCK-SENTINEL", with_block)
+            self.assertEqual(with_block, without_block)
+
+
 if __name__ == "__main__":
     unittest.main()

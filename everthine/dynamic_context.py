@@ -12,11 +12,12 @@ Everything here is a pure function of its arguments: no filesystem, no
 datetime.now() inside -- the caller passes `now`. A later task derives
 `last_contact`/`first_today` from the conversation archive and wires
 build_dynamic_context()'s output into persona.build_system_prompt(); that
-wiring is out of scope here. The optional `memory_block` parameter is this
-module's other seam: a caller-supplied section slotted in verbatim between
-the milestones section and the final check, with no effect at all when it
-is None or empty -- retrieving and formatting that block is a later task's
-job, not this one's. This module is layers.py's sibling, not its caller:
+wiring is out of scope here. The optional `memory_block` and `inner_block`
+parameters are this module's other seams: caller-supplied sections slotted
+in verbatim between the milestones section and the final check (inner_block
+first, then memory_block), with no effect at all when they are None or empty
+-- producing and formatting those blocks is other tasks' job, not this
+one's. This module is layers.py's sibling, not its caller:
 same constants-then-functions layout, same docstring conventions.
 """
 from __future__ import annotations
@@ -243,6 +244,7 @@ def build_dynamic_context(
     last_contact: datetime | None,
     first_today: bool,
     memory_block: str | None = None,
+    inner_block: str | None = None,
 ) -> str:
     """Compose Layer 3: the full "what's true right now" block.
 
@@ -258,9 +260,13 @@ def build_dynamic_context(
     3. First-message-today greeting line (first_today is True).
     4. Milestones (any of settings.anniversary/partner_birthday/
        companion_birthday triggers today or previews within a week).
-    5. Retrieved-memory block (memory_block is truthy) -- an optional,
+    5. Recent-days block (inner_block is truthy) -- his own inner life, an
+       optional caller-supplied section this module does not produce or
+       format; placed before the memory block so his near-past reads ahead
+       of her long-term memory.
+    6. Retrieved-memory block (memory_block is truthy) -- an optional,
        caller-supplied section; this module does not produce or format it.
-    6. Final-check reminder (always, always last).
+    7. Final-check reminder (always, always last).
 
     The hour is rounded down to the top of the hour for the baseline only
     -- section 1's displayed clock and daypart line are byte-stable for the
@@ -281,6 +287,13 @@ def build_dynamic_context(
     milestones = _milestones_section(settings, now.date())
     if milestones is not None:
         sections.append(milestones)
+
+    # His own recent days (inner life) slot in here - after milestones,
+    # BEFORE the retrieved-memory block: his near-past reads ahead of her
+    # long-term memory. Like memory_block, this module neither produces nor
+    # formats it; a truthy value is appended verbatim, None/empty is a no-op.
+    if inner_block:
+        sections.append(inner_block)
 
     # Retrieved-memory block (long-term memory) slots in here - after
     # milestones, BEFORE the final check. The final check must stay the

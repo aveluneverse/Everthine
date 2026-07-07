@@ -37,8 +37,10 @@ on_text returns instead of racing asyncio.run's loop teardown.
 """
 import asyncio
 import itertools
+import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -48,6 +50,7 @@ from everthine import (bot, diary, engine, memory_embed, memory_recall,
                        messages, persona, reflection)
 from everthine.config import Config
 from everthine.engine import EngineReply
+from everthine.session_store import SessionStore
 
 
 # --- shared fixtures --------------------------------------------------------
@@ -495,6 +498,155 @@ class TestReflectionSchedulingRobustness(unittest.TestCase):
             asyncio.run(on_text(FakeUpdate(her), context))  # no AttributeError
         reflect.assert_not_called()
         self.assertEqual(her.replies[0].text, "here")
+
+
+# --- 6. M5 T7: prepare_exchange gathers the diary inner_block (fail-soft,
+#        flag-gated) as the 4th element of its return tuple ----------------
+
+def _seed_unshared_entry(cfg, *, content="the private page body",
+                         reflection="a closing thought"):
+    """Seed one unshared diary entry on disk (the T2 shape)."""
+    cfg.diary_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.diary_dir / "2026-07-06_210000.json").write_text(json.dumps({
+        "date": "2026-07-06", "mood": "quiet", "keywords": [],
+        "content": content, "reflection": reflection, "shared": False}),
+        encoding="utf-8")
+
+
+class TestPrepareExchangeInnerBlock(unittest.TestCase):
+    def setUp(self):
+        _install_resets(self)
+
+    def _now(self):
+        return datetime(2026, 7, 7, 14, 0).astimezone()
+
+    def test_flag_on_with_unshared_entry_returns_inner_block(self):
+        cfg = _folder_cfg(self.root, diary_enabled=True)
+        _seed_unshared_entry(cfg)
+        store = SessionStore(cfg.session_path)
+        result = bot.prepare_exchange(cfg, store, "hi there friend", self._now())
+        self.assertEqual(len(result), 4)  # (prompt, data, memory_block, inner_block)
+        inner_block = result[3]
+        self.assertIsNotNone(inner_block)
+        self.assertIn("# Your own recent days", inner_block)
+
+    def test_flag_off_returns_none_even_with_unshared_entry(self):
+        cfg = _folder_cfg(self.root, diary_enabled=False)
+        _seed_unshared_entry(cfg)  # data present; the gate must still say None
+        store = SessionStore(cfg.session_path)
+        _, _, _, inner_block = bot.prepare_exchange(cfg, store, "hi there", self._now())
+        self.assertIsNone(inner_block)
+
+    def test_diary_block_failure_is_fail_soft(self):
+        cfg = _folder_cfg(self.root, diary_enabled=True)
+        store = SessionStore(cfg.session_path)
+        with mock.patch.object(diary, "unshared_block",
+                               side_effect=RuntimeError("boom")), \
+             self.assertLogs("everthine", level="WARNING") as cm:
+            _, _, _, inner_block = bot.prepare_exchange(cfg, store, "hi there", self._now())
+        self.assertIsNone(inner_block)  # a broken diary read never breaks the reply
+        self.assertTrue(any("diary block failed" in m for m in cm.output))
+
+
+# --- 7. End-to-end: an unshared entry reaches the engine's system_prompt as
+#        the block (mood + reflection), and its CONTENT never does ----------
+
+class TestInnerBlockEndToEnd(unittest.TestCase):
+    def setUp(self):
+        _install_resets(self)
+
+    def _seed_sentinels(self, cfg):
+        cfg.diary_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.diary_dir / "2026-07-06_210000.json").write_text(json.dumps({
+            "date": "2026-07-06", "mood": "quiet", "keywords": [],
+            "content": "CONTENT_SENTINEL_NEVER_INJECTED the whole page body",
+            "reflection": "REFLECTION_SENTINEL_SURFACES a closing line",
+            "shared": False}), encoding="utf-8")
+
+    def _run(self, cfg):
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        captured = {}
+
+        def fake_run_once(cfg_, prompt, session_id=None, system_prompt=None):
+            captured["system_prompt"] = system_prompt
+            return EngineReply("mm, warm", "s1", ok=True)
+
+        her = FakeMessage("tell me about your evening, i missed you today")
+        with mock.patch.object(engine, "run_once", side_effect=fake_run_once):
+            asyncio.run(on_text(FakeUpdate(her), FakeContext()))
+        return captured["system_prompt"]
+
+    def test_unshared_block_reaches_prompt_content_never(self):
+        cfg = _folder_cfg(self.root, streaming_enabled=False,
+                          diary_enabled=True, reflection_enabled=False)
+        self._seed_sentinels(cfg)
+        sp = self._run(cfg)
+        self.assertIn("# Your own recent days", sp)
+        self.assertIn("REFLECTION_SENTINEL_SURFACES", sp)   # the closing thought surfaces
+        self.assertNotIn("CONTENT_SENTINEL_NEVER_INJECTED", sp)  # the page body never does
+
+    def test_flag_off_prompt_has_no_block_l1(self):
+        cfg = _folder_cfg(self.root, streaming_enabled=False,
+                          diary_enabled=False, reflection_enabled=False)
+        self._seed_sentinels(cfg)  # data present, flag off -> no block (L1 rollback)
+        sp = self._run(cfg)
+        self.assertNotIn("# Your own recent days", sp)
+        self.assertNotIn("REFLECTION_SENTINEL_SURFACES", sp)
+
+
+# --- 8. Page-turn timing: mark_shared fires only on the SECOND successful
+#        reply, a failed reply never counts, and the diary flag gates it ----
+
+class TestMarkSharedTurnCounting(unittest.TestCase):
+    def setUp(self):
+        _install_resets(self)
+
+    def _app_and_handler(self, **overrides):
+        cfg = _folder_cfg(self.root, streaming_enabled=False,
+                          reflection_enabled=False, **overrides)
+        app = bot.make_app(cfg)
+        return cfg, _handler(app, MessageHandler)
+
+    def _drive_success(self, on_text, context, text="a good long message to reply to"):
+        with mock.patch.object(engine, "run_once",
+                               return_value=EngineReply("warm reply", "s", ok=True)):
+            asyncio.run(on_text(FakeUpdate(FakeMessage(text)), context))
+
+    def _drive_failure(self, on_text, context, text="this message fails to reply now"):
+        with mock.patch.object(engine, "run_once",
+                               return_value=EngineReply("", "s", ok=False,
+                                                        error_kind="timeout")):
+            asyncio.run(on_text(FakeUpdate(FakeMessage(text)), context))
+
+    def test_fires_only_on_second_successful_reply(self):
+        cfg, on_text = self._app_and_handler(diary_enabled=True)
+        context = FakeContext()
+        with mock.patch.object(diary, "mark_shared") as mark:
+            self._drive_success(on_text, context)
+            mark.assert_not_called()       # after the 1st success: page still open
+            self._drive_success(on_text, context)
+            mark.assert_called_once()       # after the 2nd: pages turned
+            self.assertEqual(mark.call_args.args[0], cfg)
+
+    def test_failed_reply_never_counts(self):
+        cfg, on_text = self._app_and_handler(diary_enabled=True)
+        context = FakeContext()
+        with mock.patch.object(diary, "mark_shared") as mark:
+            self._drive_success(on_text, context)   # success #1
+            self._drive_failure(on_text, context)   # must NOT increment
+            mark.assert_not_called()
+            self._drive_success(on_text, context)   # success #2 -> now it fires
+            mark.assert_called_once()
+
+    def test_diary_flag_off_never_marks_shared(self):
+        cfg, on_text = self._app_and_handler(diary_enabled=False)
+        context = FakeContext()
+        with mock.patch.object(diary, "mark_shared") as mark:
+            self._drive_success(on_text, context)
+            self._drive_success(on_text, context)
+            self._drive_success(on_text, context)
+            mark.assert_not_called()   # diary off -> no counting, no page-turn
 
 
 if __name__ == "__main__":

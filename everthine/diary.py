@@ -15,7 +15,11 @@ rules -- and build_system_prompt_diary() composes the diary's own
 system prompt from the persona. The third piece, write_once(), is the
 execution line built on both halves: one complete eligibility-to-save
 attempt, engine call included, that a later task hangs off the bot's
-background tick.
+background tick. The fourth piece is the live-conversation seam:
+unshared_block() renders the last few not-yet-shared pages as a small
+mood-and-reflection block for the next day's prompt -- never the page's
+own content -- and mark_shared() retires those pages once she has
+replied enough to have seen them.
 
 Fail-soft is the whole design for the state file, exactly as in
 stages.py and album.py: a missing diary_state.json quietly becomes a
@@ -699,3 +703,94 @@ def write_once(cfg: Config, now: datetime) -> bool:
     # The filename only -- what his page says never goes into a log.
     logger.info("diary: wrote %s", path.name)
     return True
+
+
+# ---------------------------------------------------------------------
+# Layer 3 injection: the "recent days" block + shared marking (the
+# live-conversation half)
+# ---------------------------------------------------------------------
+#
+# This is the mechanical fix for the diary-voice-into-live-conversation
+# bleed: the block carries ONLY each unshared page's date, mood, and a
+# snippet of its closing reflection -- the page's `content` field is never
+# read here, so the diarist's voice has no channel into a live prompt at
+# all. After she has replied enough to have seen them, mark_shared()
+# retires the pages so they stop surfacing. Both constants below are
+# owner-approved prose, transcribed verbatim; the em-dash (U+2014) and the
+# straight quotes in the header are intentional. DIARY_UNSHARED_LINE IS
+# .format()'d (date/mood/snippet); the header is a static string.
+
+DIARY_UNSHARED_HEADER = """# Your own recent days
+
+Lately, in your own time, you wrote in your diary. If the mood fits, one
+of these may surface naturally — mention at most one or two, never all
+at once, and never as "an activity I did". The full pages are yours
+alone: never recite them, and never quote them into the conversation."""
+DIARY_UNSHARED_LINE = "- [diary, {date}] mood: {mood}. A thought: {snippet}"
+
+
+def unshared_block(cfg: Config) -> str | None:
+    """Render the Layer 3 "recent days" block, or None when nothing is
+    eligible. Draws his last few diary entries (recent_entries(cfg, 3)),
+    keeps only those not yet marked shared, and renders one line each --
+    date, mood, and a 100-character snippet of the closing reflection.
+
+    The `content` field is NEVER read: this is the mechanical guarantee at
+    the heart of the milestone, closing off at the source the channel by
+    which a diarist's voice could bleed into a live conversation. The
+    snippet is drawn from `reflection` alone. Empty mood/reflection strings
+    are printed as-is -- save_entry already floors both to "" -- an honest
+    blank, never a fabricated fill. Returns None when there is no diary at
+    all, or when every recent entry has already been shared.
+    """
+    entries = [e for e in recent_entries(cfg, 3) if not e.get("shared")]
+    if not entries:
+        return None
+    lines = [
+        DIARY_UNSHARED_LINE.format(
+            date=e.get("date", ""),
+            mood=e.get("mood", ""),
+            snippet=(e.get("reflection") or "")[:100])
+        for e in entries
+    ]
+    return "\n".join([DIARY_UNSHARED_HEADER, *lines])
+
+
+def mark_shared(cfg: Config) -> None:
+    """Mark every not-yet-shared diary entry as shared, so unshared_block()
+    stops surfacing it. Walks cfg.diary_dir for entry files (the same T2
+    naming convention recent_entries uses), and for each whose `shared` is
+    not already truthy, rewrites it atomically (a per-file temp file +
+    os.replace, exactly as save_entry writes) with shared=True and every
+    other field preserved.
+
+    Idempotent: a second call finds nothing left to flip and writes nothing
+    at all -- an already-shared entry is left byte-for-byte untouched. A
+    single damaged entry -- unreadable, not valid JSON, not a JSON object,
+    or unwritable -- is logged and skipped, never raised: one bad file must
+    not stop the rest from turning the page. A missing diary_dir is a quiet
+    no-op; there is nothing to mark.
+    """
+    diary_dir = Path(cfg.diary_dir)
+    if not diary_dir.is_dir():
+        return
+    names = sorted(p.name for p in diary_dir.iterdir()
+                   if p.is_file() and _DIARY_FILENAME_RE.match(p.name))
+    for name in names:
+        path = diary_dir / name
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError(f"diary entry is not a JSON object: {data!r}")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            logger.warning("diary: could not read entry %s to mark shared (%s); "
+                           "skipping", path, exc)
+            continue
+        if data.get("shared"):
+            continue
+        data["shared"] = True
+        try:
+            _atomic_write(path, data, trailing_newline=True)
+        except OSError as exc:
+            logger.warning("diary: could not rewrite entry %s as shared (%s); "
+                           "skipping", path, exc)
