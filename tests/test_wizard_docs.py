@@ -145,6 +145,7 @@ class TestTroubleshootSkill(WizardDocMixin, unittest.TestCase):
         fm = _load_frontmatter(self.DOC)
         self.assertEqual(fm.get("name"), "everthine-troubleshoot")
         self.assertIn("description", fm)
+        self.assertLess(len(fm["description"]), 500)
 
     def test_covers_known_failures(self):
         text = self.DOC.read_text(encoding="utf-8")
