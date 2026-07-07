@@ -18,11 +18,13 @@ rollback guarantee.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Iterator
 
 import yaml
 
@@ -636,6 +638,18 @@ def load_persona(cfg: Config) -> Persona:
 # last_contact hours back and misfiring a reunion line mid-conversation.
 CURRENT_TURN_EXCLUSION_S = 5
 
+# The daily archive keeps one small file per local day, so a full walk grows
+# with the history: half a year is ~180 files, and a periodic background sweep
+# now reads these signals every few minutes, not just once per turn. The scan
+# therefore reads the newest CONTACT_SCAN_RECENT_FILES day files first (files
+# sort by their ISO-date name, so the tail of that sorted list is the most
+# recent window) and only falls back to the whole archive when that window holds
+# no user entry. Correctness never yields to the fast path; it just gets a cheap
+# common case, since the newest files carry the maximum user timestamp and every
+# same-day entry as well. Raise this if daily volume ever makes a day span more
+# than one file, or lower it to trade a little safety margin for fewer reads.
+CONTACT_SCAN_RECENT_FILES = 45
+
 # Module-level persona cache: a single slot (Persona + the path it came from).
 # init() populates it at startup; folder-mode build_system_prompt() falls back
 # to a one-time lazy load when it is still empty.
@@ -721,6 +735,59 @@ def _to_naive_local(ts: datetime) -> datetime:
     return ts
 
 
+def _read_day_file(day_file: Path) -> str:
+    """Read one day's archive file as text. Isolating the open here gives the
+    recent-window scan a single, countable read seam and keeps the decode-error
+    tolerance in one place: errors='ignore' matches the archive reader, so a
+    half-written trailing line degrades to a dropped entry, never an exception.
+    """
+    return day_file.read_text(encoding="utf-8", errors="ignore")
+
+
+def _iter_day_files(day_files: list[Path]) -> Iterator[dict]:
+    """Yield parsed conversation entries from an explicit, ordered list of day
+    files. This deliberately mirrors archive.iter_entries' per-line contract --
+    same JSON shape, same required keys, same swallow-and-skip on a malformed or
+    partial line -- so scanning a chosen slice of files is byte-for-byte
+    equivalent to walking the whole archive. It exists (instead of reusing
+    iter_entries) only because iter_entries globs the entire directory, while the
+    recent-window scan must open a bounded subset. Keep the two parsers in step.
+    """
+    for day_file in day_files:
+        for raw in _read_day_file(day_file).splitlines():
+            try:
+                entry = json.loads(raw)
+                ts = datetime.fromisoformat(entry["timestamp"])
+                text = entry["text"]
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+                continue
+            yield {"timestamp": ts, "speaker": entry.get("speaker", "?"), "text": text}
+
+
+def _scan_contact_entries(
+    entries: Iterator[dict], now_naive: datetime, exclusion: timedelta,
+    today: date,
+) -> tuple[datetime | None, bool]:
+    """Reduce a stream of archive entries to (last_contact, seen_today) with the
+    rule contact_signals has always applied: drop the just-archived current turn
+    (within `exclusion` of now), mark the day seen if any entry lands on `today`,
+    and track last_contact as the MAXIMUM normalized "user" timestamp (max, not
+    last-seen, so minor clock skew cannot pick a stale line). Pulled out so the
+    recent-window pass and the full-archive fallback share one definition.
+    """
+    last_contact: datetime | None = None
+    seen_today = False
+    for entry in entries:
+        ts = _to_naive_local(entry["timestamp"])
+        if abs(now_naive - ts) <= exclusion:
+            continue  # the current turn, archived moments ago
+        if ts.date() == today:
+            seen_today = True
+        if entry["speaker"] == "user" and (last_contact is None or ts > last_contact):
+            last_contact = ts
+    return last_contact, seen_today
+
+
 def contact_signals(cfg: Config, now: datetime) -> tuple[datetime | None, bool]:
     """Derive Layer 3's (last_contact, first_today) from the conversation
     archive. `now` is timezone-aware local (as the bot supplies); last_contact
@@ -731,6 +798,14 @@ def contact_signals(cfg: Config, now: datetime) -> tuple[datetime | None, bool]:
     True iff no entry of ANY speaker falls on `now`'s local date. Both ignore
     the just-archived current turn via CURRENT_TURN_EXCLUSION_S (see above).
 
+    For efficiency the scan reads only the newest CONTACT_SCAN_RECENT_FILES day
+    files first and returns as soon as that window yields a last_contact. When
+    the window holds no user entry (a long silence, or an entry orphaned in an
+    older file) it falls back to the whole archive, so the windowing never costs
+    correctness. The result equals a full walk: day files sort by date, so the
+    newest files carry the maximum user timestamp, and every same-day entry sits
+    in that newest window too, which settles first_today up front.
+
     Any archive trouble degrades Layer 3 to "no prior contact, first of the day"
     rather than breaking the reply.
     """
@@ -738,19 +813,21 @@ def contact_signals(cfg: Config, now: datetime) -> tuple[datetime | None, bool]:
         now_naive = _to_naive_local(now)
         exclusion = timedelta(seconds=CURRENT_TURN_EXCLUSION_S)
         today = now_naive.date()
-        last_contact: datetime | None = None
-        seen_today = False
-        # Whole archive, no `since` cap: one small file per local day, so
-        # correctness beats premature optimization. [future milestone] window
-        # this if daily volume ever grows enough to matter.
-        for entry in archive.iter_entries(cfg.archive_dir):
-            ts = _to_naive_local(entry["timestamp"])
-            if abs(now_naive - ts) <= exclusion:
-                continue  # the current turn, archived moments ago
-            if ts.date() == today:
-                seen_today = True
-            if entry["speaker"] == "user" and (last_contact is None or ts > last_contact):
-                last_contact = ts
+        archive_dir = Path(cfg.archive_dir)
+        day_files = (sorted(archive_dir.glob("*.jsonl"))
+                     if archive_dir.is_dir() else [])
+        recent_files = day_files[-CONTACT_SCAN_RECENT_FILES:]
+        last_contact, seen_today = _scan_contact_entries(
+            _iter_day_files(recent_files), now_naive, exclusion, today)
+        if last_contact is None:
+            # No user contact in the recent window: widen to the whole archive so
+            # an orphaned old entry (or a very long silence) is never lost. Only
+            # last_contact needs the wider search -- every entry that could set
+            # seen_today already sits in the recent window -- so the window's
+            # seen_today stays authoritative. Reusing archive.iter_entries keeps
+            # this fallback byte-for-byte the pre-window full scan.
+            last_contact, _ = _scan_contact_entries(
+                archive.iter_entries(archive_dir), now_naive, exclusion, today)
         return last_contact, not seen_today
     except Exception:
         logger.warning("contact_signals failed; treating as no prior contact",
