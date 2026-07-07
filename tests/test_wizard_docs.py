@@ -104,5 +104,24 @@ class TestInterview(WizardDocMixin, unittest.TestCase):
         self.assertIn("companion's gender", text)
 
 
+class TestDeploy(WizardDocMixin, unittest.TestCase):
+    DOC = DEPLOY
+
+    def test_covers_first_boot_download_warning(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("hundred MB", text)
+
+    def test_viewer_command_verbatim(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("python -m everthine.portrait_viewer --data-dir data",
+                      text)
+
+
+class TestGitignoreProtectsUserPersona(unittest.TestCase):
+    def test_personas_mine_ignored(self):
+        lines = (REPO / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn("personas/mine/", lines)
+
+
 if __name__ == "__main__":
     unittest.main()
