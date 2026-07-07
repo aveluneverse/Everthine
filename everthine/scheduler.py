@@ -7,9 +7,15 @@ complete attempt that turns a due decision into a generated message through
 the engine's non-blocking call. It still never sends and never imports
 bot.py; deliver() below is the async tail that puts the returned message
 into the world -- optimistic stamp, then archive, then a best-effort
-Telegram send -- while wiring the two onto the background tick stays a later
-milestone task. Beyond the decision logic and that pipeline, this module
-also holds
+Telegram send. start_tick / tick_loop, at the very bottom, are the
+background heartbeat that finally drive that pipeline: once per
+TICK_INTERVAL_S they hand the diary and the self-portrait one attempt each
+and, when scheduler_enabled, run one proactive reach-out (nudge_once ->
+deliver) as a third segment. That tick is this app's whole inner-life clock
+(M7 T6 moved it here out of bot.py); it takes the PTB Application as a plain
+argument, so -- like everything else here -- it still never imports bot.py,
+the wiring running the other direction. Beyond the decision logic and that
+pipeline, this module also holds
 the owner-approved instruction copy for the three proactive messages and the
 pure renderers that assemble them into a proactive system-prompt tail
 (build_nudge_prompt): the framing header that tells the companion this is a
@@ -73,7 +79,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import archive, chunking, engine, persona, recent_context
+from . import archive, chunking, diary, engine, persona, portrait, recent_context
 
 if TYPE_CHECKING:
     from .config import Config
@@ -84,9 +90,10 @@ logger = logging.getLogger("everthine")
 
 # --- Module constants ---------------------------------------------------
 
-TICK_INTERVAL_S = 300            # this module's own copy of the tick cadence --
-                                  # bot.py's identically-named constant is left
-                                  # untouched by this task; a later task retires it
+TICK_INTERVAL_S = 300            # the inner-life tick cadence: how often
+                                  # tick_loop (below) wakes to hand each organ
+                                  # one attempt. M7 T6 made this the tick's only
+                                  # home; bot.py's former identical copy is gone
 RECENT_INTERACT_MINUTES = 3      # "she's on the line right now" -- never interrupt
 PROACTIVE_COOLDOWN_MINUTES = 90  # minimum spacing enforced between any two nudges
 PROACTIVE_TIMEOUT_S = 120        # engine budget for one proactive message; a later
@@ -923,3 +930,129 @@ async def deliver(app, cfg: Config, store: SessionStore, result: NudgeResult,
                     return
 
     logger.info("scheduler: sent (%s)", result.job)
+
+
+# ---------------------------------------------------------------------
+# The background inner-life tick: arm it (start_tick), then run it forever
+# (tick_loop). This is the app's whole inner-life clock. M7 T6 moved it here
+# out of bot.py -- its permanent home, next to the pipeline it drives -- and
+# added the proactive third segment. It takes the PTB Application as a plain
+# argument (never importing bot.py) and the session store as an explicit
+# parameter (never a bot_data side channel).
+# ---------------------------------------------------------------------
+
+def start_tick(app, cfg: Config, store: SessionStore) -> None:
+    """Arm the background inner-life tick, if this run wants any of its three
+    organs: diary_enabled, portrait_enabled, and (M7 T6) scheduler_enabled all
+    off means no task at all (the L1 rollback -- nothing ticking, nothing to
+    cancel), and a file-mode persona has no settings any organ could voice a
+    page, a portrait, or a reach-out with, said once here at boot (INFO: it is
+    the L1 persona-rollback state, worth one line) rather than rediscovered
+    every few minutes by each organ's own defensive gate.
+
+    Once armed, each organ logs its own INFO line, gated on its own flag alone
+    (not on whether the tick as a whole started): "diary: inner-life tick
+    started" and "portrait: armed (interval {n}d)" are byte-identical on
+    purpose -- the deployment SOP greps for them -- and each prints only when
+    its own flag is on, even if a different organ is what actually armed the
+    task; "scheduler: proactive armed (greeting=... miss_you=... share=...)"
+    reports each per-job flag's real bool, so a single-organ run never logs a
+    line that isn't true of it. `store` reaches the loop as an explicit
+    argument, never fished back out of bot_data: an argument that cannot be
+    supplied fails loudly at once (TypeError), where a silent side-channel miss
+    would arm a tick wired to nothing that no one would notice.
+
+    asyncio.create_task, not Application.create_task, on two measured PTB 22.6
+    facts (read from the installed package): the startup hook is awaited via
+    run_until_complete BEFORE Application.start() flips `running`, so
+    Application.create_task here would warn ("won't be automatically awaited")
+    and skip its own tracking anyway; and stop() awaits every task that
+    tracking DOES hold (asyncio.gather, no cancellation), which for an infinite
+    loop would hang shutdown forever. The loop the startup hook runs on is
+    already the application's own, so plain asyncio.create_task is both
+    sufficient and honest. The Task reference is parked in bot_data because
+    asyncio holds only a weak reference to running tasks -- an unparked tick
+    could be garbage-collected mid-flight.
+    """
+    if not (cfg.diary_enabled or cfg.portrait_enabled or cfg.scheduler_enabled):
+        logger.debug("inner-life: tick not started (all-disabled)")
+        return
+    if persona.current_settings(cfg) is None:
+        logger.info("inner-life: disabled (file-mode persona)")
+        return
+    app.bot_data["_inner_tick_task"] = asyncio.create_task(
+        tick_loop(cfg, store, app))
+    if cfg.diary_enabled:
+        logger.info("diary: inner-life tick started")
+    if cfg.portrait_enabled:
+        logger.info("portrait: armed (interval %sd)", cfg.portrait_interval_days)
+    if cfg.scheduler_enabled:
+        logger.info("scheduler: proactive armed (greeting=%s miss_you=%s share=%s)",
+                    cfg.greeting_enabled, cfg.miss_you_enabled, cfg.share_enabled)
+
+
+async def tick_loop(cfg: Config, store: SessionStore, app) -> None:
+    """The inner-life heartbeat: sleep first (the moment of boot is never
+    writing time), take one shared timestamp for the round, then run three
+    segments in a fixed order -- diary, self-portrait, proactive reach-out --
+    each on its own worker thread where it does disk/engine work
+    (asyncio.to_thread), forever.
+
+    The diary and portrait segments NEVER send a Telegram message: whatever
+    either produces stays on disk. The proactive segment (M7 T6) is the one
+    that DOES send -- but only through deliver, and only when scheduler_enabled
+    is on: with that flag off the segment is not entered at all, so nudge_once
+    is never even called (the most geometric form of the L1 rollback -- zero
+    engine work, zero send, no state file). When on, nudge_once conceives one
+    reach-out (its own dice roll cast fresh here, via random.random(), on the
+    same seam its tests patch) and, when it returns a message, deliver puts it
+    into the world.
+
+    The three-segment order is deliberate: the diary's night window gets first
+    crack at the shared engine lock, and the proactive reach-out naturally
+    yields to it (nudge_once uses try_run_once, so a busy engine is a skip, not
+    a wait). Unkillable by design, per segment: each sits in its own
+    try/except (write_once, update_once, nudge_once, and deliver all propagate
+    unexpected exceptions on purpose, deferring the catch to this loop), so a
+    raising diary round never skips that round's portrait or proactive attempt,
+    a raising portrait round never skips the proactive one, and a proactive
+    round that blows up (even inside deliver's send tail) never skips next
+    round's diary -- one organ's bug is never another's outage. Every except
+    logs by name, and only CancelledError -- the one exit anyone ever means,
+    including one raised while asyncio.sleep is still waiting (sleep sits
+    outside all three try/excepts, so its own cancellation is never caught
+    here) -- passes through uncaught. Known and accepted: on a conversation-free
+    day, every in-window round logs "diary: skip (material_empty)" at INFO;
+    that visibility is deliberate (the skip line is the observable proof the
+    tick is alive), not duplication to suppress. When more than one segment
+    wants the engine in the same round, engine.try_run_once's natural
+    serialization (busy returns None) is enough on its own: whoever gets there
+    first holds it, the others yield and try again next round -- no extra
+    coordination lives here.
+    """
+    while True:
+        await asyncio.sleep(TICK_INTERVAL_S)
+        now = datetime.now().astimezone()
+        try:
+            await asyncio.to_thread(diary.write_once, cfg, now)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("diary: tick iteration failed", exc_info=True)
+        try:
+            await asyncio.to_thread(portrait.update_once, cfg, now)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("portrait: tick iteration failed", exc_info=True)
+        if cfg.scheduler_enabled:
+            try:
+                result = await asyncio.to_thread(
+                    nudge_once, cfg, store, now, random.random())
+                if result is not None:
+                    await deliver(app, cfg, store, result, now)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("scheduler: proactive tick iteration failed",
+                               exc_info=True)

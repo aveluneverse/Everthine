@@ -28,22 +28,24 @@ on_button in the same PTB group -- see make_app's handler-registration
 comment for why that ordering, not just the pattern, is what keeps
 on_button's own bare CallbackQueryHandler from swallowing these presses.
 
-The inner life hangs off two hooks. post_init is now a composite startup
-hook: the command menu first, then _start_inner_tick's background tick --
-a TICK_INTERVAL_S heartbeat that hands diary.write_once and, since M6 T6,
-portrait.update_once each one complete attempt per round (M5 T6 built the
-tick for the diary alone; M6 T6 widened it to carry the self-portrait too,
-each call isolated from the other's failures) and never sends a Telegram
-message. The tick arms for a folder-mode persona whenever EITHER
-diary_enabled or portrait_enabled is on; each organ's own INFO line at
-start ("diary: inner-life tick started" / "portrait: armed (interval
-{n}d)") only prints when that organ's own flag is actually on, so a
-diary-only or portrait-only run never claims a line that isn't true. And
-both of on_text's reply paths fire reflection.reflect_once after a
-SUCCESSFUL reply, fire-and-forget through _schedule_reflection. With
-every flag off (diary_enabled / portrait_enabled / reflection_enabled),
-all of it is structurally absent -- no task, no tick, no reflection,
-behavior identical to M4.
+The inner life hangs off two hooks. make_app's _post_init is a composite
+startup hook: the command menu first, then scheduler.start_tick's background
+tick -- a TICK_INTERVAL_S heartbeat, owned by scheduler.py (M7 T6 moved it
+out of this module), that hands diary.write_once and portrait.update_once
+each one complete attempt per round and, when scheduler_enabled, also runs
+one proactive reach-out (scheduler.nudge_once -> deliver) as a third segment.
+So the tick now DOES send -- but only through that proactive segment; the
+diary and portrait segments still never send a Telegram message. The tick
+arms for a folder-mode persona whenever ANY of diary_enabled /
+portrait_enabled / scheduler_enabled is on; each organ's own INFO line at
+start ("diary: inner-life tick started" / "portrait: armed (interval {n}d)"
+/ "scheduler: proactive armed (...)") only prints when that organ's own flag
+is actually on, so a single-organ run never claims a line that isn't true.
+And both of on_text's reply paths fire reflection.reflect_once after a
+SUCCESSFUL reply, fire-and-forget through _schedule_reflection. With every
+flag off (diary_enabled / portrait_enabled / scheduler_enabled /
+reflection_enabled), all of it is structurally absent -- no task, no tick,
+no proactive reach-out, no reflection, behavior identical to M4.
 """
 from __future__ import annotations
 
@@ -63,7 +65,7 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           MessageReactionHandler, filters)
 
 from . import (album, archive, chunking, diary, engine, memory_recall,
-              messages, persona, portrait, recent_context, reflection,
+              messages, persona, recent_context, reflection, scheduler,
               stages)
 from .config import Config, load_config
 from .engine import EngineReply
@@ -106,14 +108,6 @@ ALBUM_SNIPPET_CHARS = 30
 # history stays on disk, only the RENDER is clipped so a long road never
 # floods one message.
 STAGE_ROAD_CLIP = 8
-
-# M5 T6: the inner-life heartbeat -- how often the background tick wakes to
-# hand diary.write_once, and (M6 T6) portrait.update_once, each one complete
-# attempt (the diary task deferred this constant here, next to the module's
-# other tuning knobs). The tick itself never sends a message; everything
-# user-visible stays in the reply paths.
-TICK_INTERVAL_S = 300
-
 
 def decide_start_buttons(has_session: bool) -> list:
     if has_session:
@@ -403,7 +397,7 @@ def _schedule_reflection(context, cfg: Config, user_msg: str,
     conversation by itself (try_run_once inside), so the task needs no
     supervision once it exists; asyncio.to_thread keeps its blocking engine
     call off the event loop. Application.create_task is the right scheduler
-    HERE, in contrast to the tick (see _start_inner_tick): by the time any
+    HERE, in contrast to the tick (see scheduler.start_tick): by the time any
     reply succeeds the application is running, so PTB tracks the task and a
     graceful stop() waits for an in-flight reflection (bounded by the
     reflection's own engine timeout) instead of tearing the loop down under
@@ -568,18 +562,19 @@ async def register_commands(app) -> None:
     cfg says they should exist at all -- the same _stage_registration_active
     condition their CommandHandler was registered under, and cfg.album_enabled
     for /album. cfg travels here through app.bot_data["cfg"] rather than a
-    parameter: the composite post_init (what make_app hands to
+    parameter: make_app's composite startup hook (_post_init, what it hands to
     ApplicationBuilder().post_init) awaits this with just `app`, never a
-    cfg-bound wrapper, so there is no parameter slot for it. The identity pin
-    sits on post_init now, not here: test_bot_stream.py's
-    test_post_init_registers_command_menu pins bot.post_init as the object
-    handed to .post_init(...), and test_post_init_awaits_register_commands
-    pins that post_init awaits this function in turn. bot_data is PTB's own
-    per-Application storage, sanctioned for
-    exactly this kind of side channel. Every existing direct-call site
-    (this project's own tests included) hands this a bare app with no
-    bot_data attribute at all, which degrades to the original start-only
-    menu, byte-identical to before M4 T8.
+    cfg-bound wrapper, so there is no parameter slot for it. The inner-life
+    tick, wired in that same closure, takes cfg and the store as explicit
+    arguments instead -- a menu is cosmetic and degrades to start-only when the
+    channel is missing, where a tick wired to nothing must fail loud, so the
+    two travel differently on purpose. bot_data is PTB's own per-Application
+    storage, sanctioned for exactly this kind of side channel. Every existing
+    direct-call site (this project's own tests included) hands this a bare app
+    with no bot_data attribute at all, which degrades to the original
+    start-only menu, byte-identical to before M4 T8. The startup hook's own
+    behavior (menu first, then tick; neither half able to crash boot) is pinned
+    by test_bot_stream.py's TestPostInitComposite.
     """
     bot_data = getattr(app, "bot_data", None)
     cfg = bot_data.get("cfg") if isinstance(bot_data, dict) else None
@@ -594,105 +589,6 @@ async def register_commands(app) -> None:
     except Exception:
         logger.warning("could not publish the command menu; continuing without it",
                        exc_info=True)
-
-
-async def post_init(app) -> None:
-    """Startup hook: registers the command menu, then starts the inner-life
-    tick. Both halves guard themselves -- a cosmetic or background feature
-    must never take the bot's boot down with it."""
-    await register_commands(app)          # keeps its own internal guard
-    try:
-        _start_inner_tick(app)
-    except Exception:
-        logger.warning("inner-life tick failed to start", exc_info=True)
-
-
-def _start_inner_tick(app) -> None:
-    """Arm the background inner-life tick, if this run wants either organ:
-    both diary_enabled and portrait_enabled off means no task at all (the
-    L1 rollback -- nothing ticking, nothing to cancel), and a file-mode
-    persona has no settings either organ can voice a page or a portrait
-    with, said once here at boot (INFO: it is the L1 persona-rollback
-    state, worth one line) rather than rediscovered every five minutes by
-    each organ's own defensive gate.
-
-    Once armed, each organ logs its own INFO line, gated on its own flag
-    alone (not on whether the tick as a whole started): "diary: inner-life
-    tick started" is byte-identical on purpose -- the deployment SOP greps
-    for it -- and prints only when diary_enabled, even if portrait_enabled
-    is what actually armed the task; "portrait: armed (interval {n}d)"
-    (n = cfg.portrait_interval_days) prints only when portrait_enabled. A
-    diary-only or portrait-only run therefore never logs a line that isn't
-    true of it.
-
-    asyncio.create_task, not Application.create_task, on two measured PTB
-    22.6 facts (read from the installed package): post_init is awaited via
-    run_until_complete BEFORE Application.start() flips `running`, so
-    Application.create_task here would warn ("won't be automatically
-    awaited") and skip its own tracking anyway; and stop() awaits every
-    task that tracking DOES hold (asyncio.gather, no cancellation), which
-    for an infinite loop would hang shutdown forever. The loop post_init
-    runs on is already the application's own, so plain asyncio.create_task
-    is both sufficient and honest. The Task reference is parked in bot_data
-    because asyncio holds only a weak reference to running tasks -- an
-    unparked tick could be garbage-collected mid-flight.
-    """
-    cfg = app.bot_data["cfg"]
-    if not (cfg.diary_enabled or cfg.portrait_enabled):
-        logger.debug("inner-life: tick not started (both-disabled)")
-        return
-    if persona.current_settings(cfg) is None:
-        logger.info("inner-life: disabled (file-mode persona)")
-        return
-    app.bot_data["_inner_tick_task"] = asyncio.create_task(_inner_tick_loop(cfg))
-    if cfg.diary_enabled:
-        logger.info("diary: inner-life tick started")
-    if cfg.portrait_enabled:
-        logger.info("portrait: armed (interval %sd)", cfg.portrait_interval_days)
-
-
-async def _inner_tick_loop(cfg: Config) -> None:
-    """The inner-life heartbeat: sleep first (the moment of boot is never
-    writing time), take one shared timestamp for the round, then hand
-    diary.write_once and (M6 T6) portrait.update_once each one complete
-    attempt on their own worker thread (asyncio.to_thread -- both read from
-    disk and call the engine, never on the event loop), forever. The tick
-    NEVER sends a Telegram message: whatever either organ produces stays
-    on disk.
-
-    Unkillable by design, per organ: each call sits in its own try/except
-    (write_once and update_once both propagate unexpected exceptions on
-    purpose, deferring the catch to this loop), so a raising diary round
-    never skips that round's portrait attempt, and a raising portrait round
-    never skips next round's diary attempt -- one organ's bug is never the
-    other's outage. Every except logs by name, and only CancelledError --
-    the one exit anyone ever means, including one raised while
-    asyncio.sleep is still waiting (sleep sits outside both try/excepts, so
-    its own cancellation is never caught here) -- passes through uncaught.
-    Known and accepted: on a conversation-free day, every in-window round
-    logs "diary: skip (material_empty)" at INFO; that visibility is
-    deliberate (the skip line is the observable proof the tick is alive),
-    not duplication to suppress. When both organs want to write in the
-    same round, engine.try_run_once's natural serialization (busy returns
-    None) is enough on its own: whichever call gets there first holds the
-    engine, the other yields and simply tries again next round -- no extra
-    coordination lives here.
-    """
-    while True:
-        await asyncio.sleep(TICK_INTERVAL_S)
-        now = datetime.now().astimezone()
-        try:
-            await asyncio.to_thread(diary.write_once, cfg, now)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("diary: tick iteration failed", exc_info=True)
-        try:
-            await asyncio.to_thread(portrait.update_once, cfg, now)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("portrait: tick iteration failed", exc_info=True)
 
 
 def make_app(cfg: Config):
@@ -1147,14 +1043,28 @@ def make_app(cfg: Config):
     # busy gate and cancel callback only make sense once updates run
     # concurrently, so scope concurrency to streaming mode. PTB maps False to
     # one-update-at-a-time, byte-identical to M1 (which never enabled it).
+    async def _post_init(app_) -> None:
+        """The composite startup hook (M7 T6): publish the command menu first,
+        then arm the inner-life tick. Each half self-guards -- PTB 22.6 awaits
+        post_init via run_until_complete OUTSIDE any exception guard, so an
+        escaping exception here crashes the whole process at startup; a cosmetic
+        menu blip or a background-tick failure must never be that. The tick now
+        lives in scheduler.py; store reaches it as an explicit argument from
+        this closure's scope, never a bot_data side channel -- a parameter that
+        cannot be supplied fails loudly at once, where a silent side-channel
+        miss would arm a tick wired to nothing that no one would notice."""
+        await register_commands(app_)          # keeps its own internal guard
+        try:
+            scheduler.start_tick(app_, cfg, store)
+        except Exception:
+            logger.warning("inner-life tick failed to start", exc_info=True)
+
     app = (ApplicationBuilder().token(cfg.bot_token)
            .concurrent_updates(cfg.streaming_enabled)
-           .post_init(post_init).build())
-    # post_init (M5 T6) is the composite startup hook -- the command menu
-    # first, then the inner-life tick, each half self-guarded -- and a test
-    # pins that the object handed to .post_init above IS bot.post_init.
-    # cfg still reaches both halves at call time through this side channel
-    # instead of a parameter (see register_commands' own docstring).
+           .post_init(_post_init).build())
+    # cfg still reaches register_commands at call time through this side
+    # channel (see its own docstring); the inner-life tick, by contrast, takes
+    # cfg and the session store as explicit arguments from _post_init's scope.
     app.bot_data["cfg"] = cfg
     app.add_handler(CommandHandler("start", start_cmd))
     if stage_active or cfg.album_enabled:

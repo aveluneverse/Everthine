@@ -1849,8 +1849,8 @@ class TestCommandMenuOrganWiring(_StageAlbumUITestCase):
         cfg = self._cfg()  # stages+album on, persona has stages
         app = bot.make_app(cfg)
         # make_app's own side of the wiring: cfg travels to register_commands
-        # through app.bot_data, since post_init is passed register_commands
-        # by bare reference (test_bot_stream.py pins that identity).
+        # through app.bot_data, since the startup hook (make_app's _post_init)
+        # calls register_commands with just `app`, never a cfg-bound wrapper.
         self.assertIs(app.bot_data.get("cfg"), cfg)
 
         fake = _FakeCommandApp(bot_data=app.bot_data)

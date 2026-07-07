@@ -12,8 +12,8 @@ prompt that turns them into prose (build_material,
 build_system_prompt_portrait); update_once, the generation pipeline that
 calls the engine to attempt one complete snapshot; and portrait_block, the
 Layer 1 renderer persona.build_system_prompt reads every turn to seat the
-saved snapshot into the live persona. The bot's background inner-life tick
-(bot.py's _inner_tick_loop) hands update_once one attempt every round,
+saved snapshot into the live persona. The background inner-life tick
+(scheduler.py's tick_loop) hands update_once one attempt every round,
 alongside diary.write_once and isolated from its failures. Nothing here
 imports bot.py -- the wiring runs the other direction.
 
