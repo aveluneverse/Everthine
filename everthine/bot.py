@@ -28,14 +28,22 @@ on_button in the same PTB group -- see make_app's handler-registration
 comment for why that ordering, not just the pattern, is what keeps
 on_button's own bare CallbackQueryHandler from swallowing these presses.
 
-The inner life (M5 T6) hangs off two hooks. post_init is now a composite
-startup hook: the command menu first, then _start_inner_tick's background
-diary tick -- a TICK_INTERVAL_S heartbeat that hands diary.write_once one
-complete attempt per round and never sends a Telegram message. And both of
-on_text's reply paths fire reflection.reflect_once after a SUCCESSFUL
-reply, fire-and-forget through _schedule_reflection. With the flags off
-(diary_enabled / reflection_enabled) both are structurally absent -- no
-task, no tick, behavior identical to M4.
+The inner life hangs off two hooks. post_init is now a composite startup
+hook: the command menu first, then _start_inner_tick's background tick --
+a TICK_INTERVAL_S heartbeat that hands diary.write_once and, since M6 T6,
+portrait.update_once each one complete attempt per round (M5 T6 built the
+tick for the diary alone; M6 T6 widened it to carry the self-portrait too,
+each call isolated from the other's failures) and never sends a Telegram
+message. The tick arms for a folder-mode persona whenever EITHER
+diary_enabled or portrait_enabled is on; each organ's own INFO line at
+start ("diary: inner-life tick started" / "portrait: armed (interval
+{n}d)") only prints when that organ's own flag is actually on, so a
+diary-only or portrait-only run never claims a line that isn't true. And
+both of on_text's reply paths fire reflection.reflect_once after a
+SUCCESSFUL reply, fire-and-forget through _schedule_reflection. With
+every flag off (diary_enabled / portrait_enabled / reflection_enabled),
+all of it is structurally absent -- no task, no tick, no reflection,
+behavior identical to M4.
 """
 from __future__ import annotations
 
@@ -55,7 +63,8 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           MessageReactionHandler, filters)
 
 from . import (album, archive, chunking, diary, engine, memory_recall,
-              messages, persona, recent_context, reflection, stages)
+              messages, persona, portrait, recent_context, reflection,
+              stages)
 from .config import Config, load_config
 from .engine import EngineReply
 from .messages import msg
@@ -99,9 +108,10 @@ ALBUM_SNIPPET_CHARS = 30
 STAGE_ROAD_CLIP = 8
 
 # M5 T6: the inner-life heartbeat -- how often the background tick wakes to
-# hand diary.write_once one complete attempt (the diary task deferred this
-# constant here, next to the module's other tuning knobs). The tick itself
-# never sends a message; everything user-visible stays in the reply paths.
+# hand diary.write_once, and (M6 T6) portrait.update_once, each one complete
+# attempt (the diary task deferred this constant here, next to the module's
+# other tuning knobs). The tick itself never sends a message; everything
+# user-visible stays in the reply paths.
 TICK_INTERVAL_S = 300
 
 
@@ -598,12 +608,22 @@ async def post_init(app) -> None:
 
 
 def _start_inner_tick(app) -> None:
-    """Arm the background inner-life tick (M5 T6), if this run wants one:
-    diary_enabled off means no task at all (the L1 rollback -- nothing
-    ticking, nothing to cancel), and a file-mode persona has no settings to
-    voice a page with, said once here at boot (INFO: it is the L1
-    persona-rollback state, worth one line) rather than rediscovered every
-    five minutes by write_once's own defensive gate.
+    """Arm the background inner-life tick, if this run wants either organ:
+    both diary_enabled and portrait_enabled off means no task at all (the
+    L1 rollback -- nothing ticking, nothing to cancel), and a file-mode
+    persona has no settings either organ can voice a page or a portrait
+    with, said once here at boot (INFO: it is the L1 persona-rollback
+    state, worth one line) rather than rediscovered every five minutes by
+    each organ's own defensive gate.
+
+    Once armed, each organ logs its own INFO line, gated on its own flag
+    alone (not on whether the tick as a whole started): "diary: inner-life
+    tick started" is byte-identical on purpose -- the deployment SOP greps
+    for it -- and prints only when diary_enabled, even if portrait_enabled
+    is what actually armed the task; "portrait: armed (interval {n}d)"
+    (n = cfg.portrait_interval_days) prints only when portrait_enabled. A
+    diary-only or portrait-only run therefore never logs a line that isn't
+    true of it.
 
     asyncio.create_task, not Application.create_task, on two measured PTB
     22.6 facts (read from the installed package): post_init is awaited via
@@ -618,40 +638,61 @@ def _start_inner_tick(app) -> None:
     unparked tick could be garbage-collected mid-flight.
     """
     cfg = app.bot_data["cfg"]
-    if not cfg.diary_enabled:
-        logger.debug("diary: tick not started (disabled)")
+    if not (cfg.diary_enabled or cfg.portrait_enabled):
+        logger.debug("inner-life: tick not started (both-disabled)")
         return
     if persona.current_settings(cfg) is None:
-        logger.info("diary: disabled (file-mode persona)")
+        logger.info("inner-life: disabled (file-mode persona)")
         return
     app.bot_data["_inner_tick_task"] = asyncio.create_task(_inner_tick_loop(cfg))
-    logger.info("diary: inner-life tick started")
+    if cfg.diary_enabled:
+        logger.info("diary: inner-life tick started")
+    if cfg.portrait_enabled:
+        logger.info("portrait: armed (interval %sd)", cfg.portrait_interval_days)
 
 
 async def _inner_tick_loop(cfg: Config) -> None:
     """The inner-life heartbeat: sleep first (the moment of boot is never
-    writing time), then hand diary.write_once one complete attempt on a
-    worker thread (it reads the archive and calls the engine -- never on
-    the event loop), forever. The tick NEVER sends a Telegram message:
-    whatever the diary produces stays on disk.
+    writing time), take one shared timestamp for the round, then hand
+    diary.write_once and (M6 T6) portrait.update_once each one complete
+    attempt on their own worker thread (asyncio.to_thread -- both read from
+    disk and call the engine, never on the event loop), forever. The tick
+    NEVER sends a Telegram message: whatever either organ produces stays
+    on disk.
 
-    Unkillable by design: write_once propagates unexpected exceptions on
-    purpose (its docstring defers the catch to this loop), so every round
-    is wrapped and logged, and only CancelledError -- the one exit anyone
-    ever means -- passes through. Known and accepted: on a conversation-
-    free day, every in-window round logs "diary: skip (material_empty)" at
-    INFO; that visibility is deliberate (the skip line is the observable
-    proof the tick is alive), not duplication to suppress.
+    Unkillable by design, per organ: each call sits in its own try/except
+    (write_once and update_once both propagate unexpected exceptions on
+    purpose, deferring the catch to this loop), so a raising diary round
+    never skips that round's portrait attempt, and a raising portrait round
+    never skips next round's diary attempt -- one organ's bug is never the
+    other's outage. Every except logs by name, and only CancelledError --
+    the one exit anyone ever means, including one raised while
+    asyncio.sleep is still waiting (sleep sits outside both try/excepts, so
+    its own cancellation is never caught here) -- passes through uncaught.
+    Known and accepted: on a conversation-free day, every in-window round
+    logs "diary: skip (material_empty)" at INFO; that visibility is
+    deliberate (the skip line is the observable proof the tick is alive),
+    not duplication to suppress. When both organs want to write in the
+    same round, engine.try_run_once's natural serialization (busy returns
+    None) is enough on its own: whichever call gets there first holds the
+    engine, the other yields and simply tries again next round -- no extra
+    coordination lives here.
     """
     while True:
+        await asyncio.sleep(TICK_INTERVAL_S)
+        now = datetime.now().astimezone()
         try:
-            await asyncio.sleep(TICK_INTERVAL_S)
-            await asyncio.to_thread(diary.write_once, cfg,
-                                    datetime.now().astimezone())
+            await asyncio.to_thread(diary.write_once, cfg, now)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.warning("diary: tick iteration failed", exc_info=True)
+        try:
+            await asyncio.to_thread(portrait.update_once, cfg, now)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("portrait: tick iteration failed", exc_info=True)
 
 
 def make_app(cfg: Config):

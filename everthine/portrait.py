@@ -3,14 +3,19 @@ composes every so often by digesting recent diary pages and reflections,
 then layers into its own persona underneath everything else -- not a new
 fact to recite, but something closer to "who I've noticed I am lately."
 
-This task builds only the state core: the module's constants, load/save of
-the single current snapshot (with a parallel dated history so nothing
-written is ever lost to the next week's overwrite), and the pure
-eligibility check that decides whether a new snapshot is due right now.
-Composing what a portrait actually reads from -- diary excerpts, reflection
-lines, the prompt that turns them into prose -- is a later task's (T3's)
-work, and wiring a write into the engine and the bot's background tick is
-later still (T4/T6). Nothing here calls the engine or imports bot.py.
+The module holds the whole pipeline now: the state core (constants,
+load/save of the single current snapshot, with a parallel dated history so
+nothing written is ever lost to the next week's overwrite, and the pure
+eligibility check deciding whether a new snapshot is due right now); what a
+portrait actually reads from -- diary excerpts, reflection lines, and the
+prompt that turns them into prose (build_material,
+build_system_prompt_portrait); update_once, the generation pipeline that
+calls the engine to attempt one complete snapshot; and portrait_block, the
+Layer 1 renderer persona.build_system_prompt reads every turn to seat the
+saved snapshot into the live persona. The bot's background inner-life tick
+(bot.py's _inner_tick_loop) hands update_once one attempt every round,
+alongside diary.write_once and isolated from its failures. Nothing here
+imports bot.py -- the wiring runs the other direction.
 
 Fail-soft mirrors diary.py and reflection.py: a missing portrait.json
 quietly means "nothing written yet". Unlike those two, though, there is no

@@ -1,13 +1,17 @@
-"""Tests for M5 Task 6: bot.py's inner-life wiring.
+"""Tests for M5 Task 6 (and M6 Task 6, which widened the tick to carry the
+self-portrait too): bot.py's inner-life wiring.
 
-Two execution lines from the earlier tasks are hung off the bot here:
+Two execution lines are hung off the bot here:
 
-  * the background diary tick -- the composite post_init (its own pin lives
-    in tests/test_bot_stream.py, this milestone's one authorized existing-
-    test update) starts an asyncio loop that calls diary.write_once every
-    TICK_INTERVAL_S and NEVER sends a Telegram message; the loop is
-    unkillable by design (every round is wrapped, only CancelledError
-    escapes), and it is armed only for a diary-enabled, folder-mode persona;
+  * the background inner-life tick -- the composite post_init (its own pin
+    lives in tests/test_bot_stream.py, this milestone's one authorized
+    existing-test update) starts an asyncio loop that calls diary.write_once
+    and, since M6 T6, portrait.update_once every TICK_INTERVAL_S, each call
+    wrapped in its own try/except so one organ's failure never blocks the
+    other, and NEVER sends a Telegram message; the loop is unkillable by
+    design (every call is individually wrapped, only CancelledError
+    escapes), and it is armed for a folder-mode persona whenever EITHER
+    diary_enabled or portrait_enabled is on;
 
   * the post-reply reflection -- after a SUCCESSFUL reply on either path,
     on_text fires reflection.reflect_once fire-and-forget through
@@ -15,8 +19,9 @@ Two execution lines from the earlier tasks are hung off the bot here:
     it, never letting a scheduling failure touch the reply.
 
 L1 rollback pins: reflection_enabled False schedules nothing at all (not
-even a task), and diary_enabled False arms no tick -- so with both off the
-bot's observable behavior is exactly M4's.
+even a task), and diary_enabled and portrait_enabled BOTH False arms no
+tick -- either organ flag left on is enough to arm it alone -- so with
+every flag off the bot's observable behavior is exactly M4's.
 
 Conventions follow tests/test_bot_stage_album_wiring.py (the on_text closure
 is pulled out of app.handlers[0] and driven directly with hand-rolled
@@ -47,7 +52,7 @@ from unittest import mock
 from telegram.ext import MessageHandler
 
 from everthine import (bot, diary, engine, memory_embed, memory_recall,
-                       messages, persona, reflection)
+                       messages, persona, portrait, reflection)
 from everthine.config import Config
 from everthine.engine import EngineReply
 from everthine.session_store import SessionStore
@@ -221,19 +226,21 @@ def ok_script(text_chunks, session_id="sess-stream"):
         {"type": "done", "reply": EngineReply(full, session_id, ok=True)}]
 
 
-# --- 1. tick mounting: armed for a diary-enabled folder persona, refused for
-#        a disabled flag or a file-mode persona ------------------------------
+# --- 1. tick mounting: armed for a folder persona whenever either organ flag
+#        is on, refused when both are off or the persona is file-mode -------
 
 class TestInnerTickMounting(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         _install_resets(self)
 
-    async def test_tick_armed_with_folder_persona_and_flag_on(self):
-        cfg = _folder_cfg(self.root)
+    async def test_tick_armed_with_folder_persona_both_flags_on(self):
+        cfg = _folder_cfg(self.root)  # diary_enabled and portrait_enabled default True
         app = FakeTickApp(cfg)
         with self.assertLogs("everthine", level="INFO") as cm:
             bot._start_inner_tick(app)
-        self.assertTrue(any("tick started" in m for m in cm.output))
+        # Byte-identical literal pin: the deployment SOP greps for this line.
+        self.assertTrue(any("diary: inner-life tick started" in m for m in cm.output))
+        self.assertTrue(any("portrait: armed (interval 7d)" in m for m in cm.output))
         task = app.bot_data.get("_inner_tick_task")
         # The task reference is held in bot_data on purpose: a bare
         # asyncio.create_task result nobody keeps can be garbage-collected
@@ -244,8 +251,40 @@ class TestInnerTickMounting(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task  # CancelledError passes through the loop uncaught
 
-    async def test_tick_not_armed_when_diary_disabled(self):
-        cfg = _folder_cfg(self.root, diary_enabled=False)
+    async def test_tick_armed_diary_only_no_portrait_line(self):
+        cfg = _folder_cfg(self.root, portrait_enabled=False)
+        app = FakeTickApp(cfg)
+        with self.assertLogs("everthine", level="INFO") as cm:
+            bot._start_inner_tick(app)
+        self.assertTrue(any("diary: inner-life tick started" in m for m in cm.output))
+        self.assertFalse(any("portrait: armed" in m for m in cm.output))
+        task = app.bot_data.get("_inner_tick_task")
+        self.assertIsInstance(task, asyncio.Task)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_tick_armed_portrait_only_no_diary_line(self):
+        # A non-default interval on purpose: proves the armed line's {n}
+        # actually reads cfg.portrait_interval_days, not a hardcoded 7.
+        cfg = _folder_cfg(self.root, diary_enabled=False, portrait_interval_days=3)
+        app = FakeTickApp(cfg)
+        with self.assertLogs("everthine", level="INFO") as cm:
+            bot._start_inner_tick(app)
+        self.assertFalse(any("tick started" in m for m in cm.output))
+        self.assertTrue(any("portrait: armed (interval 3d)" in m for m in cm.output))
+        task = app.bot_data.get("_inner_tick_task")
+        self.assertIsInstance(task, asyncio.Task)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_tick_not_armed_when_both_disabled(self):
+        """L1 pin, standalone -- not just a cell inside the gate matrix
+        below: the tick must be structurally absent (no task, nothing to
+        cancel) the moment BOTH organ flags are off, even though either one
+        alone is enough to arm it."""
+        cfg = _folder_cfg(self.root, diary_enabled=False, portrait_enabled=False)
         app = FakeTickApp(cfg)
         bot._start_inner_tick(app)
         self.assertNotIn("_inner_tick_task", app.bot_data)
@@ -258,15 +297,46 @@ class TestInnerTickMounting(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("_inner_tick_task", app.bot_data)
         self.assertTrue(any("file-mode persona" in m for m in cm.output))
 
+    async def test_tick_gate_matrix(self):
+        """The full eight-cell gate truth table: diary_enabled x
+        portrait_enabled x persona mode. Folder mode arms whenever either
+        flag is on; file mode never arms, regardless of either flag. The
+        two most load-bearing cells (both on, both off) also have their own
+        dedicated tests above with stronger, log-line-level assertions --
+        this sweep is the systematic cross-check that no cell was missed."""
+        cases = []
+        for diary_enabled, portrait_enabled in itertools.product([True, False], repeat=2):
+            cases.append(("folder", diary_enabled, portrait_enabled,
+                          diary_enabled or portrait_enabled))
+            cases.append(("file", diary_enabled, portrait_enabled, False))
 
-# --- 2. the tick loop is unkillable: a raising iteration is logged and the
-#        loop keeps going; write_once always receives an aware now -----------
+        for mode, diary_enabled, portrait_enabled, expect_armed in cases:
+            with self.subTest(mode=mode, diary_enabled=diary_enabled,
+                              portrait_enabled=portrait_enabled):
+                cfg_fn = _folder_cfg if mode == "folder" else _file_cfg
+                cfg = cfg_fn(self.root, diary_enabled=diary_enabled,
+                            portrait_enabled=portrait_enabled)
+                app = FakeTickApp(cfg)
+                bot._start_inner_tick(app)
+                task = app.bot_data.get("_inner_tick_task")
+                if expect_armed:
+                    self.assertIsInstance(task, asyncio.Task)
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                else:
+                    self.assertIsNone(task)
+
+
+# --- 2. the tick loop is unkillable: a raising call in either organ is
+#        logged and the loop keeps going, and never blocks the other organ;
+#        write_once/update_once always receive the same aware now ----------
 
 class TestInnerTickLoopSurvives(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         _install_resets(self)
 
-    async def test_loop_survives_a_failing_iteration_and_passes_aware_now(self):
+    async def test_loop_survives_a_failing_diary_iteration_and_passes_aware_now(self):
         cfg = Config(bot_token="x", authorized_user_id=1,
                      data_dir=self.root / "data")
         seen = []
@@ -284,6 +354,7 @@ class TestInnerTickLoopSurvives(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(bot, "TICK_INTERVAL_S", 0), \
              mock.patch.object(diary, "write_once", fake_write_once), \
+             mock.patch.object(portrait, "update_once", lambda cfg_arg, now: False), \
              self.assertLogs("everthine", level="WARNING") as cm:
             task = asyncio.create_task(bot._inner_tick_loop(cfg))
             try:
@@ -296,7 +367,93 @@ class TestInnerTickLoopSurvives(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(seen), 2)  # survived the RuntimeError
         self.assertIsNotNone(seen[0].utcoffset())  # aware now, first round
         self.assertIsNotNone(seen[1].utcoffset())  # aware now, second round
-        self.assertTrue(any("tick iteration failed" in m for m in cm.output))
+        self.assertTrue(any("diary: tick iteration failed" in m for m in cm.output))
+
+    async def test_diary_failure_does_not_block_portrait_same_round(self):
+        """diary.write_once raises on every round; portrait.update_once must
+        still be called in that SAME round -- the two organs are isolated,
+        never sequenced by one another's success."""
+        cfg = Config(bot_token="x", authorized_user_id=1,
+                     data_dir=self.root / "data")
+        portrait_calls = []
+        done = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def fake_write_once(cfg_arg, now):
+            raise RuntimeError("diary explodes every round")
+
+        def fake_update_once(cfg_arg, now):
+            portrait_calls.append(now)
+            loop.call_soon_threadsafe(done.set)
+            return False
+
+        with mock.patch.object(bot, "TICK_INTERVAL_S", 0), \
+             mock.patch.object(diary, "write_once", fake_write_once), \
+             mock.patch.object(portrait, "update_once", fake_update_once), \
+             self.assertLogs("everthine", level="WARNING") as cm:
+            task = asyncio.create_task(bot._inner_tick_loop(cfg))
+            try:
+                await asyncio.wait_for(done.wait(), timeout=5)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        self.assertGreaterEqual(len(portrait_calls), 1)
+        self.assertIsNotNone(portrait_calls[0].utcoffset())  # same aware now
+        self.assertTrue(any("diary: tick iteration failed" in m for m in cm.output))
+
+    async def test_portrait_failure_does_not_block_diary_next_round(self):
+        """portrait.update_once raises on every round; diary.write_once must
+        keep being called round after round -- one organ's bug is never the
+        other's outage, and the loop as a whole survives it."""
+        cfg = Config(bot_token="x", authorized_user_id=1,
+                     data_dir=self.root / "data")
+        diary_calls = []
+        done = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def fake_write_once(cfg_arg, now):
+            diary_calls.append(now)
+            if len(diary_calls) >= 2:
+                loop.call_soon_threadsafe(done.set)
+            return False
+
+        def fake_update_once(cfg_arg, now):
+            raise RuntimeError("portrait explodes every round")
+
+        with mock.patch.object(bot, "TICK_INTERVAL_S", 0), \
+             mock.patch.object(diary, "write_once", fake_write_once), \
+             mock.patch.object(portrait, "update_once", fake_update_once), \
+             self.assertLogs("everthine", level="WARNING") as cm:
+            task = asyncio.create_task(bot._inner_tick_loop(cfg))
+            try:
+                await asyncio.wait_for(done.wait(), timeout=5)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        self.assertGreaterEqual(len(diary_calls), 2)  # survived across rounds
+        self.assertTrue(any("portrait: tick iteration failed" in m for m in cm.output))
+
+    async def test_cancel_during_sleep_propagates(self):
+        """Cancelling while the loop is still asleep -- before either organ's
+        call has even started -- must raise CancelledError out of the task
+        uncaught. Sleep sits outside both calls' try/except, so this pins
+        that its own cancellation is never accidentally swallowed."""
+        cfg = Config(bot_token="x", authorized_user_id=1,
+                     data_dir=self.root / "data")
+        with mock.patch.object(bot, "TICK_INTERVAL_S", 100), \
+             mock.patch.object(diary, "write_once") as fake_diary, \
+             mock.patch.object(portrait, "update_once") as fake_portrait:
+            task = asyncio.create_task(bot._inner_tick_loop(cfg))
+            await asyncio.sleep(0)  # let the task start and enter the sleep
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        fake_diary.assert_not_called()
+        fake_portrait.assert_not_called()
 
 
 # --- 3. reflection hook, non-streaming path --------------------------------
@@ -454,12 +611,15 @@ class TestReflectionL1Pin(unittest.TestCase):
 
     def test_both_flags_off_no_tick_and_no_reflection(self):
         cfg = _folder_cfg(self.root, streaming_enabled=False,
-                          diary_enabled=False, reflection_enabled=False)
+                          diary_enabled=False, portrait_enabled=False,
+                          reflection_enabled=False)
         app = bot.make_app(cfg)
-        # Tick gate: _start_inner_tick arms nothing with the diary disabled
-        # (early return runs before any coroutine or task exists, so this is
-        # safe to drive without a running loop -- creating a task here would
-        # itself fail the test loudly with "no running event loop").
+        # Tick gate: _start_inner_tick arms nothing with BOTH diary and
+        # portrait disabled (early return runs before any coroutine or task
+        # exists, so this is safe to drive without a running loop -- creating
+        # a task here would itself fail the test loudly with "no running
+        # event loop"). portrait_enabled must be turned off too, now that
+        # either organ flag alone is enough to arm the tick (M6 T6).
         tick_app = FakeTickApp(cfg)
         bot._start_inner_tick(tick_app)
         self.assertNotIn("_inner_tick_task", tick_app.bot_data)
