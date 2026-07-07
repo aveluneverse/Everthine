@@ -7,10 +7,12 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from everthine import portrait
 from everthine.config import load_config
-from everthine.persona import Persona, PersonaSettings
+from everthine.engine import EngineReply
+from everthine.persona import Persona, PersonaSettings, reset_persona_cache
 
 BASE_ENV = {"BOT_TOKEN": "123456789:" + "A" * 35, "AUTHORIZED_USER_ID": "42"}
 
@@ -642,6 +644,177 @@ class TestParseOutput(unittest.TestCase):
         result = portrait.parse_output(raw)
         self.assertEqual(result["opinions"], "not a list")
         self.assertEqual(result["observations"], [1, 2])
+
+
+# ---------------------------------------------------------------------
+# M6 T4: update_once -- the execution line. The engine seam is mocked at
+# the consumer side (everthine.portrait's own engine reference); persona
+# loading runs against a real tmp persona folder, never a model. Mirrors
+# tests/test_diary.py's TestWriteOnce conventions and seam.
+# ---------------------------------------------------------------------
+
+ENGINE_SEAM = "everthine.portrait.engine.try_run_once"
+
+
+def _persona_folder(td):
+    """Write a minimal valid folder-mode persona under td and return it."""
+    folder = Path(td) / "persona"
+    folder.mkdir()
+    (folder / "identity.md").write_text(IDENTITY_TEXT, encoding="utf-8")
+    (folder / "settings.yaml").write_text(
+        "companion:\n  name: Alex\npartner:\n  name: Sam\n", encoding="utf-8")
+    return folder
+
+
+class TestUpdateOnce(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(reset_persona_cache)
+
+    def _folder_cfg(self, td, **overrides):
+        return _cfg(td, PERSONA_PATH=str(_persona_folder(td)), **overrides)
+
+    def _assert_logged_at(self, cm, level, substring):
+        """Pin BOTH the level and the message -- assertLogs(level=X) only sets
+        a capture threshold (a DEBUG capture also lets INFO/WARNING through),
+        so a bare substring check would not catch a skip line accidentally
+        logged one level higher or lower than intended. cm.output entries are
+        "LEVELNAME:logger.name:message", per unittest's own format."""
+        prefix = f"{level}:everthine:"
+        self.assertTrue(
+            any(line.startswith(prefix) and substring in line for line in cm.output),
+            f"expected a {level} log containing {substring!r}, got: {cm.output}")
+
+    def test_file_mode_skips_without_engine_call(self):
+        with tempfile.TemporaryDirectory() as td:
+            persona_file = Path(td) / "persona.md"
+            persona_file.write_text("You are Testbot.", encoding="utf-8")
+            cfg = _cfg(td, PERSONA_PATH=str(persona_file))
+            with mock.patch(ENGINE_SEAM) as run, \
+                    self.assertLogs("everthine", level="DEBUG") as cm:
+                result = portrait.update_once(cfg, NOW)
+        self.assertFalse(result)
+        run.assert_not_called()
+        self._assert_logged_at(cm, "DEBUG", "portrait: skip (file_mode)")
+
+    def test_disabled_skips_without_engine_call(self):
+        # New material present too -- proves "disabled" short-circuits
+        # regardless (mirrors TestEligibility's own short-circuit pin).
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td, PORTRAIT_ENABLED="false")
+            _write_diary_entry(cfg, "2026-07-06_090000.json", date=TODAY, content="today")
+            with mock.patch(ENGINE_SEAM) as run, \
+                    self.assertLogs("everthine", level="DEBUG") as cm:
+                result = portrait.update_once(cfg, NOW)
+        self.assertFalse(result)
+        run.assert_not_called()
+        self._assert_logged_at(cm, "DEBUG", "portrait: skip (disabled)")
+
+    def test_interval_not_reached_skips_without_engine_call(self):
+        # New material present too -- proves the interval gate wins over an
+        # otherwise-eligible material count (same ordering TestEligibility pins).
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td, PORTRAIT_INTERVAL_DAYS="7")
+            portrait.save_portrait(cfg, {"content": "last week's self"},
+                                   NOW - timedelta(days=1))
+            _write_diary_entry(cfg, "2026-07-06_090000.json", date=TODAY, content="today")
+            with mock.patch(ENGINE_SEAM) as run, \
+                    self.assertLogs("everthine", level="DEBUG") as cm:
+                result = portrait.update_once(cfg, NOW)
+        self.assertFalse(result)
+        run.assert_not_called()
+        self._assert_logged_at(cm, "DEBUG", "portrait: skip (interval_not_reached)")
+
+    def test_no_new_material_skips_without_engine_call(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td, PORTRAIT_INTERVAL_DAYS="1")
+            portrait.save_portrait(cfg, {"content": "last snapshot"},
+                                   NOW - timedelta(days=10))
+            # No diary entries at all -> zero new material regardless of interval.
+            with mock.patch(ENGINE_SEAM) as run, \
+                    self.assertLogs("everthine", level="DEBUG") as cm:
+                result = portrait.update_once(cfg, NOW)
+        self.assertFalse(result)
+        run.assert_not_called()
+        self._assert_logged_at(cm, "DEBUG", "portrait: skip (no_new_material)")
+
+    def test_build_material_none_skips_without_engine_call(self):
+        # Defense-in-depth pin: eligibility passes (first-ever portrait, one
+        # diary entry), but build_material is forced to return None anyway.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            _write_diary_entry(cfg, "2026-07-06_090000.json", date=TODAY, content="today")
+            with mock.patch(ENGINE_SEAM) as run, \
+                    mock.patch("everthine.portrait.build_material", return_value=None), \
+                    self.assertLogs("everthine", level="INFO") as cm:
+                result = portrait.update_once(cfg, NOW)
+        self.assertFalse(result)
+        run.assert_not_called()
+        self._assert_logged_at(cm, "INFO", "portrait: skip (material_empty)")
+
+    def test_busy_engine_skips_with_debug_log(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            _write_diary_entry(cfg, "2026-07-06_090000.json", date=TODAY, content="today")
+            with mock.patch(ENGINE_SEAM, return_value=None) as run, \
+                    self.assertLogs("everthine", level="DEBUG") as cm:
+                result = portrait.update_once(cfg, NOW)
+        self.assertFalse(result)
+        run.assert_called_once()
+        # DEBUG, not INFO: unlike diary.write_once's busy-skip, this is a
+        # deliberate level deviation (brief step 5) -- pinned exactly so a
+        # copy-paste of diary's INFO choice here would fail this test.
+        self._assert_logged_at(cm, "DEBUG", "portrait: skip (engine_busy)")
+        self.assertFalse(cfg.portrait_path.exists())
+
+    def test_failed_engine_reply_logs_warning_and_saves_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            _write_diary_entry(cfg, "2026-07-06_090000.json", date=TODAY, content="today")
+            failed = EngineReply("", None, ok=False, error_kind="timeout")
+            with mock.patch(ENGINE_SEAM, return_value=failed), \
+                    self.assertLogs("everthine", level="WARNING") as cm:
+                result = portrait.update_once(cfg, NOW)
+        self.assertFalse(result)
+        self._assert_logged_at(cm, "WARNING", "portrait: engine failed (timeout)")
+        self.assertFalse(cfg.portrait_path.exists())
+
+    def test_unparseable_output_logs_warning_and_saves_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            _write_diary_entry(cfg, "2026-07-06_090000.json", date=TODAY, content="today")
+            garbage = EngineReply("just rambling, no structure here at all", "s", ok=True)
+            with mock.patch(ENGINE_SEAM, return_value=garbage), \
+                    self.assertLogs("everthine", level="WARNING") as cm:
+                result = portrait.update_once(cfg, NOW)
+        self.assertFalse(result)
+        self._assert_logged_at(cm, "WARNING", "portrait: unparseable engine output")
+        self.assertFalse(cfg.portrait_path.exists())
+
+    def test_success_saves_snapshot_and_pins_engine_kwargs(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            _write_diary_entry(cfg, "2026-07-06_090000.json", date=TODAY, content="today")
+            good = EngineReply(
+                '{"content": "who I am lately, in my own words", '
+                '"opinions": [{"topic": "mornings", "opinion": "underrated"}], '
+                '"observations": ["quiet on Sundays"]}',
+                "s", ok=True)
+            with mock.patch(ENGINE_SEAM, return_value=good) as run, \
+                    self.assertLogs("everthine", level="INFO") as cm:
+                result = portrait.update_once(cfg, NOW)
+            portrait_exists = cfg.portrait_path.exists()
+            history_path = cfg.portrait_history_dir / f"{TODAY}.json"
+            history_exists = history_path.exists()
+            data = json.loads(cfg.portrait_path.read_text(encoding="utf-8"))
+        self.assertTrue(result)
+        self.assertTrue(portrait_exists)
+        self.assertTrue(history_exists)
+        self.assertEqual(data["content"], "who I am lately, in my own words")
+        kwargs = run.call_args.kwargs
+        self.assertIsNone(kwargs["session_id"])
+        self.assertEqual(kwargs["timeout_s"], portrait.PORTRAIT_TIMEOUT_S)
+        self.assertIn("# Who you are, lately", kwargs["system_prompt"])
+        self._assert_logged_at(cm, "INFO", f"portrait: updated (version {TODAY})")
 
 
 if __name__ == "__main__":

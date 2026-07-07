@@ -51,7 +51,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import diary
+from . import diary, engine, persona
 from .diary import filter_sensitive
 from .layers import DECLARATION_TEMPLATE
 
@@ -514,3 +514,86 @@ def parse_output(raw: str) -> dict | None:
     data.setdefault("opinions", [])
     data.setdefault("observations", [])
     return data
+
+
+# ---------------------------------------------------------------------
+# Execution: one complete snapshot attempt (the background tick's worker)
+# ---------------------------------------------------------------------
+
+def update_once(cfg: Config, now: datetime) -> bool:
+    """One complete attempt to compose this week's self-portrait. True only
+    when a new snapshot was actually saved; every other outcome returns
+    False behind its own named log line, so a quiet tick is always
+    explainable after the fact. Mirrors diary.write_once's shape and
+    division of labor, stage by stage.
+
+    The engine call is try_run_once -- never run_once -- with a fresh
+    session (session_id=None, always: a portrait must never share a
+    session with, or leak into, the live conversation) and this module's
+    own timeout budget (PORTRAIT_TIMEOUT_S). A busy engine is not a
+    failure: inner writing always yields to live conversation, and a
+    later tick simply tries again.
+
+    Unlike diary.write_once, BOTH the eligibility skip and the busy-engine
+    skip log at DEBUG rather than INFO. A portrait's own tick (a later
+    task) fires on the same frequent cadence diary's does, but
+    interval_not_reached is the all-week normal state here -- a portrait
+    updates only a handful of times a year -- so INFO would flood the log
+    exactly where diary's own DEBUG choice already draws the line.
+
+    Deliberately does NOT swallow unexpected exceptions: the background
+    tick that calls this (a later task) wraps every round in its own
+    try/except and logs it loudly; swallowing here too would only bury
+    bugs -- the same division of labor diary.write_once documents.
+
+    `now` must be timezone-aware, the same contract save_portrait()
+    documents.
+    """
+    settings = persona.current_settings(cfg)
+    if settings is None:
+        # Defensive second layer: the tick gates folder mode at boot; a
+        # file-mode persona has no settings behind a portrait either.
+        logger.debug("portrait: skip (file_mode)")
+        return False
+
+    prev = load_portrait(cfg)
+    diary_entries = diary.recent_entries(cfg, PORTRAIT_RECENT_DIARY)
+
+    reason = eligibility(cfg, prev, diary_entries, now)
+    if reason is not None:
+        # DEBUG on purpose: the tick fires every few minutes and
+        # interval_not_reached is all-week normal -- INFO would flood the log.
+        logger.debug("portrait: skip (%s)", reason)
+        return False
+
+    material = build_material(cfg, prev)
+    if material is None:
+        # INFO: eligibility already found new material upstream, so an empty
+        # build here is defense in depth catching a gap between the two
+        # reads -- unusual enough to be worth seeing in the log.
+        logger.info("portrait: skip (material_empty)")
+        return False
+
+    persona_obj = persona.load_persona(cfg)
+    sys_prompt = build_system_prompt_portrait(persona_obj)
+
+    reply = engine.try_run_once(cfg, material, session_id=None,
+                                system_prompt=sys_prompt,
+                                timeout_s=PORTRAIT_TIMEOUT_S)
+    if reply is None:
+        # DEBUG here, unlike diary's INFO busy-skip: a later tick just tries
+        # again, and this fires often enough that INFO would flood the log.
+        logger.debug("portrait: skip (engine_busy)")
+        return False
+    if not reply.ok:
+        logger.warning("portrait: engine failed (%s)", reply.error_kind)
+        return False
+
+    parsed = parse_output(reply.text)
+    if parsed is None:
+        logger.warning("portrait: unparseable engine output")
+        return False
+
+    save_portrait(cfg, parsed, now)
+    logger.info("portrait: updated (version %s)", now.date().isoformat())
+    return True
