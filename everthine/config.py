@@ -81,6 +81,16 @@ class Config:
     reflection_daily_cap: int = 12
     portrait_enabled: bool = True
     portrait_interval_days: int = 7
+    scheduler_enabled: bool = True
+    greeting_enabled: bool = True
+    greeting_hour: int = 8
+    miss_you_enabled: bool = True
+    miss_you_after_hours: int = 6
+    share_enabled: bool = True
+    share_max_daily: int = 2
+    quiet_start_hour: int = 23
+    quiet_end_hour: int = 8
+    proactive_daily_max: int = 4
 
     @property
     def engine_home(self) -> Path:
@@ -129,6 +139,10 @@ class Config:
     @property
     def portrait_history_dir(self) -> Path:
         return self.data_dir / "portrait_history"
+
+    @property
+    def scheduler_state_path(self) -> Path:
+        return self.data_dir / "scheduler_state.json"
 
     @property
     def expression_tag_taught(self) -> bool:
@@ -193,4 +207,14 @@ def load_config(env: Mapping | None = None) -> Config:
         reflection_daily_cap=_get_positive_int(env, "REFLECTION_DAILY_CAP", 12),
         portrait_enabled=_get_bool(env, "PORTRAIT_ENABLED", True),
         portrait_interval_days=_get_positive_int(env, "PORTRAIT_INTERVAL_DAYS", 7),
+        scheduler_enabled=_get_bool(env, "SCHEDULER_ENABLED", True),
+        greeting_enabled=_get_bool(env, "GREETING_ENABLED", True),
+        greeting_hour=_get_hour(env, "GREETING_HOUR", 8),
+        miss_you_enabled=_get_bool(env, "MISS_YOU_ENABLED", True),
+        miss_you_after_hours=_get_positive_int(env, "MISS_YOU_AFTER_HOURS", 6),
+        share_enabled=_get_bool(env, "SHARE_ENABLED", True),
+        share_max_daily=_get_positive_int(env, "SHARE_MAX_DAILY", 2),
+        quiet_start_hour=_get_hour(env, "QUIET_START_HOUR", 23),
+        quiet_end_hour=_get_hour(env, "QUIET_END_HOUR", 8),
+        proactive_daily_max=_get_positive_int(env, "PROACTIVE_DAILY_MAX", 4),
     )

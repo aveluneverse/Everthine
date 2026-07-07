@@ -225,5 +225,86 @@ class TestPortraitKnobs(unittest.TestCase):
                 self.assertIn(var, text)
 
 
+class TestSchedulerKnobs(unittest.TestCase):
+    def test_defaults(self):
+        cfg = load_config(BASE)
+        self.assertIs(cfg.scheduler_enabled, True)
+        self.assertIs(cfg.greeting_enabled, True)
+        self.assertEqual(cfg.greeting_hour, 8)
+        self.assertIs(cfg.miss_you_enabled, True)
+        self.assertEqual(cfg.miss_you_after_hours, 6)
+        self.assertIs(cfg.share_enabled, True)
+        self.assertEqual(cfg.share_max_daily, 2)
+        self.assertEqual(cfg.quiet_start_hour, 23)
+        self.assertEqual(cfg.quiet_end_hour, 8)
+        self.assertEqual(cfg.proactive_daily_max, 4)
+
+    def test_scheduler_state_path_derives_from_data_dir(self):
+        cfg = load_config({**BASE, "DATA_DIR": "elsewhere"})
+        self.assertEqual(cfg.scheduler_state_path, Path("elsewhere") / "scheduler_state.json")
+
+    def test_overrides_round_trip(self):
+        cfg = load_config({**BASE,
+                            "SCHEDULER_ENABLED": "false",
+                            "GREETING_ENABLED": "false",
+                            "GREETING_HOUR": "6",
+                            "MISS_YOU_ENABLED": "false",
+                            "MISS_YOU_AFTER_HOURS": "3",
+                            "SHARE_ENABLED": "false",
+                            "SHARE_MAX_DAILY": "5",
+                            "QUIET_START_HOUR": "0",
+                            "QUIET_END_HOUR": "7",
+                            "PROACTIVE_DAILY_MAX": "9"})
+        self.assertIs(cfg.scheduler_enabled, False)
+        self.assertIs(cfg.greeting_enabled, False)
+        self.assertEqual(cfg.greeting_hour, 6)
+        self.assertIs(cfg.miss_you_enabled, False)
+        self.assertEqual(cfg.miss_you_after_hours, 3)
+        self.assertIs(cfg.share_enabled, False)
+        self.assertEqual(cfg.share_max_daily, 5)
+        self.assertEqual(cfg.quiet_start_hour, 0)
+        self.assertEqual(cfg.quiet_end_hour, 7)
+        self.assertEqual(cfg.proactive_daily_max, 9)
+
+    def test_quiet_hours_may_equal_start_and_end(self):
+        # start == end is the documented "disabled" spelling for the quiet
+        # window (interpreted by the scheduler, not this layer) -- the config
+        # layer must accept it since each bound is independently a legal hour.
+        cfg = load_config({**BASE, "QUIET_START_HOUR": "5", "QUIET_END_HOUR": "5"})
+        self.assertEqual(cfg.quiet_start_hour, 5)
+        self.assertEqual(cfg.quiet_end_hour, 5)
+
+    def test_bool_garbage_raises(self):
+        for key in ("SCHEDULER_ENABLED", "GREETING_ENABLED", "MISS_YOU_ENABLED", "SHARE_ENABLED"):
+            with self.subTest(key=key):
+                with self.assertRaises(ConfigError):
+                    load_config({**BASE, key: "maybe"})
+
+    def test_bad_hour_values_raise(self):
+        for key in ("GREETING_HOUR", "QUIET_START_HOUR", "QUIET_END_HOUR"):
+            for bad in ("24", "-1", "abc"):
+                with self.subTest(key=key, bad=bad):
+                    with self.assertRaises(ConfigError):
+                        load_config({**BASE, key: bad})
+
+    def test_non_positive_ints_raise(self):
+        for key in ("MISS_YOU_AFTER_HOURS", "SHARE_MAX_DAILY", "PROACTIVE_DAILY_MAX"):
+            for bad in ("0", "-5"):
+                with self.subTest(key=key, bad=bad):
+                    with self.assertRaises(ConfigError):
+                        load_config({**BASE, key: bad})
+
+    def test_env_example_documents_scheduler_vars(self):
+        # Sibling of TestPortraitKnobs.test_env_example_documents_portrait_vars,
+        # same shape: guards .env.example's 1:1 catalog for the scheduler knobs.
+        text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        for var in ("SCHEDULER_ENABLED", "GREETING_ENABLED", "GREETING_HOUR",
+                    "MISS_YOU_ENABLED", "MISS_YOU_AFTER_HOURS",
+                    "SHARE_ENABLED", "SHARE_MAX_DAILY",
+                    "QUIET_START_HOUR", "QUIET_END_HOUR", "PROACTIVE_DAILY_MAX"):
+            with self.subTest(var=var):
+                self.assertIn(var, text)
+
+
 if __name__ == "__main__":
     unittest.main()
