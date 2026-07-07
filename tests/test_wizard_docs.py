@@ -154,5 +154,18 @@ class TestTroubleshootSkill(WizardDocMixin, unittest.TestCase):
                 self.assertIn(marker, text)
 
 
+class TestClaudeMd(WizardDocMixin, unittest.TestCase):
+    DOC = CLAUDE_MD
+
+    def test_isolation_anchor_present(self):
+        self.assertIn(ISOLATION_ANCHOR,
+                      self.DOC.read_text(encoding="utf-8"))
+
+    def test_routes_to_both_skills(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("everthine-setup", text)
+        self.assertIn("everthine-troubleshoot", text)
+
+
 if __name__ == "__main__":
     unittest.main()
