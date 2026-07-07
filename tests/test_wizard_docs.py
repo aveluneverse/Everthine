@@ -138,5 +138,21 @@ class TestSetupSkill(WizardDocMixin, unittest.TestCase):
         self.assertIn("references/deploy.md", text)
 
 
+class TestTroubleshootSkill(WizardDocMixin, unittest.TestCase):
+    DOC = TROUBLESHOOT
+
+    def test_frontmatter_shape(self):
+        fm = _load_frontmatter(self.DOC)
+        self.assertEqual(fm.get("name"), "everthine-troubleshoot")
+        self.assertIn("description", fm)
+
+    def test_covers_known_failures(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        for marker in ("BOT_TOKEN is required", "LOG_LEVEL",
+                       "AUTHORIZED_USER_ID", "silence is by design"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
+
 if __name__ == "__main__":
     unittest.main()
