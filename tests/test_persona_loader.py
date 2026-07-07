@@ -558,6 +558,103 @@ class TestStagesFile(unittest.TestCase):
         self.assertIsNone(load_persona(p).stages)
 
 
+class TestShareTopics(unittest.TestCase):
+    """M7: the optional `share:` top-level section carries a persona's own
+    unprompted-share topic pool. Absent (every existing persona) -> the empty
+    tuple, fully backward compatible. Present -> `topics` must be a list of
+    non-empty strings; every malformed shape fails loud naming the key (and the
+    offending index), the same fail-loud contract the rest of settings.yaml
+    follows."""
+
+    _BASE = "companion:\n  name: Alex\npartner:\n  name: Sam\n"
+
+    def test_absent_share_section_is_empty_tuple(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root)  # VALID_SETTINGS_YAML carries no share section
+            persona = load_persona(_cfg(root))
+            self.assertEqual(persona.settings.share_topics, ())
+
+    def test_valid_topics_become_a_tuple(self):
+        settings = self._BASE + (
+            "share:\n  topics:\n"
+            '    - "the book you are rereading"\n'
+            '    - "how the light moves across the shelves"\n'
+            '    - "the tea you just made"\n'
+            '    - "a line you copied out by hand today"\n'
+            '    - "a small sound at home"\n')
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=settings)
+            persona = load_persona(_cfg(root))
+            self.assertEqual(persona.settings.share_topics, (
+                "the book you are rereading",
+                "how the light moves across the shelves",
+                "the tea you just made",
+                "a line you copied out by hand today",
+                "a small sound at home"))
+            self.assertIsInstance(persona.settings.share_topics, tuple)
+
+    def test_share_not_a_mapping_raises(self):
+        settings = self._BASE + "share: nope\n"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=settings)
+            with self.assertRaises(ConfigError) as cm:
+                load_persona(_cfg(root))
+            self.assertIn("share", str(cm.exception))
+
+    def test_topics_not_a_list_raises(self):
+        settings = self._BASE + "share:\n  topics: nope\n"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=settings)
+            with self.assertRaises(ConfigError) as cm:
+                load_persona(_cfg(root))
+            self.assertIn("share.topics", str(cm.exception))
+
+    def test_blank_topic_element_raises_naming_index(self):
+        settings = self._BASE + (
+            'share:\n  topics:\n    - "ok"\n    - "fine"\n    - "   "\n')
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=settings)
+            with self.assertRaises(ConfigError) as cm:
+                load_persona(_cfg(root))
+            self.assertIn("share.topics[2]", str(cm.exception))
+
+    def test_non_string_topic_element_raises_naming_index(self):
+        settings = self._BASE + 'share:\n  topics:\n    - "ok"\n    - 42\n'
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=settings)
+            with self.assertRaises(ConfigError) as cm:
+                load_persona(_cfg(root))
+            self.assertIn("share.topics[1]", str(cm.exception))
+
+    def test_share_present_without_topics_is_empty_tuple(self):
+        settings = self._BASE + "share:\n  reserved_for_future: true\n"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=settings)
+            persona = load_persona(_cfg(root))
+            self.assertEqual(persona.settings.share_topics, ())
+
+    def test_share_is_not_an_unknown_top_level_key(self):
+        # `share` is a known section now: it must NOT trigger the unknown
+        # top-level key warning the way a truly unrecognized key does.
+        settings = self._BASE + 'share:\n  topics:\n    - "a small sound at home"\n'
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=settings)
+            logger = __import__("logging").getLogger("everthine")
+            with self.assertLogs(logger, level="WARNING") as cm:
+                load_persona(_cfg(root))
+                logger.warning("sentinel so assertLogs always has one record")
+            self.assertFalse(any("share" in line and "unknown" in line
+                                 for line in cm.output))
+
+
 class TestFileMode(unittest.TestCase):
     def test_existing_file_raw_text_is_stripped(self):
         with tempfile.TemporaryDirectory() as td:

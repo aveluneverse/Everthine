@@ -163,5 +163,39 @@ class TestDemoStages(unittest.TestCase):
         self.assertEqual(tuple(n for n, _ in zh), ("安頓", "合拍", "深水區"))
 
 
+# --- 7. M7 share-topic pools: both demos ship a five-topic pool -------------
+
+class TestDemoShareTopics(unittest.TestCase):
+    """Both shipped demos carry a `share:` pool of exactly five topics, all in
+    the bookish/homebound register the two personas already anchor to -- book,
+    tea, handwriting, a sound at home -- with zero third parties and zero
+    physical outings, mirroring the framework's no-fabrication contract."""
+
+    _EN_TOPICS = (
+        "the book you are rereading and what it does to you this time",
+        "how the light is moving across the bookshelves right now",
+        "the tea you just made and the smell of it",
+        "a line you copied out by hand today because it deserved ink",
+        "a small sound at home you have grown fond of",
+    )
+    _ZH_TOPICS = (
+        "重讀到一半的那本書，這次讀出了什麼新東西",
+        "此刻光線正怎麼爬過書牆",
+        "剛泡好的茶，還有它的香氣",
+        "今天抄下來的一句話，覺得它值得墨水",
+        "家裡某個你越來越喜歡的小聲音",
+    )
+
+    def test_en_demo_share_topics_exact(self):
+        p = _load(EN_DIR)
+        self.assertEqual(len(p.settings.share_topics), 5)
+        self.assertEqual(p.settings.share_topics, self._EN_TOPICS)
+
+    def test_zh_demo_share_topics_exact(self):
+        p = _load(ZH_DIR)
+        self.assertEqual(len(p.settings.share_topics), 5)
+        self.assertEqual(p.settings.share_topics, self._ZH_TOPICS)
+
+
 if __name__ == "__main__":
     unittest.main()

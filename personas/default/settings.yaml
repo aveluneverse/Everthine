@@ -26,3 +26,15 @@ lines:
   clean_ack: "A clean page. Hello again — properly."
   thinking:
     - "Thinking…"
+
+# Unprompted-share topic pool: passing threads he can open on his own,
+# unbidden. All homebound and bookish, nothing that invents an outing or a
+# third person. Leave the section out and he shares from a built-in fallback
+# pool instead.
+share:
+  topics:
+    - "the book you are rereading and what it does to you this time"
+    - "how the light is moving across the bookshelves right now"
+    - "the tea you just made and the smell of it"
+    - "a line you copied out by hand today because it deserved ink"
+    - "a small sound at home you have grown fond of"

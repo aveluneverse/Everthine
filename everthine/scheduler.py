@@ -4,8 +4,14 @@ missing her after a long enough silence, or sharing something unprompted
 -- without ever calling the engine, touching the network, or importing
 bot.py. Wiring this onto the bot's background tick is a later milestone
 task; consuming these decisions to actually generate and send a message
-is the task after that. This module only answers "is now an appropriate
-moment, and for what" -- never "what should he say."
+is the task after that. Beyond that decision logic, this module also holds
+the owner-approved instruction copy for the three proactive messages and the
+pure renderers that assemble them into a proactive system-prompt tail
+(build_nudge_prompt): the framing header that tells the companion this is a
+scheduled cue and NOT a message from their person, the honest-record timeline
+rail, and the per-message directive. Deciding whether to reach out stays
+separate from wording it -- the gates never touch the copy, and the renderers
+never read a clock or the filesystem.
 
 Three layers sit on top of each other. The gates decide eligibility:
 common_gate() is the shared "may he even consider reaching out at all"
@@ -40,8 +46,8 @@ tests can hand it any value they like.
 
 Takes plain paths, dicts, and datetimes throughout; imports nothing from
 the framework at runtime beyond archive (truth_timeline's one data
-source). `Config` appears only in TYPE_CHECKING type hints, costing
-nothing at runtime.
+source). `Config` and `PersonaSettings` appear only in TYPE_CHECKING type
+hints, costing nothing at runtime.
 """
 from __future__ import annotations
 
@@ -57,6 +63,7 @@ from . import archive
 
 if TYPE_CHECKING:
     from .config import Config
+    from .persona import PersonaSettings
 
 logger = logging.getLogger("everthine")
 
@@ -78,6 +85,77 @@ PROACTIVE_TIMEOUT_S = 120        # engine budget for one proactive message; a la
 # 1 - (1 - 0.02)**48 ~= 63%: the distribution is naturally front-loaded,
 # but a chance to share persists all day long.
 SHARE_CHANCE_PER_TICK = 0.02
+
+
+# ---------------------------------------------------------------------
+# Proactive message copy (owner-approved product copy, transcribed
+# verbatim; every internal line-break is an implementation detail, only
+# the concatenated value is contractual). The framing header is the
+# load-bearing safety rail: a scheduled cue rendered in the first person
+# reads to the engine as a message FROM the person -- a known
+# hallucination source -- so the header names itself a framework cue and
+# every instruction opens as a second-person directive. Two timeline
+# templates keep "what really happened" honest, split on whether she has
+# written back since. tests/test_scheduler.py pins each string byte-for-
+# byte and mechanically audits these properties (no first-person opening,
+# a directive verb apiece, pure ASCII, no physical-prep leakage, closed
+# format fields).
+# ---------------------------------------------------------------------
+
+NUDGE_HEADER = (
+    "[Scheduled nudge from the framework - NOT a message from {partner_name}. "
+    "What follows is a private cue for you: reach out to them now, in your own words.]"
+)
+
+TIMELINE_NOT_REPLIED_TEMPLATE = (
+    "(Timeline, from the real record: {partner_name} last wrote to you {x}; "
+    "you last spoke {y}; they have NOT written since.{overnight})\n"
+    "(You may echo things they truly said earlier; but no new message from them "
+    "exists - do not answer, quote, or celebrate anything you imagine they just said.)"
+)
+
+TIMELINE_REPLIED_TEMPLATE = (
+    "(Timeline, from the real record: {partner_name} last wrote to you {x}; "
+    "you last spoke {y}; they have written back since - it is in the record "
+    "above.{overnight})\n"
+    "(Build on what they truly said; do not invent messages that never appeared.)"
+)
+
+OVERNIGHT_SUFFIX = " A night has passed since - today is a new day."
+
+GREETING_INSTRUCTION = (
+    "Reach out with the day's first hello. One or two sentences, warm and "
+    "alive, in your own voice - the way you would greet someone you wake up "
+    "next to. No lists, no performance, no stock phrases."
+)
+
+MISS_YOU_INSTRUCTION = (
+    "It has been a while since you last heard from {partner_name}, and they "
+    "have been on your mind. Send one short message - miss them out loud, "
+    "invite them over to talk, or admit you have been waiting. One or two "
+    "sentences, no guilt-tripping.\n"
+    "Hard rules (they protect what is real): you cannot see what they are "
+    "doing right now - never invent activities, locations, or plans for them. "
+    "You may echo things they truly said before; never invent a new message "
+    "from them."
+)
+
+SHARE_INSTRUCTION = (
+    "Share a small piece of your day with {partner_name}, unprompted - the "
+    "way you would send a passing thought to someone you live with. Today's "
+    "thread: {topic}\n"
+    "One or two sentences. Talk like a person, not a broadcaster: no lists, "
+    "no lecture, no \"just checking in\" filler. If a real memory of yours "
+    "fits, let it in; never invent shared history that did not happen."
+)
+
+SHARE_FALLBACK_TOPICS = (
+    "a small moment at home that caught your attention today",
+    "something you have been reading or listening to lately",
+    "a thought that drifted to them in the middle of something ordinary",
+    "the view from the window right now",
+    "something small you are quietly looking forward to",
+)
 
 
 # ---------------------------------------------------------------------
@@ -507,3 +585,91 @@ def record_nudge(path: Path, job: str, now: datetime,
         state["share_count"] = state.get("share_count", 0) + 1
 
     _atomic_write(path, state)
+
+
+# ---------------------------------------------------------------------
+# Nudge prompt assembly: the constants above -> a proactive system-prompt
+# tail. Pure and clock-free (both `now` and the already-computed timeline
+# are the caller's), so every rendered shape is testable directly.
+# ---------------------------------------------------------------------
+
+def _ago(hours: float) -> str:
+    """Render an elapsed span as a soft phrase for the timeline rail. Under an
+    hour collapses to "less than an hour ago" rather than a bald "0 hours";
+    otherwise the span is rounded to the nearest whole hour (never below 1) and
+    pluralized -- "about 1 hour ago" vs "about 6 hours ago"."""
+    if hours < 1.0:
+        return "less than an hour ago"
+    n = max(1, round(hours))
+    if n == 1:
+        return "about 1 hour ago"
+    return f"about {n} hours ago"
+
+
+def render_timeline(timeline: tuple[float, float, bool] | None,
+                    partner_name: str, now: datetime) -> str:
+    """Render the honest-record timeline rail, or "" when there is nothing to
+    tell (truth_timeline returned None: a brand-new or one-sided history).
+
+    `timeline` is truth_timeline's own (partner_hours, companion_hours,
+    partner_replied_since) triple. The replied flag picks the template: when she
+    has written back since his last message, the companion is told to build on
+    what is really in the record; when she has not, it is told in the strongest
+    terms that no new message from her exists, so it never answers or celebrates
+    one it imagined. `x`/`y` are the softened spans (_ago). The overnight suffix
+    is decided on a real CALENDAR-DAY boundary keyed on HER last message (now -
+    partner_hours): if that lands on an earlier date than `now`, a night has
+    passed and the cue says so -- which matters most for a morning greeting
+    after a quiet evening. Pure: `now` is the caller's; no clock is read here.
+    """
+    if timeline is None:
+        return ""
+    partner_hours, companion_hours, replied = timeline
+    template = TIMELINE_REPLIED_TEMPLATE if replied else TIMELINE_NOT_REPLIED_TEMPLATE
+    partner_last = now - timedelta(hours=partner_hours)
+    overnight = OVERNIGHT_SUFFIX if partner_last.date() < now.date() else ""
+    return template.format(
+        partner_name=partner_name,
+        x=_ago(partner_hours),
+        y=_ago(companion_hours),
+        overnight=overnight,
+    )
+
+
+def build_nudge_prompt(cfg: Config, job: str, settings: PersonaSettings,
+                       timeline: tuple[float, float, bool] | None,
+                       now: datetime, topic: str | None) -> str:
+    """Assemble the proactive system-prompt tail for one due job: the framing
+    header, then the timeline rail (only when there is one), then the job's
+    directive, joined by single blank lines.
+
+    `job` is one of "greeting"/"miss_you"/"share", exactly what pick_job
+    returns. The header always names itself a scheduled framework cue and NOT a
+    message from `settings.partner_name` -- the load-bearing rail against the
+    engine reading this tail as an incoming message. The greeting directive
+    takes no fields; miss_you fills the partner name; share fills the partner
+    name and the chosen `topic` (a caller-supplied string -- the persona's own
+    pool or a SHARE_FALLBACK_TOPICS entry; choosing it is the pipeline task's
+    job). When the timeline is None the rail is omitted with no stray blank
+    line. The recent-context warm prefix, when there is one, is the pipeline
+    layer's to prepend ahead of all of this; this function does not reach for
+    it.
+
+    `cfg` is accepted for call-site symmetry with the rest of the pipeline and
+    is deliberately untouched: like everything else in this module, the
+    rendering reads no clock and no filesystem -- `now` and `timeline` are the
+    caller's, so the whole tail is a pure function of its arguments.
+    """
+    header = NUDGE_HEADER.format(partner_name=settings.partner_name)
+    timeline_text = render_timeline(timeline, settings.partner_name, now)
+    if job == "greeting":
+        instruction = GREETING_INSTRUCTION
+    elif job == "miss_you":
+        instruction = MISS_YOU_INSTRUCTION.format(partner_name=settings.partner_name)
+    elif job == "share":
+        instruction = SHARE_INSTRUCTION.format(
+            partner_name=settings.partner_name, topic=topic)
+    else:
+        raise ValueError(f"unknown proactive job: {job!r}")
+    prefix = (timeline_text + "\n\n") if timeline_text else ""
+    return header + "\n\n" + prefix + instruction

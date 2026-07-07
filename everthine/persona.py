@@ -134,13 +134,91 @@ def build_system_prompt(cfg: Config, memory_block: str | None = None,
     return DEFAULT_PERSONA
 
 
+def build_system_prompt_nudge(cfg: Config, now: datetime) -> str:
+    """Assemble the proactive system prompt: build_system_prompt's sibling for
+    a scheduled reach-out, mirroring its folder branch with two deliberate
+    differences and three seams held closed.
+
+    Folder mode composes the same three layers, the same stage block, and the
+    same evolved self-portrait as the live path -- relationship state and who he
+    is belong in a reach-out too -- but Layer 3 is fed last_contact=None and
+    first_today=False. Both are load-bearing: this prompt fires when the person
+    has NOT written, so the reunion beat ("welcome back") and the
+    first-of-the-day greeting cue -- each a response to her arrival -- would
+    conjure a message that never came. Forcing those two inputs makes both
+    sections fall away on their own, through dynamic_context's existing
+    conditions, rather than by stripping text after the fact. memory_block,
+    inner_block, and the expression note are all None: a proactive turn has no
+    retrieval, no page-turn count to react to, and no just-sent message for a
+    reaction tag to sit on.
+
+    `now` is supplied by the caller (timezone-aware) instead of read from the
+    clock here, so the fact baseline is fully deterministic and testable; it is
+    collapsed to naive local exactly as the live path collapses its own.
+
+    File mode is the pinned legacy passthrough, identical to
+    build_system_prompt (read verbatim, or DEFAULT_PERSONA on any read/decode
+    failure or empty file). The proactive pipeline skips file-mode personas at
+    the folder gate upstream, so this branch is pure defense: it never composes
+    a proactive prompt for a single-file persona, it just refuses to crash on
+    one.
+
+    build_system_prompt itself is untouched -- the conversation path stays
+    byte-for-byte what it was, which the golden pins guard.
+    """
+    if cfg.persona_path.is_dir():
+        persona_obj = _cached_folder_persona(cfg)
+        now_naive = now.astimezone().replace(tzinfo=None)
+        # The person has not written: there is no prior-contact reunion beat and
+        # no first-of-the-day cue to honor -- either one would invent her
+        # arrival. Feeding these two inputs lets dynamic_context omit both
+        # sections through its own conditions, no after-the-fact stripping.
+        last_contact = None
+        first_today = False
+        stage_blk = None
+        if cfg.stages_enabled and persona_obj.stages:
+            from . import stages as stages_mod  # lazy: avoids import cycles
+            try:
+                names = tuple(n for n, _ in persona_obj.stages)
+                texts = tuple(t for _, t in persona_obj.stages)
+                state = stages_mod.load_state(cfg.stage_path)
+                stage_blk = stages_mod.stage_block(
+                    names, texts, state, persona_obj.settings.partner_name)
+            except Exception:
+                logger.warning("stage block failed; continuing without it",
+                               exc_info=True)
+        # The evolved self-portrait, read the same fail-soft way as the live
+        # path (load_portrait and portrait_block are both internally fail-soft,
+        # so no extra guard is needed); with the flag off the module is never
+        # even imported and no block is built.
+        portrait_blk = None
+        if cfg.portrait_enabled:
+            from . import portrait as portrait_mod  # lazy: avoids import cycles
+            saved_portrait = portrait_mod.load_portrait(cfg)
+            if saved_portrait is not None:
+                portrait_blk = portrait_mod.portrait_block(saved_portrait)
+        return assemble_folder_prompt(
+            persona_obj, now_naive, last_contact, first_today, None,
+            stage_block=stage_blk, inner_block=None,
+            expression_note=None, portrait_block=portrait_blk)
+
+    # --- Legacy file mode: pinned byte-for-byte, same as build_system_prompt --
+    try:
+        text = cfg.persona_path.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+    except (OSError, UnicodeDecodeError):
+        pass
+    return DEFAULT_PERSONA
+
+
 # --- M2 persona-folder loading layer -----------------------------------
 
 _FORBIDDEN_LINE_KEYS = frozenset({"unauthorized_silence", "cli_missing"})
 # Every message key a persona may re-voice, minus the security/ops keys above,
 # plus "thinking" (a rotating-placeholder list, handled separately below).
 _LINE_KEY_WHITELIST = (frozenset(messages._MESSAGES) - _FORBIDDEN_LINE_KEYS) | {"thinking"}
-_KNOWN_TOP_LEVEL_KEYS = frozenset({"companion", "partner", "relationship", "lines"})
+_KNOWN_TOP_LEVEL_KEYS = frozenset({"companion", "partner", "relationship", "lines", "share"})
 # Line-override keys whose value is rendered with str.format() at button-press
 # time (bot.py's stage views and acks), mapped to the single named field each
 # one interpolates: the four stage-name lines fill {stage}, and
@@ -178,6 +256,7 @@ class PersonaSettings:
     reunion_response: str = "gentle"
     lines: dict[str, str] = field(default_factory=dict)
     thinking: list[str] | None = None
+    share_topics: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -326,6 +405,32 @@ def _parse_lines(lines_section: dict) -> tuple[dict[str, str], list[str] | None]
     return lines, thinking
 
 
+def _parse_share_topics(share_section: dict) -> tuple[str, ...]:
+    """The optional `share:` section's topic pool -> a tuple of non-empty
+    strings. An absent `topics` key is a legal empty pool, so a bare `share:`
+    with no topics -- and no `share` section at all -- both resolve to (), fully
+    backward compatible with every existing persona. A present `topics` must be
+    a list whose every element is a non-empty string; otherwise it fails loud
+    naming the exact key -- share.topics for a non-list, share.topics[i] for a
+    bad element -- the same fail-loud contract lines, dates, and enums follow.
+    (The `share` section not being a mapping is caught earlier, by _section.)
+    """
+    topics = share_section.get("topics")
+    if topics is None:
+        return ()
+    if not isinstance(topics, list):
+        raise ConfigError(
+            f"settings.yaml: share.topics must be a list of non-empty strings, "
+            f"got {type(topics).__name__}")
+    cleaned: list[str] = []
+    for i, value in enumerate(topics):
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(
+                f"settings.yaml: share.topics[{i}] must be a non-empty string")
+        cleaned.append(value.strip())
+    return tuple(cleaned)
+
+
 class _PersonaYAMLLoader(yaml.SafeLoader):
     """SafeLoader whose timestamp constructor degrades to the raw scalar
     string on construction failure, instead of letting PyYAML's internal
@@ -389,6 +494,7 @@ def _load_settings(path: Path) -> PersonaSettings:
             f"{sorted(_REUNION_VALUES)}, got: {reunion_response!r}")
 
     lines, thinking = _parse_lines(_section(data, "lines"))
+    share_topics = _parse_share_topics(_section(data, "share"))
 
     return PersonaSettings(
         companion_name=companion_name,
@@ -400,6 +506,7 @@ def _load_settings(path: Path) -> PersonaSettings:
         reunion_response=reunion_response,
         lines=lines,
         thinking=thinking,
+        share_topics=share_topics,
     )
 
 

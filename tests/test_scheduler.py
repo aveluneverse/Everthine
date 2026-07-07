@@ -12,9 +12,11 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from string import Formatter
 
 from everthine import archive, scheduler
-from everthine.config import load_config
+from everthine.config import Config, load_config
+from everthine.persona import PersonaSettings
 
 BASE_ENV = {"BOT_TOKEN": "123456789:" + "A" * 35, "AUTHORIZED_USER_ID": "42"}
 
@@ -720,6 +722,294 @@ class TestRecordNudge(unittest.TestCase):
             scheduler.record_nudge(path, "share", second, None)
             state = scheduler.load_state(path)
         self.assertEqual(state["last_nudge_at"], second.isoformat())
+
+
+# ---------------------------------------------------------------------
+# Nudge constants: golden pins (verbatim, owner-approved product copy) and
+# the machine-checked audit that is the soul of M7 -- first-person monologue
+# reads to the engine as a message FROM the partner (a known hallucination
+# source), so the instruction copy is pinned to a second-person directive
+# shape and swept for physical-prep leakage and rogue format fields.
+# ---------------------------------------------------------------------
+
+# Reference copies of the six owner-approved constants + the two timeline
+# templates + the fallback topics, transcribed from the approved copy. Any edit
+# to the scheduler constants must be deliberate and re-approved -- the golden
+# pins below fail loud, and an independent brief-vs-source diff (run at
+# authoring time) guarantees these references match the approved copy itself,
+# not just whatever the source happens to say.
+_REF_NUDGE_HEADER = (
+    "[Scheduled nudge from the framework - NOT a message from {partner_name}. "
+    "What follows is a private cue for you: reach out to them now, in your own words.]"
+)
+_REF_TIMELINE_NOT_REPLIED_TEMPLATE = (
+    "(Timeline, from the real record: {partner_name} last wrote to you {x}; "
+    "you last spoke {y}; they have NOT written since.{overnight})\n"
+    "(You may echo things they truly said earlier; but no new message from them "
+    "exists - do not answer, quote, or celebrate anything you imagine they just said.)"
+)
+_REF_TIMELINE_REPLIED_TEMPLATE = (
+    "(Timeline, from the real record: {partner_name} last wrote to you {x}; "
+    "you last spoke {y}; they have written back since - it is in the record "
+    "above.{overnight})\n"
+    "(Build on what they truly said; do not invent messages that never appeared.)"
+)
+_REF_OVERNIGHT_SUFFIX = " A night has passed since - today is a new day."
+_REF_GREETING_INSTRUCTION = (
+    "Reach out with the day's first hello. One or two sentences, warm and "
+    "alive, in your own voice - the way you would greet someone you wake up "
+    "next to. No lists, no performance, no stock phrases."
+)
+_REF_MISS_YOU_INSTRUCTION = (
+    "It has been a while since you last heard from {partner_name}, and they "
+    "have been on your mind. Send one short message - miss them out loud, "
+    "invite them over to talk, or admit you have been waiting. One or two "
+    "sentences, no guilt-tripping.\n"
+    "Hard rules (they protect what is real): you cannot see what they are "
+    "doing right now - never invent activities, locations, or plans for them. "
+    "You may echo things they truly said before; never invent a new message "
+    "from them."
+)
+_REF_SHARE_INSTRUCTION = (
+    "Share a small piece of your day with {partner_name}, unprompted - the "
+    "way you would send a passing thought to someone you live with. Today's "
+    "thread: {topic}\n"
+    "One or two sentences. Talk like a person, not a broadcaster: no lists, "
+    "no lecture, no \"just checking in\" filler. If a real memory of yours "
+    "fits, let it in; never invent shared history that did not happen."
+)
+_REF_SHARE_FALLBACK_TOPICS = (
+    "a small moment at home that caught your attention today",
+    "something you have been reading or listening to lately",
+    "a thought that drifted to them in the middle of something ordinary",
+    "the view from the window right now",
+    "something small you are quietly looking forward to",
+)
+
+
+class TestNudgeConstantGoldenPins(unittest.TestCase):
+    """Verbatim byte-for-byte pins on the owner-approved copy: full-string
+    equality, never a substring spot-check, so any drift is caught."""
+
+    def test_nudge_header_pin(self):
+        self.assertEqual(scheduler.NUDGE_HEADER, _REF_NUDGE_HEADER)
+
+    def test_timeline_not_replied_pin(self):
+        self.assertEqual(scheduler.TIMELINE_NOT_REPLIED_TEMPLATE,
+                         _REF_TIMELINE_NOT_REPLIED_TEMPLATE)
+
+    def test_timeline_replied_pin(self):
+        self.assertEqual(scheduler.TIMELINE_REPLIED_TEMPLATE,
+                         _REF_TIMELINE_REPLIED_TEMPLATE)
+
+    def test_overnight_suffix_pin(self):
+        self.assertEqual(scheduler.OVERNIGHT_SUFFIX, _REF_OVERNIGHT_SUFFIX)
+
+    def test_greeting_instruction_pin(self):
+        self.assertEqual(scheduler.GREETING_INSTRUCTION, _REF_GREETING_INSTRUCTION)
+
+    def test_miss_you_instruction_pin(self):
+        self.assertEqual(scheduler.MISS_YOU_INSTRUCTION, _REF_MISS_YOU_INSTRUCTION)
+
+    def test_share_instruction_pin(self):
+        self.assertEqual(scheduler.SHARE_INSTRUCTION, _REF_SHARE_INSTRUCTION)
+
+    def test_share_fallback_topics_pin(self):
+        self.assertEqual(scheduler.SHARE_FALLBACK_TOPICS, _REF_SHARE_FALLBACK_TOPICS)
+
+
+def _format_fields(s: str) -> set:
+    """The set of named {field} placeholders str.format() would fill in `s`."""
+    return {name for _, name, _, _ in Formatter().parse(s) if name is not None}
+
+
+def _is_ascii_printable(s: str) -> bool:
+    return all(32 <= ord(c) <= 126 or c == "\n" for c in s)
+
+
+class TestNudgeConstantAudit(unittest.TestCase):
+    """The machine-checked contract on the constants THEMSELVES (never on a
+    .format()'d result): a first-person opening reads to the engine as a
+    message from the partner, so every instruction must open as a
+    second-person directive; the framing must confess it is not from the
+    partner; the copy must stay pure ASCII, carry no physical-prep leakage,
+    and expose no rogue format field a bad override could blow up on."""
+
+    _MONOLOGUE_BANNED = (
+        "NUDGE_HEADER", "GREETING_INSTRUCTION",
+        "MISS_YOU_INSTRUCTION", "SHARE_INSTRUCTION",
+    )
+    _ASCII_CONSTS = (
+        "NUDGE_HEADER", "GREETING_INSTRUCTION", "MISS_YOU_INSTRUCTION",
+        "SHARE_INSTRUCTION", "TIMELINE_NOT_REPLIED_TEMPLATE",
+        "TIMELINE_REPLIED_TEMPLATE", "OVERNIGHT_SUFFIX",
+    )
+    _PHYSICAL_PREP_WORDS = ("cook", "iron", "laundry", "grocery", "errand")
+
+    def test_no_first_person_monologue_opening(self):
+        for name in self._MONOLOGUE_BANNED:
+            const = getattr(scheduler, name)
+            with self.subTest(constant=name):
+                self.assertFalse(const.startswith("I "),
+                                 f"{name} opens as first-person monologue")
+                self.assertFalse(const.startswith("I'"),
+                                 f"{name} opens as first-person monologue")
+
+    def test_second_person_directive_verbs(self):
+        self.assertIn("Reach out", scheduler.GREETING_INSTRUCTION)
+        self.assertIn("Send", scheduler.MISS_YOU_INSTRUCTION)
+        self.assertIn("Share", scheduler.SHARE_INSTRUCTION)
+
+    def test_framing_is_honest(self):
+        self.assertIn("NOT a message from", scheduler.NUDGE_HEADER)
+
+    def test_all_copy_is_ascii_printable(self):
+        for name in self._ASCII_CONSTS:
+            with self.subTest(constant=name):
+                self.assertTrue(_is_ascii_printable(getattr(scheduler, name)),
+                                f"{name} carries a non-ASCII-printable char")
+        for i, topic in enumerate(scheduler.SHARE_FALLBACK_TOPICS):
+            with self.subTest(fallback_topic=i):
+                self.assertTrue(_is_ascii_printable(topic))
+
+    def test_no_physical_prep_words(self):
+        blobs = [getattr(scheduler, name) for name in self._ASCII_CONSTS]
+        blobs += list(scheduler.SHARE_FALLBACK_TOPICS)
+        for blob in blobs:
+            lowered = blob.lower()
+            for word in self._PHYSICAL_PREP_WORDS:
+                self.assertNotIn(word, lowered,
+                                 f"physical-prep word {word!r} leaked into {blob!r}")
+
+    def test_format_field_closure(self):
+        self.assertEqual(_format_fields(scheduler.NUDGE_HEADER), {"partner_name"})
+        self.assertEqual(_format_fields(scheduler.GREETING_INSTRUCTION), set())
+        self.assertEqual(_format_fields(scheduler.MISS_YOU_INSTRUCTION), {"partner_name"})
+        self.assertEqual(_format_fields(scheduler.SHARE_INSTRUCTION),
+                         {"partner_name", "topic"})
+        self.assertEqual(_format_fields(scheduler.TIMELINE_NOT_REPLIED_TEMPLATE),
+                         {"partner_name", "x", "y", "overnight"})
+        self.assertEqual(_format_fields(scheduler.TIMELINE_REPLIED_TEMPLATE),
+                         {"partner_name", "x", "y", "overnight"})
+
+
+# ---------------------------------------------------------------------
+# _ago: hours -> human phrase
+# ---------------------------------------------------------------------
+
+class TestAgo(unittest.TestCase):
+    def test_boundaries(self):
+        cases = (
+            (0.5, "less than an hour ago"),
+            (0.99, "less than an hour ago"),
+            (1.0, "about 1 hour ago"),
+            (1.4, "about 1 hour ago"),
+            (6.4, "about 6 hours ago"),
+            (26, "about 26 hours ago"),
+        )
+        for hours, expected in cases:
+            with self.subTest(hours=hours):
+                self.assertEqual(scheduler._ago(hours), expected)
+
+
+# ---------------------------------------------------------------------
+# render_timeline: the honest-record rail
+# ---------------------------------------------------------------------
+
+class TestRenderTimeline(unittest.TestCase):
+    NOON = datetime(2026, 7, 6, 12, 0)  # naive; her-last-message date math only
+
+    def test_none_timeline_is_empty_string(self):
+        self.assertEqual(scheduler.render_timeline(None, "Wren", self.NOON), "")
+
+    def test_not_replied_no_overnight(self):
+        result = scheduler.render_timeline((2.0, 1.0, False), "Wren", self.NOON)
+        expected = scheduler.TIMELINE_NOT_REPLIED_TEMPLATE.format(
+            partner_name="Wren", x="about 2 hours ago", y="about 1 hour ago",
+            overnight="")
+        self.assertEqual(result, expected)
+        self.assertIn("Wren", result)
+        self.assertIn("have NOT written since", result)
+        self.assertNotIn(scheduler.OVERNIGHT_SUFFIX, result)
+
+    def test_replied_no_overnight(self):
+        result = scheduler.render_timeline((1.0, 3.0, True), "Wren", self.NOON)
+        expected = scheduler.TIMELINE_REPLIED_TEMPLATE.format(
+            partner_name="Wren", x="about 1 hour ago", y="about 3 hours ago",
+            overnight="")
+        self.assertEqual(result, expected)
+        self.assertIn("written back since", result)
+        self.assertNotIn(scheduler.OVERNIGHT_SUFFIX, result)
+
+    def test_overnight_suffix_when_her_last_message_was_a_prior_day(self):
+        # 20h before noon on the 6th lands at 16:00 on the 5th -> a calendar
+        # day earlier than now -> the overnight suffix fires.
+        result = scheduler.render_timeline((20.0, 22.0, False), "Wren", self.NOON)
+        self.assertIn(scheduler.OVERNIGHT_SUFFIX, result)
+        self.assertIn("about 20 hours ago", result)
+        self.assertIn("about 22 hours ago", result)
+
+    def test_overnight_keys_on_her_last_message_not_his(self):
+        # Her message is 2h ago (same day) but his is 20h ago (prior day):
+        # overnight keys on HER timestamp, so no suffix here.
+        result = scheduler.render_timeline((2.0, 20.0, True), "Wren", self.NOON)
+        self.assertNotIn(scheduler.OVERNIGHT_SUFFIX, result)
+
+
+# ---------------------------------------------------------------------
+# build_nudge_prompt: header + optional timeline rail + instruction
+# ---------------------------------------------------------------------
+
+class TestBuildNudgePrompt(unittest.TestCase):
+    NOON = datetime(2026, 7, 6, 12, 0)
+
+    def _cfg(self):
+        return Config(bot_token="x", authorized_user_id=1)
+
+    def _settings(self):
+        return PersonaSettings(companion_name="Theo", partner_name="Wren")
+
+    def test_greeting_no_timeline_shape(self):
+        settings = self._settings()
+        result = scheduler.build_nudge_prompt(
+            self._cfg(), "greeting", settings, None, self.NOON, None)
+        expected = (scheduler.NUDGE_HEADER.format(partner_name="Wren") + "\n\n"
+                    + scheduler.GREETING_INSTRUCTION)
+        self.assertEqual(result, expected)
+        self.assertNotIn("\n\n\n", result)  # no empty timeline block -> no gap
+
+    def test_miss_you_with_timeline_shape(self):
+        settings = self._settings()
+        timeline = (20.0, 22.0, False)
+        result = scheduler.build_nudge_prompt(
+            self._cfg(), "miss_you", settings, timeline, self.NOON, None)
+        header = scheduler.NUDGE_HEADER.format(partner_name="Wren")
+        timeline_text = scheduler.render_timeline(timeline, "Wren", self.NOON)
+        instruction = scheduler.MISS_YOU_INSTRUCTION.format(partner_name="Wren")
+        self.assertEqual(result, header + "\n\n" + timeline_text + "\n\n" + instruction)
+        self.assertTrue(result.startswith(header))
+        self.assertIn("Timeline, from the real record", result)
+        self.assertIn("Wren", instruction)  # partner name filled
+
+    def test_share_fills_topic_no_timeline(self):
+        settings = self._settings()
+        result = scheduler.build_nudge_prompt(
+            self._cfg(), "share", settings, None,
+            self.NOON, "the tea you just made and the smell of it")
+        expected = (scheduler.NUDGE_HEADER.format(partner_name="Wren") + "\n\n"
+                    + scheduler.SHARE_INSTRUCTION.format(
+                        partner_name="Wren",
+                        topic="the tea you just made and the smell of it"))
+        self.assertEqual(result, expected)
+        self.assertIn("the tea you just made and the smell of it", result)
+        self.assertNotIn("Timeline, from the real record", result)
+
+    def test_header_leads_and_no_placeholder_residue(self):
+        settings = self._settings()
+        result = scheduler.build_nudge_prompt(
+            self._cfg(), "greeting", settings, None, self.NOON, None)
+        self.assertTrue(result.startswith("[Scheduled nudge from the framework"))
+        self.assertNotIn("{partner_name}", result)
 
 
 if __name__ == "__main__":

@@ -21,9 +21,11 @@ import json
 import re
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from everthine.config import Config
+from everthine.dynamic_context import FINAL_CHECK_TEMPLATE, FIRST_TODAY_LINE
 from everthine.layers import (
     BOUNDARIES_TEMPLATE,
     DECLARATION_TEMPLATE,
@@ -34,9 +36,11 @@ from everthine.layers import (
     compose_stable,
 )
 from everthine.persona import (
+    DEFAULT_PERSONA,
     Persona,
     PersonaSettings,
     build_system_prompt,
+    build_system_prompt_nudge,
     reset_persona_cache,
 )
 
@@ -662,6 +666,137 @@ class TestPortraitWiringThroughBuildSystemPrompt(unittest.TestCase):
             out_on_absent = build_system_prompt(cfg_on_absent)
             self.assertNotIn("# The person you have grown into", out_off)
             self.assertEqual(out_off, out_on_absent)
+
+
+class TestBuildSystemPromptNudge(unittest.TestCase):
+    """M7: the proactive system prompt sits beside build_system_prompt and
+    mirrors its folder branch, with two differences that matter -- last_contact
+    is forced None and first_today forced False, so the reunion beat and the
+    first-of-the-day cue are naturally absent (she has not written; a "welcome
+    back" here would be a fabricated message), while the stage frame and the
+    self-portrait render exactly as they do on the live path (relationship
+    state and who he is belong in a proactive reach-out too). memory/inner/
+    expression seams are all off. `now` is caller-supplied, so the fact
+    baseline is fully deterministic without touching the wall clock. File mode
+    stays the pinned legacy passthrough. build_system_prompt itself is untouched
+    -- the guard pins above prove that."""
+
+    _STAGES = ("## Settling in\nEarly days: still learning each other's rhythms.\n\n"
+               "## In rhythm\nYou move around each other easily now.\n")
+
+    def setUp(self):
+        reset_persona_cache()
+        self.addCleanup(reset_persona_cache)
+
+    def _now(self):
+        # A local aware noon on a fixed date: astimezone().replace(tzinfo=None)
+        # keeps the same calendar day, so the fact baseline is stable and no
+        # date-boundary rounding can flake.
+        return datetime(2026, 7, 6, 12, 0).astimezone()
+
+    def _write_folder(self, root: Path, *, with_stages: bool = True) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "identity.md").write_text(
+            "I am Alex: warm, steady, always half a page ahead in the book.",
+            encoding="utf-8")
+        (root / "settings.yaml").write_text(
+            "companion:\n  name: Alex\npartner:\n  name: Sam\n", encoding="utf-8")
+        if with_stages:
+            (root / "stages.md").write_text(self._STAGES, encoding="utf-8")
+        return root
+
+    def _cfg(self, persona_path: Path, data_dir: Path, **overrides) -> Config:
+        return Config(bot_token="x", authorized_user_id=1,
+                      persona_path=persona_path, data_dir=data_dir, **overrides)
+
+    def _write_stage_state(self, cfg: Config):
+        cfg.stage_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg.stage_path.write_text(json.dumps(
+            {"current": "In rhythm",
+             "history": [{"stage": "In rhythm", "date": "2026-07-01", "note": ""}]}),
+            encoding="utf-8")
+
+    def _write_portrait(self, cfg: Config):
+        cfg.portrait_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg.portrait_path.write_text(json.dumps(
+            {"updated": "2026-07-01", "content": "who I have grown into this season",
+             "opinions": [{"topic": "mornings", "opinion": "underrated"}],
+             "observations": ["never in the prompt"]}), encoding="utf-8")
+
+    def test_no_reunion_and_no_first_today_but_layer3_present(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona")
+            cfg = self._cfg(folder, Path(td) / "state")
+            out = build_system_prompt_nudge(cfg, self._now())
+            # Layer 3 is built (fact baseline + final check) ...
+            self.assertIn("# Right now", out)
+            self.assertTrue(out.endswith(FINAL_CHECK_TEMPLATE))
+            self.assertIn("2026-07-06", out)  # caller's `now`, not the wall clock
+            # ... but the reunion beat and first-of-the-day cue are absent.
+            self.assertNotIn("just came back", out)      # welcome-back reunion line
+            self.assertNotIn("You missed them", out)      # gentle reunion line
+            self.assertNotIn(FIRST_TODAY_LINE, out)
+
+    def test_stage_and_portrait_blocks_render_as_on_the_live_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona")
+            cfg = self._cfg(folder, Path(td) / "state",
+                            stages_enabled=True, portrait_enabled=True)
+            self._write_stage_state(cfg)
+            self._write_portrait(cfg)
+            out = build_system_prompt_nudge(cfg, self._now())
+            # Stage block, resolved to the state file's current stage.
+            self.assertIn("# Where the two of you are", out)
+            self.assertIn("In rhythm", out)
+            self.assertIn("You move around each other easily now", out)
+            # Portrait block, observations excluded exactly as on the live path.
+            self.assertIn("# The person you have grown into", out)
+            self.assertIn("who I have grown into this season", out)
+            self.assertIn("- mornings: underrated", out)
+            self.assertNotIn("never in the prompt", out)
+
+    def test_stages_flag_off_omits_stage_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona")
+            cfg = self._cfg(folder, Path(td) / "state", stages_enabled=False)
+            self._write_stage_state(cfg)
+            out = build_system_prompt_nudge(cfg, self._now())
+            self.assertNotIn("# Where the two of you are", out)
+
+    def test_portrait_flag_off_omits_portrait_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona")
+            cfg = self._cfg(folder, Path(td) / "state", portrait_enabled=False)
+            self._write_portrait(cfg)
+            out = build_system_prompt_nudge(cfg, self._now())
+            self.assertNotIn("# The person you have grown into", out)
+
+    def test_expression_note_never_taught_even_with_flag_on(self):
+        # The [react:...] note is off in proactive prompts regardless of the
+        # flag that would teach it on the live path: he has no "just-sent"
+        # message to react to.
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona")
+            cfg = self._cfg(folder, Path(td) / "state", album_enabled=True)
+            out = build_system_prompt_nudge(cfg, self._now())
+            self.assertNotIn("One more way you can respond", out)
+
+    def test_file_mode_returns_verbatim_stripped(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "p.md"
+            body = "You are Testbot.\nSecond line stays."
+            p.write_text("\n\n  " + body + "  \n\n", encoding="utf-8")
+            cfg = Config(bot_token="x", authorized_user_id=1, persona_path=p,
+                         data_dir=Path(td) / "state")
+            self.assertEqual(build_system_prompt_nudge(cfg, self._now()), body)
+
+    def test_file_mode_missing_returns_default(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "missing.md"
+            cfg = Config(bot_token="x", authorized_user_id=1, persona_path=p,
+                         data_dir=Path(td) / "state")
+            self.assertEqual(build_system_prompt_nudge(cfg, self._now()),
+                             DEFAULT_PERSONA)
 
 
 class TestPortraitNeverEntersDynamicContext(unittest.TestCase):
