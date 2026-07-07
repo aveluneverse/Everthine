@@ -112,6 +112,21 @@ class PortraitViewerTest(unittest.TestCase):
         self.assertIn("good one", html)
         self.assertIn("good two", html)
 
+    def test_invalid_utf8_bytes_are_skipped(self):
+        # UnicodeDecodeError is a ValueError, not an OSError or a
+        # JSONDecodeError -- a corrupt-encoding snapshot must be skipped
+        # exactly like invalid JSON, never crash the render.
+        self._seed("2026-07-01.json", _snapshot("2026-07-01", "good one"))
+        (self.history_dir / "2026-07-08.json").write_bytes(b"\xff\xfe{ not utf8")
+        self._seed("2026-07-15.json", _snapshot("2026-07-15", "good two"))
+        rc = self._run()
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.out.exists())
+        html = self._html()
+        self.assertIn("Version 1 · 2026-07-01", html)
+        self.assertIn("Version 2 · 2026-07-15", html)
+        self.assertNotIn("Version 3", html)
+
     def test_non_object_json_is_skipped(self):
         self._seed("2026-07-01.json", json.dumps(["not", "a", "dict"]))
         self._seed("2026-07-08.json", _snapshot("2026-07-08", "kept"))

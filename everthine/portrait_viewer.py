@@ -201,7 +201,11 @@ def _load_entries(history_dir: Path) -> list[dict]:
     for path in sorted(history_dir.glob("*.json"), key=lambda p: p.name):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError subsumes both json.JSONDecodeError and the
+            # UnicodeDecodeError a corrupt-encoding file raises out of
+            # read_text -- the same tuple shape portrait.load_portrait
+            # uses for the same defensive purpose.
             logger.warning("portrait_viewer: skipping unreadable file %s (%s)", path, exc)
             continue
         if not isinstance(data, dict):
