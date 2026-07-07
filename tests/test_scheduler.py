@@ -7,6 +7,7 @@ single-source archive scan, and record_nudge's accounting. Conventions
 follow tests/test_diary.py: the _cfg() Config-building helper, corpse-file
 assertions, and tz-aware datetime fixtures.
 """
+import asyncio
 import json
 import tempfile
 import unittest
@@ -15,7 +16,7 @@ from pathlib import Path
 from string import Formatter
 from unittest import mock
 
-from everthine import archive, recent_context, scheduler
+from everthine import archive, chunking, recent_context, scheduler
 from everthine.config import Config, load_config
 from everthine.engine import EngineReply
 from everthine.persona import PersonaSettings, reset_persona_cache
@@ -1343,6 +1344,209 @@ class TestNudgeOnceRecentContextPrefix(unittest.TestCase):
         self.assertIsNotNone(result)                        # pipeline still completed
         self.assertTrue(prompt.startswith("[Scheduled nudge from the framework"))  # no prefix
         self.assertTrue(any("warmth injection failed" in line for line in cm.output))
+
+
+# ---------------------------------------------------------------------
+# M7 T5: deliver -- account first (stamp + archive), then best-effort send.
+# The order is this task's soul: the archive (an unforgeable record of what
+# he really said) is written whether the send later succeeds or not, and
+# whether the optimistic stamp was skipped or not, so a failed send can only
+# ever cost "a line she never received" (true), never "a line he insists he
+# sent that never existed" (false). Async tests follow the bot-test harness:
+# a fake app whose .bot.send_message is an AsyncMock, driven with
+# asyncio.run; the store and archive are real (tmp dir, true read-back).
+# ---------------------------------------------------------------------
+
+
+class _FakeApp:
+    """Minimal stand-in for the PTB Application deliver() sends through: a
+    .bot whose send_message is an AsyncMock, so call order is recorded and
+    per-call side effects (raise-then-succeed) are scriptable."""
+
+    def __init__(self):
+        self.bot = mock.Mock()
+        self.bot.send_message = mock.AsyncMock()
+
+
+def _nudge_result(text="a warm little hello", job="greeting",
+                  session_id="s2", expected_session_id="s1"):
+    return scheduler.NudgeResult(job=job, text=text, session_id=session_id,
+                                 expected_session_id=expected_session_id)
+
+
+def _sent_texts(app):
+    return [c.kwargs["text"] for c in app.bot.send_message.call_args_list]
+
+
+class TestDeliverSuccessPath(unittest.TestCase):
+    def test_stamp_archive_send_and_log_all_land(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            now = _aware(12)
+            store = _store(cfg, session_id="s1")           # matches expected
+            result = _nudge_result(text="good morning, i missed you",
+                                   job="greeting", session_id="s2",
+                                   expected_session_id="s1")
+            app = _FakeApp()
+            with mock.patch.object(store, "stamp_session_started",
+                                   wraps=store.stamp_session_started) as stamp, \
+                    self.assertLogs("everthine", level="INFO") as cm:
+                asyncio.run(scheduler.deliver(app, cfg, store, result, now))
+            # stamp fired with the reply's real session id + now...
+            stamp.assert_called_once_with("s2", now)
+            # ...and the store really advanced (behavior, not just the call)
+            data = store.load()
+            self.assertEqual(data["session_id"], "s2")
+            self.assertEqual(data["session_started_at"], now.isoformat())
+            # the archive really holds his line, spoken by "companion"
+            entries = [e for e in archive.iter_entries(cfg.archive_dir)
+                       if e["speaker"] == "companion"]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["text"], "good morning, i missed you")
+            # the bot received the whole message, addressed to the owner
+            self.assertEqual(_sent_texts(app), ["good morning, i missed you"])
+            self.assertEqual(
+                app.bot.send_message.call_args_list[0].kwargs["chat_id"],
+                cfg.authorized_user_id)
+            self.assertTrue(any("scheduler: sent (greeting)" in m for m in cm.output))
+
+
+class TestDeliverStampSkipped(unittest.TestCase):
+    def test_session_changed_hands_skips_stamp_but_archives_and_sends(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            now = _aware(12)
+            # She pressed clean-start / warm-restart mid-generation: the store
+            # now points somewhere other than the session nudge_once resumed.
+            store = _store(cfg, session_id="s_new")
+            result = _nudge_result(text="thinking of you", job="miss_you",
+                                   session_id="s2", expected_session_id="s1")
+            app = _FakeApp()
+            with mock.patch.object(store, "stamp_session_started") as stamp, \
+                    self.assertLogs("everthine", level="INFO") as cm:
+                asyncio.run(scheduler.deliver(app, cfg, store, result, now))
+            stamp.assert_not_called()                      # zeroed notebook not resurrected
+            self.assertEqual(store.load()["session_id"], "s_new")  # pointer untouched
+            # archive STILL written -- he said it, so it is a fact...
+            entries = [e for e in archive.iter_entries(cfg.archive_dir)
+                       if e["speaker"] == "companion"]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["text"], "thinking of you")
+            # ...and the send STILL happened
+            self.assertEqual(_sent_texts(app), ["thinking of you"])
+            self.assertTrue(any("changed hands" in m for m in cm.output))
+
+
+class TestDeliverSendRetry(unittest.TestCase):
+    def test_first_chunk_fails_then_retry_succeeds_no_abandon(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            now = _aware(12)
+            store = _store(cfg, session_id="s1")
+            result = _nudge_result(text="hey you", session_id="s2",
+                                   expected_session_id="s1")
+            app = _FakeApp()
+            # first send raises, the one retry succeeds
+            app.bot.send_message.side_effect = [RuntimeError("network blip"), None]
+            with self.assertLogs("everthine", level="INFO") as cm:
+                asyncio.run(scheduler.deliver(app, cfg, store, result, now))
+        # two attempts on the same chunk: the failure + its successful retry
+        self.assertEqual(app.bot.send_message.call_count, 2)
+        self.assertEqual(_sent_texts(app), ["hey you", "hey you"])
+        # nothing abandoned, and the sent log still fires
+        self.assertFalse(any("abandoning" in m for m in cm.output))
+        self.assertTrue(any("scheduler: sent" in m for m in cm.output))
+
+
+class TestDeliverSendGivesUp(unittest.TestCase):
+    def test_retry_fails_abandons_rest_but_stamp_and_archive_already_landed(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            now = _aware(12)
+            store = _store(cfg, session_id="s1")
+            # Long enough to split, so "abandon the REST" is observable: the
+            # first chunk fails twice, the second is never attempted.
+            long_text = ("A" * 4096) + "\n" + ("B" * 4096)
+            self.assertGreater(len(chunking.split_message(long_text)), 1)
+            result = _nudge_result(text=long_text, job="share",
+                                   session_id="s2", expected_session_id="s1")
+            app = _FakeApp()
+            app.bot.send_message.side_effect = RuntimeError("always down")
+            with self.assertLogs("everthine", level="WARNING") as cm:
+                asyncio.run(scheduler.deliver(app, cfg, store, result, now))
+            # exactly one send + one retry on the FIRST chunk, then it stops
+            self.assertEqual(app.bot.send_message.call_count, 2)
+            self.assertTrue(any("abandoning" in m and "share" in m for m in cm.output))
+            # SOUL PIN: the record was safe BEFORE the doomed send -- the stamp
+            # advanced the store and the archive already holds his words.
+            self.assertEqual(store.load()["session_id"], "s2")
+            entries = [e for e in archive.iter_entries(cfg.archive_dir)
+                       if e["speaker"] == "companion"]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["text"], long_text)
+
+
+class TestDeliverArchiveSpeakerPin(unittest.TestCase):
+    def test_archive_speaker_is_literal_companion_no_suffix(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            now = _aware(12)
+            store = _store(cfg, session_id="s1")
+            result = _nudge_result(text="a quiet thought i had", job="share",
+                                   session_id="s2", expected_session_id="s1")
+            app = _FakeApp()
+            asyncio.run(scheduler.deliver(app, cfg, store, result, now))
+            # Read the raw archive line, not iter_entries, to pin the literal
+            # stored speaker string: exactly "companion", never decorated with
+            # "(proactive)" or anything else.
+            day_file = cfg.archive_dir / f"{now.date().isoformat()}.jsonl"
+            lines = day_file.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        record = json.loads(lines[0])
+        self.assertEqual(record["speaker"], "companion")
+        self.assertEqual(record["text"], "a quiet thought i had")
+
+
+class TestDeliverArchiveOffLoop(unittest.TestCase):
+    def test_archive_write_goes_through_to_thread(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            now = _aware(12)
+            store = _store(cfg, session_id="s1")
+            result = _nudge_result(text="off the loop", session_id="s2",
+                                   expected_session_id="s1")
+            app = _FakeApp()
+            with mock.patch("everthine.scheduler.asyncio.to_thread",
+                            wraps=asyncio.to_thread) as spy:
+                asyncio.run(scheduler.deliver(app, cfg, store, result, now))
+            # the archive write -- and only it -- rides asyncio.to_thread, with
+            # archive.write_entry and the clean companion payload as its args
+            spy.assert_called_once_with(archive.write_entry, cfg.archive_dir,
+                                        "companion", "off the loop", now)
+            # behavior-equivalent proof it actually wrote through the thread
+            entries = [e for e in archive.iter_entries(cfg.archive_dir)
+                       if e["speaker"] == "companion"]
+            self.assertEqual(len(entries), 1)
+
+
+class TestDeliverLongTextChunks(unittest.TestCase):
+    def test_over_limit_text_is_split_and_each_chunk_sent_in_order(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            now = _aware(12)
+            store = _store(cfg, session_id="s1")
+            long_text = ("A" * 4096) + "\n" + ("B" * 4096)
+            expected_chunks = chunking.split_message(long_text)
+            self.assertGreater(len(expected_chunks), 1)     # precondition
+            result = _nudge_result(text=long_text, session_id="s2",
+                                   expected_session_id="s1")
+            app = _FakeApp()
+            asyncio.run(scheduler.deliver(app, cfg, store, result, now))
+        # every chunk delivered, in order, one send apiece, all to the owner
+        self.assertEqual(_sent_texts(app), expected_chunks)
+        self.assertEqual(app.bot.send_message.call_count, len(expected_chunks))
+        for c in app.bot.send_message.call_args_list:
+            self.assertEqual(c.kwargs["chat_id"], cfg.authorized_user_id)
 
 
 if __name__ == "__main__":

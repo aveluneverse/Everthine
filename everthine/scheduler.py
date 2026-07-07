@@ -4,10 +4,12 @@ missing her after a long enough silence, or sharing something unprompted
 -- without ever calling the engine, touching the network, or importing
 bot.py. Built on top of those gates, nudge_once is the execution line: one
 complete attempt that turns a due decision into a generated message through
-the engine's non-blocking call. It still never sends (delivery) and never
-imports bot.py -- wiring it onto the background tick and delivering what it
-returns are both later milestone tasks. Beyond the decision logic and that
-pipeline, this module also holds
+the engine's non-blocking call. It still never sends and never imports
+bot.py; deliver() below is the async tail that puts the returned message
+into the world -- optimistic stamp, then archive, then a best-effort
+Telegram send -- while wiring the two onto the background tick stays a later
+milestone task. Beyond the decision logic and that pipeline, this module
+also holds
 the owner-approved instruction copy for the three proactive messages and the
 pure renderers that assemble them into a proactive system-prompt tail
 (build_nudge_prompt): the framing header that tells the companion this is a
@@ -60,6 +62,7 @@ TYPE_CHECKING type hints, costing nothing at runtime.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -70,7 +73,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import archive, engine, persona, recent_context
+from . import archive, chunking, engine, persona, recent_context
 
 if TYPE_CHECKING:
     from .config import Config
@@ -841,3 +844,78 @@ def nudge_once(cfg: Config, store: SessionStore, now: datetime,
     record_nudge(cfg.scheduler_state_path, job, now, last_contact)
     logger.info("scheduler: nudge ready (%s)", job)
     return NudgeResult(job, reply.text, reply.session_id, expected)
+
+
+# ---------------------------------------------------------------------
+# Delivery: put one generated NudgeResult into the world. The async twin of
+# nudge_once -- everything above conceives a message, this hands it over.
+# ---------------------------------------------------------------------
+
+async def deliver(app, cfg: Config, store: SessionStore, result: NudgeResult,
+                  now: datetime) -> None:
+    """Put one generated proactive message (T4's NudgeResult) into the world,
+    in the single order this task's integrity rests on: account first (stamp,
+    then archive), send best-effort afterwards.
+
+    1. Optimistic stamp. Re-read the store's CURRENT session pointer -- never
+       the snapshot T4 took -- and stamp the session this reach-out actually
+       ran in (result.session_id) forward only while that pointer is still
+       where nudge_once left it (result.expected_session_id). If she pressed
+       "clean start" or "warm restart" mid-generation the pointer has already
+       moved, and stamping would silently resurrect a notebook she chose to
+       zero; skip it, and log that the session changed hands.
+
+    2. Archive, ALWAYS -- whether or not the stamp was skipped. He generated
+       these words, so they are an unforgeable fact; the archive is the single
+       record every downstream consumer (the warm recent-context prefix,
+       memory sync, the diary's raw material) reads as "what he really said".
+       The speaker is a clean "companion", never decorated with "(proactive)":
+       to those consumers a proactive line simply IS something he said, which
+       is the correct semantics. The framework instruction is never archived
+       -- it is nobody's speech. The write is disk I/O, kept off the event
+       loop with asyncio.to_thread.
+
+    3. Send, best-effort. Chunk for Telegram's length limit and send each part
+       as plain text (no parse_mode, the M1 convention). A failing chunk is
+       retried exactly once; a second failure logs a warning (naming the job)
+       and ABANDONS the remaining chunks, returning without raising -- a send
+       failure is a delivery problem, never a pipeline failure, and by here the
+       record is already safe. The worst a lost send can cost is a line she
+       never received (true); it can never make him insist he sent a line that
+       never existed (false), because the archive was written first.
+
+    Deliberately absent: this never calls record_nudge (T4 counted the attempt
+    at conception, not at receipt) and never runs memory sync -- her next
+    reply's sync sweeps the archive forward from its incremental cursor and
+    ingests this companion entry for free, with no new mechanism and one fewer
+    embed. It touches neither the conversation-log nor any live-reply function.
+    """
+    current = store.load().get("session_id")
+    if current == result.expected_session_id:
+        store.stamp_session_started(result.session_id, now)
+    else:
+        logger.info(
+            "scheduler: session changed hands mid-generation; not stamping "
+            "the proactive message (%s)", result.job)
+
+    # File IO off the event loop (the M4 T7b convention). Always runs, even
+    # when the stamp above was skipped: the archive records what he said, and
+    # he said it regardless of which notebook it lands in.
+    await asyncio.to_thread(archive.write_entry, cfg.archive_dir,
+                            "companion", result.text, now)
+
+    for chunk in chunking.split_message(result.text):
+        for attempt in range(2):  # the original send, then one retry
+            try:
+                await app.bot.send_message(
+                    chat_id=cfg.authorized_user_id, text=chunk)
+                break
+            except Exception:
+                if attempt == 1:
+                    logger.warning(
+                        "scheduler: could not deliver a proactive message "
+                        "chunk (%s); abandoning the rest", result.job,
+                        exc_info=True)
+                    return
+
+    logger.info("scheduler: sent (%s)", result.job)
