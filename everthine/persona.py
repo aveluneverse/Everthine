@@ -66,6 +66,14 @@ def build_system_prompt(cfg: Config, memory_block: str | None = None,
     memory recall this mirrors (see bot.prepare_exchange): a broken or
     corrupt stage system must never take the reply down with it, so any
     exception degrades to no stage block at all, logged as a warning.
+
+    Folder mode also reads the M6 self-portrait here (when
+    cfg.portrait_enabled), rendering the saved snapshot into its Layer 1
+    block. Unlike the stage block it needs no try/except: both the read
+    (portrait.load_portrait) and the render (portrait.portrait_block) are
+    internally fail-soft and cannot raise on a corrupt or hand-edited file.
+    With the flag off the portrait module is never even imported, so the
+    composition is byte-identical to the pre-M6 one.
     """
     if cfg.persona_path.is_dir():
         persona_obj = _cached_folder_persona(cfg)
@@ -90,10 +98,26 @@ def build_system_prompt(cfg: Config, memory_block: str | None = None,
         # would be circular (same reason assemble_folder_prompt imports late).
         from .layers import EXPRESSION_NOTE
         expression_note = EXPRESSION_NOTE if cfg.expression_tag_taught else None
+        # The evolved self-portrait (M6): read here in the assembly layer, the
+        # same per-turn disk read the stage block does above. Gated on
+        # cfg.portrait_enabled -- when off, the module is not even imported and
+        # no block is built, so the composition is byte-identical to the pre-M6
+        # one (the L1 rollback: flip the flag off and the portrait is gone,
+        # even with a snapshot still on disk). Both the read (load_portrait)
+        # and the render (portrait_block) are internally fail-soft -- a corrupt
+        # file is quarantined and degrades to None, a malformed opinion is
+        # skipped -- so, unlike the stage block, neither can take the reply
+        # down, and no extra guard is needed here.
+        portrait_blk = None
+        if cfg.portrait_enabled:
+            from . import portrait as portrait_mod  # lazy: avoids import cycles
+            saved_portrait = portrait_mod.load_portrait(cfg)
+            if saved_portrait is not None:
+                portrait_blk = portrait_mod.portrait_block(saved_portrait)
         return assemble_folder_prompt(
             persona_obj, now_naive, last_contact, first_today, memory_block,
             stage_block=stage_blk, inner_block=inner_block,
-            expression_note=expression_note)
+            expression_note=expression_note, portrait_block=portrait_blk)
 
     # --- Legacy file mode: pinned byte-for-byte (do not "improve") ---------
     # Per-call read, strip, non-empty -> return verbatim; otherwise fall back.
@@ -636,6 +660,7 @@ def assemble_folder_prompt(
     stage_block: str | None = None,
     inner_block: str | None = None,
     expression_note: str | None = None,
+    portrait_block: str | None = None,
 ) -> str:
     """Join the static Layer 1/2 composition and the dynamic Layer 3 block with
     a single blank line. Pure and deterministic given its arguments -- directly
@@ -650,10 +675,14 @@ def assemble_folder_prompt(
     and is a no-op (byte-identical to the pre-M4 composition) when it is None
     or empty. `expression_note` (optional, default None) threads through the
     same way and lands after the ground rules (a behavioral-layer footnote),
-    with the identical None/empty no-op contract. Building the blocks --
-    reading stage state off disk, calling stages.stage_block(), choosing
-    whether to teach the note -- is build_system_prompt()'s job; this
-    function stays pure and does no I/O of its own.
+    with the identical None/empty no-op contract. `portrait_block` (optional,
+    default None) threads through the same way and lands in Layer 1, after
+    the voice and before the DNA rules (the evolved self-portrait, sitting in
+    the stable layer with the skeleton anchored below it), with the identical
+    None/empty no-op contract. Building the blocks -- reading stage state off
+    disk, calling stages.stage_block(), reading the saved portrait snapshot,
+    choosing whether to teach the note -- is build_system_prompt()'s job;
+    this function stays pure and does no I/O of its own.
     """
     # layers and dynamic_context both import from persona at module load, so a
     # top-level import here would be circular; import them lazily at call time,
@@ -662,7 +691,8 @@ def assemble_folder_prompt(
     from .layers import compose_stable
 
     return (compose_stable(persona_obj, stage_block=stage_block,
-                           expression_note=expression_note) + "\n\n"
+                           expression_note=expression_note,
+                           portrait_block=portrait_block) + "\n\n"
             + build_dynamic_context(
                 persona_obj.settings, now_naive, last_contact, first_today,
                 memory_block, inner_block=inner_block))

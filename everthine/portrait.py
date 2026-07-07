@@ -597,3 +597,64 @@ def update_once(cfg: Config, now: datetime) -> bool:
     save_portrait(cfg, parsed, now)
     logger.info("portrait: updated (version %s)", now.date().isoformat())
     return True
+
+
+# ---------------------------------------------------------------------
+# Layer 1 injection: the saved snapshot, rendered for the live persona
+# prompt. persona.build_system_prompt reads the current snapshot each turn
+# and hands the rendered block to layers.compose_stable, which seats it in
+# the stable layer -- after the persona's voice, before the ground-rules
+# anchor: identity evolves in the stable layer, and the DNA skeleton always
+# follows it. Pure string assembly (a dict in, a string or None out; no
+# clock, no filesystem): the snapshot's own text is a value here, never a
+# format template, so any literal braces a hand-written snapshot carries
+# survive verbatim.
+# ---------------------------------------------------------------------
+
+PORTRAIT_BLOCK_HEADER = "# The person you have grown into"
+PORTRAIT_OPINIONS_HEADER = "Positions you have come to hold:"
+
+
+def portrait_block(portrait: dict | None) -> str | None:
+    """Render a saved self-portrait into its Layer 1 injection block, or None
+    when there is nothing worth injecting.
+
+    None whenever `portrait` is None, or its `content` is missing, not a str,
+    or blank after stripping -- an empty snapshot adds no block at all, so
+    compose_stable() stays byte-identical to the no-portrait composition.
+
+    The block, joined by one blank line: the header line verbatim, then the
+    content, then -- only when `opinions` is a non-empty list -- the opinions
+    header and one `- {topic}: {opinion}` line per well-shaped element,
+    capped at PORTRAIT_OPINIONS_PROMPT_CAP. `observations` never enter the
+    live prompt: they live only in the saved snapshot and the generation
+    material.
+
+    Everything is concatenated (never str.format'd): the content and each
+    opinion field are inserted as values, so a literal `{...}` inside any of
+    them survives verbatim rather than being read as a format field. A
+    snapshot loaded off disk may have been hand-edited, so a malformed
+    opinion -- not a dict, or with either field missing or non-str -- is
+    skipped fail-soft rather than raised on (the injection layer degrades
+    quietly, exactly like _clean_opinions does when saving).
+    """
+    if portrait is None:
+        return None
+    content = portrait.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+
+    opinion_lines = []
+    raw_opinions = portrait.get("opinions")
+    if isinstance(raw_opinions, list):
+        for item in raw_opinions:
+            if (isinstance(item, dict)
+                    and isinstance(item.get("topic"), str)
+                    and isinstance(item.get("opinion"), str)):
+                opinion_lines.append(f"- {item['topic']}: {item['opinion']}")
+    opinion_lines = opinion_lines[:PORTRAIT_OPINIONS_PROMPT_CAP]
+
+    parts = [PORTRAIT_BLOCK_HEADER, content.strip()]
+    if opinion_lines:
+        parts.append("\n".join([PORTRAIT_OPINIONS_HEADER, *opinion_lines]))
+    return "\n\n".join(parts)

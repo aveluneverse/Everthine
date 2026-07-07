@@ -17,6 +17,7 @@ boundaries heading also starts with "## ", same as the seven DNA rule
 headings -- so heading counts are pinned with "^## \\d+. " (numbered
 headings only) rather than a bare "^## ".
 """
+import json
 import re
 import tempfile
 import unittest
@@ -534,6 +535,148 @@ class TestAlbumNeverEntersPrompt(unittest.TestCase):
             source = Path(mod.__file__).read_text(encoding="utf-8")
             self.assertNotIn("album", source,
                              f"{mod.__name__} must stay album-free (D1)")
+
+
+class TestPortraitBlockSeam(unittest.TestCase):
+    """M6 seam: the evolved self-portrait sits in Layer 1, after the
+    persona's voice and before the DNA anchor -- identity evolves in the
+    stable layer, and the skeleton (the seven ground rules) always follows
+    it. Truthy -> its own block there; None/"" -> byte-identical to the
+    composition without it (the golden pins guard the persona text; these
+    guard the seam's placement and silence, exactly like the stage-block and
+    expression-note seams). A plain sentinel string stands in for a rendered
+    portrait: compose_stable only ever sees an opaque pre-built block, never
+    portrait.py itself."""
+
+    PORTRAIT_SENTINEL = "# The person you have grown into\nWho I have become."
+
+    def test_seam_silence_none_empty_and_absent_all_equal(self):
+        # portrait_block=None, portrait_block="", and passing nothing all
+        # compose to the exact same string (the L1 rollback silence contract).
+        persona = _persona(voice_text=VOICE_TEXT, boundaries_text=BOUNDARIES_TEXT)
+        base = compose_stable(persona)
+        self.assertEqual(compose_stable(persona, portrait_block=None), base)
+        self.assertEqual(compose_stable(persona, portrait_block=""), base)
+
+    def test_empty_portrait_block_leaves_no_stray_blank(self):
+        persona = _persona(voice_text=VOICE_TEXT)
+        self.assertNotIn("\n\n\n", compose_stable(persona, portrait_block=""))
+
+    def test_portrait_alone_sits_after_voice_before_dna(self):
+        persona = _persona(voice_text=VOICE_TEXT, boundaries_text=BOUNDARIES_TEXT)
+        result = compose_stable(persona, portrait_block=self.PORTRAIT_SENTINEL)
+        i_voice = result.index(VOICE_TEXT)
+        i_portrait = result.index("# The person you have grown into")
+        i_dna = result.index("# The ground rules")
+        self.assertLess(i_voice, i_portrait)
+        self.assertLess(i_portrait, i_dna)  # the DNA skeleton follows the portrait
+
+    def test_full_layer_order_with_all_seams(self):
+        # stage -> declaration -> identity -> voice -> portrait -> DNA ->
+        # expression -> boundaries: every index strictly increasing, with the
+        # DNA anchor (the seven rules) always after the portrait heading.
+        persona = _persona(voice_text=VOICE_TEXT, boundaries_text=BOUNDARIES_TEXT)
+        result = compose_stable(
+            persona,
+            stage_block="# Where the two of you are\nX",
+            expression_note="NOTE-SENTINEL",
+            portrait_block=self.PORTRAIT_SENTINEL)
+        idx = [
+            result.index("# Where the two of you are"),
+            result.index("# Who you are"),
+            result.index(IDENTITY_TEXT),
+            result.index(VOICE_TEXT),
+            result.index("# The person you have grown into"),
+            result.index("# The ground rules"),
+            result.index("NOTE-SENTINEL"),
+            result.index("## Their boundaries, in their own words"),
+        ]
+        self.assertEqual(idx, sorted(idx))  # strictly increasing (all distinct)
+        # The load-bearing rule, spelled out: the skeleton follows the portrait.
+        self.assertLess(result.index("# The person you have grown into"),
+                        result.index("# The ground rules"))
+
+
+class TestPortraitWiringThroughBuildSystemPrompt(unittest.TestCase):
+    """Integration coverage for build_system_prompt()'s M6 portrait wiring:
+    the folder-mode read path (load_portrait -> portrait_block ->
+    compose_stable) and, above all, the flag-off L1 rollback pin. Real temp
+    persona folders and the real clock, matching
+    TestStageWiringThroughBuildSystemPrompt's conventions; the byte-identity
+    assertion follows the same stable-prefix/same-hour convention that class
+    already relies on."""
+
+    def setUp(self):
+        reset_persona_cache()
+        self.addCleanup(reset_persona_cache)
+
+    def _write_folder(self, root: Path) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "identity.md").write_text(
+            "I am Alex: warm, steady, always half a page ahead in the book.",
+            encoding="utf-8")
+        (root / "settings.yaml").write_text(
+            "companion:\n  name: Alex\npartner:\n  name: Sam\n", encoding="utf-8")
+        return root
+
+    def _cfg(self, folder: Path, data_dir: Path, **overrides) -> Config:
+        return Config(bot_token="x", authorized_user_id=1,
+                      persona_path=folder, data_dir=data_dir, **overrides)
+
+    def _write_portrait(self, cfg: Config, *, content, opinions=None):
+        cfg.portrait_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg.portrait_path.write_text(json.dumps(
+            {"updated": "2026-07-01", "content": content,
+             "opinions": opinions or [], "observations": ["never in the prompt"]}),
+            encoding="utf-8")
+
+    def test_flag_on_injects_portrait_after_voice_before_dna(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona")
+            cfg = self._cfg(folder, Path(td) / "state", portrait_enabled=True)
+            self._write_portrait(
+                cfg, content="who I have grown into this season",
+                opinions=[{"topic": "mornings", "opinion": "underrated"}])
+            out = build_system_prompt(cfg)
+            self.assertIn("# The person you have grown into", out)
+            self.assertIn("who I have grown into this season", out)
+            self.assertIn("- mornings: underrated", out)
+            self.assertLess(out.index("# The person you have grown into"),
+                            out.index("# The ground rules"))
+            self.assertNotIn("never in the prompt", out)  # observations excluded
+
+    def test_flag_off_with_portrait_on_disk_byte_identical_to_no_portrait(self):
+        # THE L1 rollback pin: PORTRAIT_ENABLED=false with a portrait.json
+        # present must produce exactly the pre-M6 composition -- equal, byte
+        # for byte, to a flag-on run with no portrait on disk, and carrying no
+        # portrait heading anywhere. Mirrors the M4 stage flag-off self-
+        # consistent pin (both data dirs have empty archives, so the two
+        # back-to-back calls share one rendered Layer 3 hour).
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona")
+            cfg_off = self._cfg(folder, Path(td) / "off", portrait_enabled=False)
+            self._write_portrait(cfg_off, content="present but ignored",
+                                 opinions=[{"topic": "x", "opinion": "y"}])
+            cfg_on_absent = self._cfg(folder, Path(td) / "on", portrait_enabled=True)
+            out_off = build_system_prompt(cfg_off)
+            out_on_absent = build_system_prompt(cfg_on_absent)
+            self.assertNotIn("# The person you have grown into", out_off)
+            self.assertEqual(out_off, out_on_absent)
+
+
+class TestPortraitNeverEntersDynamicContext(unittest.TestCase):
+    def test_dynamic_context_source_has_no_portrait(self):
+        # The self-portrait belongs to the STABLE layer only (layers.py, wired
+        # through persona.py). It must never reach Layer 3. Unlike the album
+        # guard -- which sweeps three modules -- this one is scoped to
+        # dynamic_context alone, because persona.py and layers.py now
+        # legitimately name the portrait; the single module that must stay
+        # portrait-free is the dynamic-context layer. If this turns red,
+        # someone routed the portrait into Layer 3 - stop and read the plan.
+        import everthine.dynamic_context
+        source = Path(everthine.dynamic_context.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("portrait", source,
+                         "dynamic_context must stay portrait-free (Layer 3 rule)")
 
 
 if __name__ == "__main__":

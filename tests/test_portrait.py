@@ -817,5 +817,129 @@ class TestUpdateOnce(unittest.TestCase):
         self._assert_logged_at(cm, "INFO", f"portrait: updated (version {TODAY})")
 
 
+# ---------------------------------------------------------------------
+# M6 T5: portrait_block -- rendering the saved snapshot into its Layer 1
+# injection block. Pure string assembly (takes a dict, not a Config: no
+# clock, no filesystem): the two heading literals, the opinions cap and
+# fail-soft skip of malformed elements, observations kept out, and the
+# brace-injection contract -- content and opinion fields are concatenated
+# as values, never used as a format template, so any literal braces in a
+# hand-written snapshot survive verbatim.
+# ---------------------------------------------------------------------
+
+
+class TestPortraitBlockConstants(unittest.TestCase):
+    def test_header_literal(self):
+        self.assertEqual(portrait.PORTRAIT_BLOCK_HEADER,
+                         "# The person you have grown into")
+
+    def test_opinions_header_literal(self):
+        self.assertEqual(portrait.PORTRAIT_OPINIONS_HEADER,
+                         "Positions you have come to hold:")
+
+
+class TestPortraitBlock(unittest.TestCase):
+    def test_none_portrait_is_none(self):
+        self.assertIsNone(portrait.portrait_block(None))
+
+    def test_missing_content_is_none(self):
+        self.assertIsNone(portrait.portrait_block(
+            {"opinions": [{"topic": "t", "opinion": "o"}]}))
+
+    def test_non_str_content_is_none(self):
+        self.assertIsNone(portrait.portrait_block({"content": 123}))
+
+    def test_blank_content_is_none(self):
+        self.assertIsNone(portrait.portrait_block({"content": "   \n  "}))
+
+    def test_header_first_then_content(self):
+        block = portrait.portrait_block({"content": "who I have become lately"})
+        self.assertTrue(block.startswith("# The person you have grown into"))
+        self.assertIn("who I have become lately", block)
+
+    def test_content_only_has_no_opinions_header(self):
+        block = portrait.portrait_block({"content": "just me, quietly"})
+        self.assertNotIn("Positions you have come to hold:", block)
+        self.assertNotIn("\n\n\n", block)
+
+    def test_empty_opinions_list_has_no_opinions_header(self):
+        block = portrait.portrait_block({"content": "me", "opinions": []})
+        self.assertNotIn("Positions you have come to hold:", block)
+
+    def test_opinions_not_a_list_ignored(self):
+        block = portrait.portrait_block({"content": "me", "opinions": "not a list"})
+        self.assertNotIn("Positions you have come to hold:", block)
+
+    def test_opinions_rendered_after_header(self):
+        block = portrait.portrait_block({
+            "content": "me",
+            "opinions": [{"topic": "mornings", "opinion": "underrated"},
+                         {"topic": "tea", "opinion": "better without sugar"}]})
+        self.assertIn("Positions you have come to hold:", block)
+        self.assertIn("- mornings: underrated", block)
+        self.assertIn("- tea: better without sugar", block)
+        self.assertLess(block.index("Positions you have come to hold:"),
+                        block.index("- mornings: underrated"))
+
+    def test_opinions_capped_at_prompt_cap(self):
+        opinions = [{"topic": f"t{i}", "opinion": f"o{i}"} for i in range(8)]
+        block = portrait.portrait_block({"content": "me", "opinions": opinions})
+        # PORTRAIT_OPINIONS_PROMPT_CAP == 5: only the first five lines survive.
+        for i in range(portrait.PORTRAIT_OPINIONS_PROMPT_CAP):
+            self.assertIn(f"- t{i}: o{i}", block)
+        self.assertNotIn("- t5: o5", block)
+        self.assertEqual(block.count("\n- "), portrait.PORTRAIT_OPINIONS_PROMPT_CAP)
+
+    def test_malformed_opinions_skipped_wellformed_kept(self):
+        # A snapshot loaded off disk may have been hand-edited: not-a-dict, a
+        # dict missing either key, or a non-str field. Each is skipped fail-
+        # soft (never raised); the well-shaped ones still render.
+        opinions = [
+            {"topic": "coffee", "opinion": "too bitter"},   # kept
+            {"topic": "only topic"},                        # missing opinion
+            {"opinion": "only opinion"},                    # missing topic
+            "not a dict",                                   # not a dict
+            123,                                            # not a dict
+            {"topic": 1, "opinion": "num topic"},           # topic not str
+            {"topic": "n", "opinion": 2},                   # opinion not str
+            {"topic": "tea", "opinion": "better"},          # kept
+        ]
+        block = portrait.portrait_block({"content": "me", "opinions": opinions})
+        self.assertIn("- coffee: too bitter", block)
+        self.assertIn("- tea: better", block)
+        self.assertNotIn("only topic", block)
+        self.assertNotIn("only opinion", block)
+        self.assertNotIn("num topic", block)
+        self.assertEqual(block.count("\n- "), 2)  # exactly the two well-shaped
+
+    def test_observations_never_enter_block(self):
+        block = portrait.portrait_block({
+            "content": "me",
+            "observations": ["OBSERVATION_SENTINEL quiet on Sundays"]})
+        self.assertNotIn("OBSERVATION_SENTINEL", block)
+        self.assertNotIn("quiet on Sundays", block)
+
+    def test_content_literal_braces_survive_verbatim(self):
+        # Brace-injection contract: content is concatenated as a value, never
+        # used as a format template, so literal { } and {anything} survive.
+        content = "I hold {curly} thoughts and {} silences, {like_this} exactly."
+        block = portrait.portrait_block({"content": content})
+        self.assertIn(content, block)
+
+    def test_opinion_fields_literal_braces_survive_verbatim(self):
+        block = portrait.portrait_block({
+            "content": "me",
+            "opinions": [{"topic": "a {brace}", "opinion": "b {} c {x}"}]})
+        self.assertIn("- a {brace}: b {} c {x}", block)
+
+    def test_content_trailing_newline_stripped_no_stray_blank(self):
+        # A stored content may end in a newline; stripping it keeps the \n\n
+        # block-join clean (no stray blank line) once compose_stable seats
+        # this block among the others.
+        block = portrait.portrait_block({"content": "my whole self\n"})
+        self.assertTrue(block.endswith("my whole self"))
+        self.assertNotIn("\n\n\n", block)
+
+
 if __name__ == "__main__":
     unittest.main()

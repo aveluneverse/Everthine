@@ -11,7 +11,9 @@ not persona-authored -- with the living-frame line swapped in, plus the
 boundaries file appended last). persona.build_system_prompt() joins this
 composition with the dynamic Layer 3 block (dynamic_context.py); the M4
 relationship-stage frame arrives pre-built through compose_stable()'s
-stage_block parameter.
+stage_block parameter, and the M6 self-portrait the same way through its
+portrait_block parameter -- seated in Layer 1 after the persona's voice and
+before the DNA anchor, so identity may evolve while the skeleton stays put.
 """
 from __future__ import annotations
 
@@ -172,7 +174,8 @@ the gesture says enough."""
 
 
 def compose_stable(persona: Persona, stage_block: str | None = None,
-                   expression_note: str | None = None) -> str:
+                   expression_note: str | None = None,
+                   portrait_block: str | None = None) -> str:
     """Compose Layer 1 + Layer 2 (+ boundaries) for a folder-mode persona,
     with an optional relationship-stage block prepended ahead of everything
     else.
@@ -200,6 +203,16 @@ def compose_stable(persona: Persona, stage_block: str | None = None,
     seam-silence contract is guarded separately). The caller decides whether
     to pass EXPRESSION_NOTE at all.
 
+    `portrait_block` (optional, default None) is the M6 seam: when truthy, it
+    becomes its own block in Layer 1, right after the persona's voice and
+    before the ground-rules anchor -- the companion's evolving self-knowledge
+    sits in the stable layer, and the DNA skeleton always follows it. None or
+    "" adds nothing, byte-identical to the composition without it (the same
+    seam-silence contract stage_block and expression_note honor). Building the
+    block (reading the saved snapshot, calling portrait.portrait_block()) is
+    the caller's job -- this function does no I/O and does not import the
+    portrait module.
+
     `persona.settings.living` must be "together" or "long_distance";
     anything else raises ValueError naming the offending value. The loader
     already rejects other values at settings.yaml parse time -- this is
@@ -226,7 +239,12 @@ def compose_stable(persona: Persona, stage_block: str | None = None,
     blocks.append(persona.identity_text)
     if persona.voice_text:
         blocks.append(persona.voice_text)
-    # [M6 seam] evolved self-portrait feedback joins Layer 1 here.
+    # The evolved self-portrait joins Layer 1 here -- after voice, before the
+    # DNA anchor below: identity evolves in the stable layer, and the skeleton
+    # (the seven ground rules) always follows it. None or "" adds nothing,
+    # byte-identical to the composition without it, exactly like stage_block.
+    if portrait_block:
+        blocks.append(portrait_block)
 
     if persona.settings.living == "together":
         living_line = LIVING_LINE_TOGETHER
