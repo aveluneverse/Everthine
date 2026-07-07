@@ -27,6 +27,7 @@ from everthine.layers import (
     BOUNDARIES_TEMPLATE,
     DECLARATION_TEMPLATE,
     DNA_RULES,
+    EXPRESSION_NOTE,
     LIVING_LINE_LONG_DISTANCE,
     LIVING_LINE_TOGETHER,
     compose_stable,
@@ -167,6 +168,52 @@ class TestStageBlockSeam(unittest.TestCase):
             compose_stable(persona)
 
 
+class TestExpressionNoteSeam(unittest.TestCase):
+    """N1: an optional behavioral-layer note taught after the ground rules.
+    Truthy -> its own block between DNA_RULES and any boundaries; None ->
+    byte-identical to the pre-note composition (the golden pins guard the
+    note text itself; these guard the seam's placement and silence)."""
+
+    def test_none_expression_note_is_byte_identical(self):
+        # L1 twin pin: no note -> exactly the composition without one.
+        persona = _persona(voice_text=VOICE_TEXT, boundaries_text=BOUNDARIES_TEXT)
+        self.assertEqual(compose_stable(persona, expression_note=None),
+                         compose_stable(persona))
+
+    def test_empty_expression_note_adds_no_block(self):
+        persona = _persona()
+        self.assertEqual(compose_stable(persona, expression_note=""),
+                         compose_stable(persona))
+        self.assertNotIn("\n\n\n", compose_stable(persona, expression_note=""))
+
+    def test_note_sits_after_dna_rules_and_before_boundaries(self):
+        persona = _persona(voice_text=VOICE_TEXT, boundaries_text=BOUNDARIES_TEXT)
+        note = "NOTE-SENTINEL: one more way you can respond"
+        result = compose_stable(persona, expression_note=note)
+        i_dna = result.index("# The ground rules")
+        i_note = result.index(note)
+        i_boundaries = result.index("## Their boundaries, in their own words")
+        self.assertLess(i_dna, i_note)
+        self.assertLess(i_note, i_boundaries)
+
+    def test_note_present_without_boundaries_sits_last(self):
+        persona = _persona(boundaries_text="")
+        note = "NOTE-SENTINEL"
+        result = compose_stable(persona, expression_note=note)
+        self.assertLess(result.index("# The ground rules"), result.index(note))
+        self.assertNotIn("## Their boundaries, in their own words", result)
+        self.assertNotIn("\n\n\n", result)  # single blank line join, no stray gap
+
+    def test_note_and_stage_block_coexist_at_their_own_ends(self):
+        # The stage block leads (before the declaration); the note trails
+        # (after the ground rules) -- the two seams never interfere.
+        persona = _persona()
+        result = compose_stable(persona, stage_block="# Where the two of you are\nX",
+                                expression_note="NOTE-SENTINEL")
+        self.assertTrue(result.startswith("# Where the two of you are\nX\n\n# Who you are"))
+        self.assertLess(result.index("# The ground rules"), result.index("NOTE-SENTINEL"))
+
+
 _STAGES_MD = """\
 ## Settling in
 Early days: you are still learning each other's rhythms, and you let
@@ -263,6 +310,58 @@ class TestStageWiringThroughBuildSystemPrompt(unittest.TestCase):
             self.assertNotIn("# Where the two of you are", out_plain)
             self.assertTrue(out_off.startswith("# Who you are"))
             self.assertEqual(out_off, out_plain)
+
+
+class TestExpressionNoteWiringThroughBuildSystemPrompt(unittest.TestCase):
+    """N1 integration: build_system_prompt teaches the note in folder mode
+    when cfg.expression_tag_taught, and never in file mode (the L1
+    persona-rollback path). Real temp persona folders and the real clock,
+    matching TestStageWiringThroughBuildSystemPrompt's conventions."""
+
+    def setUp(self):
+        reset_persona_cache()
+        self.addCleanup(reset_persona_cache)
+
+    def _write_folder(self, root: Path) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "identity.md").write_text(
+            "I am Alex: warm, steady, always half a page ahead in the book.",
+            encoding="utf-8")
+        (root / "settings.yaml").write_text(
+            "companion:\n  name: Alex\npartner:\n  name: Sam\n",
+            encoding="utf-8")
+        return root
+
+    def _cfg(self, persona_path: Path, data_dir: Path, **overrides) -> Config:
+        return Config(bot_token="x", authorized_user_id=1,
+                      persona_path=persona_path, data_dir=data_dir, **overrides)
+
+    def test_folder_mode_flag_on_teaches_the_note(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona")
+            cfg = self._cfg(folder, Path(td) / "state", album_enabled=True)
+            out = build_system_prompt(cfg)
+            self.assertIn("One more way you can respond", out)
+            # It lands after the ground rules (a behavioral-layer footnote).
+            self.assertLess(out.index("# The ground rules"),
+                            out.index("One more way you can respond"))
+
+    def test_folder_mode_flag_off_omits_the_note(self):
+        # expression_tag_taught aliases the album flag: off -> not taught, an
+        # L1 pin at the outer build_system_prompt layer.
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona")
+            cfg = self._cfg(folder, Path(td) / "state", album_enabled=False)
+            out = build_system_prompt(cfg)
+            self.assertNotIn("One more way you can respond", out)
+
+    def test_file_mode_never_teaches_the_note(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "p.md"
+            p.write_text("You are Testbot.", encoding="utf-8")
+            cfg = self._cfg(p, Path(td) / "state", album_enabled=True)
+            out = build_system_prompt(cfg)
+            self.assertNotIn("One more way you can respond", out)
 
 
 # Reference copy for TestGoldenCopyPins below: extracted programmatically from
@@ -393,9 +492,16 @@ _REFERENCE_LIVING_LINE_LONG_DISTANCE = """You live apart for now. Distance is pa
 _REFERENCE_BOUNDARIES_TEMPLATE = """## Their boundaries, in their own words
 
 {boundaries_text}"""
+_REFERENCE_EXPRESSION_NOTE = """One more way you can respond: begin a reply with
+`[react:emoji]` (for example `[react:❤️]`) to place that emoji on the
+message they just sent, the way anyone taps a reaction. Use it when a
+feeling fits better as a gesture than as words — sparingly, so it keeps
+meaning. The tag must be the very first thing in the reply; the rest of
+your message follows right after it, or you may send the tag alone when
+the gesture says enough."""
 
 
-# These five constants are owner-approved product copy: any edit must be deliberate and re-approved.
+# These six constants are owner-approved product copy: any edit must be deliberate and re-approved.
 class TestGoldenCopyPins(unittest.TestCase):
     def test_declaration_template_pin(self):
         self.assertEqual(DECLARATION_TEMPLATE, _REFERENCE_DECLARATION_TEMPLATE)
@@ -411,6 +517,9 @@ class TestGoldenCopyPins(unittest.TestCase):
 
     def test_boundaries_template_pin(self):
         self.assertEqual(BOUNDARIES_TEMPLATE, _REFERENCE_BOUNDARIES_TEMPLATE)
+
+    def test_expression_note_pin(self):
+        self.assertEqual(EXPRESSION_NOTE, _REFERENCE_EXPRESSION_NOTE)
 
 
 class TestAlbumNeverEntersPrompt(unittest.TestCase):

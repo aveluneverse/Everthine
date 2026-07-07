@@ -120,6 +120,13 @@ class Config:
     def reflection_state_path(self) -> Path:
         return self.data_dir / "reflection_state.json"
 
+    @property
+    def expression_tag_taught(self) -> bool:
+        """Whether the persona gets taught the [react:emoji] reply syntax.
+        A neutral alias: the prompt layer reads this name and stays
+        ignorant of which feature backs it."""
+        return self.album_enabled
+
 
 def load_config(env: Mapping | None = None) -> Config:
     if env is None:

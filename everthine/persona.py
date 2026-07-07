@@ -84,9 +84,16 @@ def build_system_prompt(cfg: Config, memory_block: str | None = None,
             except Exception:
                 logger.warning("stage block failed; continuing without it",
                                exc_info=True)
+        # The [react:emoji] teaching note, gated on the neutral config alias
+        # so this module never learns which runtime feature the syntax feeds.
+        # Lazy import: layers imports Persona from here, so a top-level import
+        # would be circular (same reason assemble_folder_prompt imports late).
+        from .layers import EXPRESSION_NOTE
+        expression_note = EXPRESSION_NOTE if cfg.expression_tag_taught else None
         return assemble_folder_prompt(
             persona_obj, now_naive, last_contact, first_today, memory_block,
-            stage_block=stage_blk, inner_block=inner_block)
+            stage_block=stage_blk, inner_block=inner_block,
+            expression_note=expression_note)
 
     # --- Legacy file mode: pinned byte-for-byte (do not "improve") ---------
     # Per-call read, strip, non-empty -> return verbatim; otherwise fall back.
@@ -598,6 +605,7 @@ def assemble_folder_prompt(
     memory_block: str | None = None,
     stage_block: str | None = None,
     inner_block: str | None = None,
+    expression_note: str | None = None,
 ) -> str:
     """Join the static Layer 1/2 composition and the dynamic Layer 3 block with
     a single blank line. Pure and deterministic given its arguments -- directly
@@ -610,9 +618,12 @@ def assemble_folder_prompt(
     `stage_block` (optional, default None) threads straight through to
     compose_stable(), which prepends it ahead of the declaration when truthy
     and is a no-op (byte-identical to the pre-M4 composition) when it is None
-    or empty. Building the blocks -- reading stage state off disk, calling
-    stages.stage_block() -- is build_system_prompt()'s job; this function
-    stays pure and does no I/O of its own.
+    or empty. `expression_note` (optional, default None) threads through the
+    same way and lands after the ground rules (a behavioral-layer footnote),
+    with the identical None/empty no-op contract. Building the blocks --
+    reading stage state off disk, calling stages.stage_block(), choosing
+    whether to teach the note -- is build_system_prompt()'s job; this
+    function stays pure and does no I/O of its own.
     """
     # layers and dynamic_context both import from persona at module load, so a
     # top-level import here would be circular; import them lazily at call time,
@@ -620,7 +631,8 @@ def assemble_folder_prompt(
     from .dynamic_context import build_dynamic_context
     from .layers import compose_stable
 
-    return (compose_stable(persona_obj, stage_block=stage_block) + "\n\n"
+    return (compose_stable(persona_obj, stage_block=stage_block,
+                           expression_note=expression_note) + "\n\n"
             + build_dynamic_context(
                 persona_obj.settings, now_naive, last_contact, first_today,
                 memory_block, inner_block=inner_block))

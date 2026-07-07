@@ -153,8 +153,26 @@ BOUNDARIES_TEMPLATE = """## Their boundaries, in their own words
 
 {boundaries_text}"""
 
+# --- Expression note: an optional behavioral-layer footnote -------------
 
-def compose_stable(persona: Persona, stage_block: str | None = None) -> str:
+# Owner-approved product copy (verbatim -- the ❤️ and backticks are part of
+# the approved wording, not decoration): one more shape a reply may take,
+# taught as a closing note after the ground rules. compose_stable() slots
+# it in as its own block, after DNA_RULES and before any boundaries, only
+# when a truthy note is passed; whether to teach it at all is the caller's
+# decision (build_system_prompt gates it on a neutral config alias), so
+# this module never learns which runtime feature the syntax feeds.
+EXPRESSION_NOTE = """One more way you can respond: begin a reply with
+`[react:emoji]` (for example `[react:❤️]`) to place that emoji on the
+message they just sent, the way anyone taps a reaction. Use it when a
+feeling fits better as a gesture than as words — sparingly, so it keeps
+meaning. The tag must be the very first thing in the reply; the rest of
+your message follows right after it, or you may send the tag alone when
+the gesture says enough."""
+
+
+def compose_stable(persona: Persona, stage_block: str | None = None,
+                   expression_note: str | None = None) -> str:
     """Compose Layer 1 + Layer 2 (+ boundaries) for a folder-mode persona,
     with an optional relationship-stage block prepended ahead of everything
     else.
@@ -173,6 +191,14 @@ def compose_stable(persona: Persona, stage_block: str | None = None) -> str:
     composition. Building the block (reading stage state, calling
     stages.stage_block()) is the caller's job -- this function does no I/O
     and does not import the stages module.
+
+    `expression_note` (optional, default None) is the behavioral-layer seam:
+    when truthy, it becomes its own block right after the ground rules and
+    before any boundaries -- a closing note on the expressive layer, sitting
+    below the DNA it extends. None or "" adds nothing, byte-identical to the
+    composition without it (the golden pins guard the note text; the
+    seam-silence contract is guarded separately). The caller decides whether
+    to pass EXPRESSION_NOTE at all.
 
     `persona.settings.living` must be "together" or "long_distance";
     anything else raises ValueError naming the offending value. The loader
@@ -209,6 +235,9 @@ def compose_stable(persona: Persona, stage_block: str | None = None) -> str:
     else:
         raise ValueError(f"unknown living value: {persona.settings.living!r}")
     blocks.append(DNA_RULES.format(living_line=living_line))
+
+    if expression_note:
+        blocks.append(expression_note)
 
     if persona.boundaries_text:
         blocks.append(BOUNDARIES_TEMPLATE.format(boundaries_text=persona.boundaries_text))

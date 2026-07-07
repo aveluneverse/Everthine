@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from everthine import archive, bot
+from everthine import archive, bot, messages
 from everthine.config import Config
 from everthine.engine import EngineReply
 from everthine.session_store import SessionStore
@@ -29,6 +29,16 @@ class FakeEngineFail:
 class FakeEngineReact:
     def run_once(self, cfg, prompt, session_id=None, system_prompt=None):
         return EngineReply("[react:❤️] warm", "sess-react", ok=True)
+
+
+class FakeEngineTagOnly:
+    def run_once(self, cfg, prompt, session_id=None, system_prompt=None):
+        return EngineReply("[react:❤️]", "sess-tagonly", ok=True)
+
+
+class FakeEngineEmptyText:
+    def run_once(self, cfg, prompt, session_id=None, system_prompt=None):
+        return EngineReply("", "sess-empty", ok=True)
 
 
 class TestProduceReply(unittest.TestCase):
@@ -79,6 +89,28 @@ class TestProduceReply(unittest.TestCase):
         self.assertIn("warm", texts)
         for t in texts:
             self.assertNotIn("[react:", t)
+
+    def test_tag_only_reply_returns_empty_and_fires_react_sink(self):
+        # N4: a reply that is JUST a gesture (the whole text is the tag) is
+        # not a glitch -- produce_reply returns no chunks, and the captured
+        # emoji still reaches the on_react sink so the reaction can land.
+        sink = []
+        chunks = bot.produce_reply(self.cfg, self.store, "hi", now=NOW,
+                                   engine_mod=FakeEngineTagOnly(),
+                                   on_react=sink.append)
+        self.assertEqual(chunks, [])
+        self.assertEqual(sink, ["❤️"])
+        # Nothing was said, so no companion text entered the archive.
+        texts = [e["text"] for e in archive.iter_entries(self.cfg.archive_dir)]
+        for t in texts:
+            self.assertNotIn("[react:", t)
+
+    def test_empty_reply_without_tag_still_glitches(self):
+        # The pre-N4 semantic pin must not regress: a genuinely empty reply
+        # with no tag is still a glitch apology, never an empty list.
+        chunks = bot.produce_reply(self.cfg, self.store, "hi", now=NOW,
+                                   engine_mod=FakeEngineEmptyText())
+        self.assertEqual(chunks, [messages.msg("generic_glitch")])
 
 
 class TestExtractReact(unittest.TestCase):

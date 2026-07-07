@@ -139,11 +139,16 @@ class FakeMessage:
         self.replies = []
         self.edits = []
         self.reactions_set = []
+        # N4: a tag-only streamed reply deletes its placeholder.
+        self.deleted = False
 
     async def reply_text(self, text, parse_mode=None, reply_markup=None):
         reply = FakeMessage(text)
         self.replies.append(reply)
         return reply
+
+    async def delete(self):
+        self.deleted = True
 
     async def edit_text(self, text, parse_mode=None, reply_markup=None):
         self.edits.append(text)
@@ -359,6 +364,25 @@ class TestReflectionHookStreaming(unittest.TestCase):
         self.assertEqual(args[1], "did you sleep okay last night, love?")
         self.assertEqual(args[2], "I did, thank you.")  # display.full_text
         self.assertIsNotNone(args[3].utcoffset())
+
+    def test_tag_only_reply_fires_no_reflection(self):
+        # A tag-only success has empty display.full_text -- a gesture, with
+        # no language to reflect on. The empty-text gate must skip it even
+        # though the turn itself SUCCEEDED (contrast test_success above,
+        # which fires on real language).
+        cfg = _folder_cfg(self.root, streaming_enabled=True)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her = FakeMessage("i love you")
+        context = FakeContext()
+        with mock.patch.object(reflection, "reflect_once") as reflect, \
+             mock.patch.object(engine, "stream_once",
+                               ScriptedEngine(ok_script(["[react:❤️]"])).stream_once):
+            asyncio.run(on_text(FakeUpdate(her), context))
+        self.assertEqual(context.application.created, [])
+        reflect.assert_not_called()
+        # The placeholder was deleted, not left on the waiting line.
+        self.assertTrue(her.replies[0].deleted)
 
     def test_cancelled_turn_fires_no_reflection(self):
         cfg = _folder_cfg(self.root, streaming_enabled=True)

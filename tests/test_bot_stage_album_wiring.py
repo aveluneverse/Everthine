@@ -74,7 +74,8 @@ from telegram.error import BadRequest
 from telegram.ext import (CallbackQueryHandler, CommandHandler,
                           MessageHandler, MessageReactionHandler)
 
-from everthine import album, bot, engine, memory_embed, memory_recall, messages, persona, stages
+from everthine import (album, archive, bot, engine, memory_embed,
+                       memory_recall, messages, persona, stages)
 from everthine.config import Config
 from everthine.engine import EngineReply
 
@@ -158,12 +159,19 @@ class FakeMessage:
         # message, never an edit of this one).
         self.markup_edits: list = []
         self.markup = None
+        # N4: a tag-only streamed reply deletes its placeholder instead of
+        # leaving it stuck on the waiting line -- recorded so the e2e test
+        # can pin the deletion. No T7/T8 scenario above reads this.
+        self.deleted = False
 
     async def reply_text(self, text, parse_mode=None, reply_markup=None):
         reply = FakeMessage(text)
         reply.markup = reply_markup
         self.replies.append(reply)
         return reply
+
+    async def delete(self):
+        self.deleted = True
 
     async def edit_text(self, text, parse_mode=None, reply_markup=None):
         # Mirrors real PTB semantics: an edit returns a NEW Message and
@@ -657,6 +665,63 @@ class TestStreamingPathReactionWiring(_AlbumWiringTestCase):
         # object's own .text is still the thinking line, so the cache
         # demonstrably stored display.message_texts, not message.text.
         self.assertNotEqual(texts[placeholder.message_id], placeholder.text)
+
+
+# --- N4: the tag-only reply (the reaction IS the whole response). Both
+#     paths must delete/skip the placeholder rather than leave it stuck on
+#     the waiting line or degrade to a glitch apology, while the reaction
+#     still lands and nothing tag-shaped reaches the conversation archive. --
+
+class TestTagOnlyReplyWiring(_AlbumWiringTestCase):
+    _GLITCHES = ("generic_glitch", "nonzero", "timeout", "cli_missing")
+
+    def _assert_no_glitch(self, replies):
+        glitch_texts = {messages.msg(k) for k in self._GLITCHES}
+        for reply in replies:
+            self.assertNotIn(reply.text, glitch_texts)
+
+    def test_streamed_tag_only_deletes_placeholder_and_keeps_reaction(self):
+        cfg = self._cfg(streaming_enabled=True)
+        app, her_message = self._drive_stream(
+            cfg, ok_script(["[react:❤️]"]), text="I love you")
+
+        # Only the placeholder was ever sent, and it was deleted -- never
+        # left stuck on the thinking line, never a glitch apology.
+        self.assertEqual(len(her_message.replies), 1)
+        placeholder = her_message.replies[0]
+        self.assertTrue(placeholder.deleted)
+        self._assert_no_glitch(her_message.replies)
+        # The reaction still landed on her message and the heart was kept.
+        self.assertEqual(her_message.reactions_set, [[ReactionTypeEmoji("❤️")]])
+        entries = album.all_entries(cfg)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["direction"], "companion_flagged")
+        # The gesture said everything: no companion line entered the archive.
+        companion = [e for e in archive.iter_entries(cfg.archive_dir)
+                     if e["speaker"] == "companion"]
+        self.assertEqual(companion, [])
+
+    def test_nonstreaming_tag_only_sends_no_text_but_consumes_reaction(self):
+        cfg = self._cfg()  # streaming off (base default)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her_message = FakeMessage("I love you")
+        update = FakeUpdate(her_message)
+        with mock.patch.object(
+                engine, "run_once",
+                return_value=EngineReply("[react:❤️]", "sess-tagonly", ok=True)):
+            asyncio.run(on_text(update, FakeContext()))
+
+        # Zero reply_text sent -- the gesture is the whole message.
+        self.assertEqual(her_message.replies, [])
+        # ...but the reaction was consumed and the heart kept.
+        self.assertEqual(her_message.reactions_set, [[ReactionTypeEmoji("❤️")]])
+        entries = album.all_entries(cfg)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["direction"], "companion_flagged")
+        companion = [e for e in archive.iter_entries(cfg.archive_dir)
+                     if e["speaker"] == "companion"]
+        self.assertEqual(companion, [])
 
 
 # --- _message_cache's own lazy pruning: MESSAGE_CACHE_TTL_S and

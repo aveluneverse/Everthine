@@ -181,6 +181,14 @@ class StreamingDisplay:
 
     async def finalize(self) -> list:
         await self._flush_pending_react_head()
+        if not self._full_text and self._reaction_emoji is not None:
+            # A tag-only reply: the reaction IS the response. Delete the
+            # placeholder instead of leaving it stuck on the waiting line.
+            try:
+                await self._current_msg.delete()
+            except Exception:
+                logger.warning("tag-only placeholder delete failed", exc_info=True)
+            return []
         if len(self._current_buffer) > self._displayed_len:
             await self._do_edit()
         if self._current_buffer:

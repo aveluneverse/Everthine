@@ -135,6 +135,49 @@ class TestReactTag(unittest.TestCase):
         self.assertEqual(d.full_text, "[rea")
 
 
+class TestTagOnlyFinalize(unittest.IsolatedAsyncioTestCase):
+    """N4: a tag-only reply (the gesture IS the whole response) must delete
+    the placeholder instead of leaving it stuck on the waiting line, and
+    return an empty message list so no cache/archive entry is fabricated.
+    A genuinely empty reply with NO captured tag keeps the old behavior
+    (the placeholder survives for the caller's own fallback)."""
+
+    async def test_tag_only_finalize_deletes_placeholder_and_returns_empty(self):
+        d, msg0, _ = make_display()
+        await d.append("[react:❤️]")
+        messages = await d.finalize()
+        self.assertEqual(messages, [])
+        self.assertTrue(msg0.deleted)
+        self.assertEqual(d.message_texts, [])
+        self.assertEqual(d.reaction_emoji, "❤️")
+        self.assertEqual(d.full_text, "")
+
+    async def test_tag_only_finalize_swallows_delete_failure(self):
+        class DeleteFails(FakeMessage):
+            async def delete(self):
+                raise RuntimeError("delete boom")
+
+        msg0 = DeleteFails()
+        d = StreamingDisplay(msg0, FakeSender())
+        d._edit_interval = 0.0
+        await d.append("[react:❤️]")
+        with self.assertLogs("everthine", level="WARNING"):
+            messages = await d.finalize()
+        self.assertEqual(messages, [])
+        self.assertEqual(d.message_texts, [])
+        self.assertEqual(d.reaction_emoji, "❤️")
+
+    async def test_empty_reply_no_tag_keeps_placeholder(self):
+        # No text, no tag: the tag-only branch must NOT fire -- the
+        # placeholder survives (the caller shows its own glitch fallback),
+        # exactly as before this task.
+        d, msg0, _ = make_display()
+        messages = await d.finalize()
+        self.assertFalse(msg0.deleted)
+        self.assertEqual(messages, [msg0])
+        self.assertIsNone(d.reaction_emoji)
+
+
 class TestPureHelpers(unittest.TestCase):
     def test_sentence_boundary(self):
         self.assertTrue(has_sentence_boundary("Done. Next"))

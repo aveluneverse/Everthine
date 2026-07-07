@@ -205,7 +205,11 @@ def produce_reply(cfg: Config, store: SessionStore, text: str,
     out = chunking.split_message(cleaned)
     if store.detect_bloat(cfg, reply.session_id):
         out.append(msg("notebook_full"))
-    return out or [msg("generic_glitch")]
+    if out:
+        return out
+    if emoji is not None:
+        return []          # tag-only: the reaction is the whole response
+    return [msg("generic_glitch")]
 
 
 async def stream_reply(cfg: Config, store: SessionStore, text: str,
@@ -928,14 +932,14 @@ def make_app(cfg: Config):
                 if react_sink:
                     # Success signal (the same one _consume_react's docstring
                     # names): produce_reply's failure path early-returns
-                    # before its on_react sink ever fires. Known transitional
-                    # bloat, accepted rather than patched here: chunks may
-                    # carry a trailing notebook_full system line (a later
-                    # task moves it out of the chunk list), and a tag-only
-                    # success is currently [generic_glitch] (a later task
-                    # returns it to an empty list, at which point the
-                    # empty-join gate inside _schedule_reflection skips it
-                    # naturally).
+                    # before its on_react sink ever fires. A tag-only success
+                    # returns an empty chunk list, so "\n".join is "" and the
+                    # empty-text gate inside _schedule_reflection skips it
+                    # naturally -- a gesture has no language to reflect on.
+                    # Known transitional bloat, accepted rather than patched
+                    # here: chunks may still carry a trailing notebook_full
+                    # system line (a later task moves it out of the chunk
+                    # list).
                     _schedule_reflection(context, cfg, update.message.text,
                                          "\n".join(chunks))
                     if cfg.diary_enabled:
