@@ -180,6 +180,15 @@ def _reaction_emoji_set(reactions) -> set[str]:
 def produce_reply(cfg: Config, store: SessionStore, text: str,
                   now: datetime | None = None, engine_mod=engine,
                   on_react=None, on_extra=None) -> list:
+    """Build the non-streaming reply: the plain chunk list every caller
+    already depends on, plus two opt-in side channels (on_react, on_extra).
+
+    Trap: on_extra is the ONLY exit for the "notebook full" SYSTEM notice.
+    When on_extra is None that notice is silently dropped -- never folded
+    into the returned chunk list, because a system line must not ride home
+    as companion speech (T7a). A future caller that wants the notice must
+    pass a sink to receive it.
+    """
     now = now or datetime.now().astimezone()
     prompt, data, memory_block, inner_block = prepare_exchange(cfg, store, text, now)
 
@@ -549,11 +558,14 @@ async def register_commands(app) -> None:
     cfg says they should exist at all -- the same _stage_registration_active
     condition their CommandHandler was registered under, and cfg.album_enabled
     for /album. cfg travels here through app.bot_data["cfg"] rather than a
-    parameter: this function is handed to ApplicationBuilder().post_init
-    verbatim (make_app passes the bare function, never a cfg-bound wrapper),
-    because a test (test_bot_stream.py's test_post_init_registers_command_menu)
-    pins that the object handed to .post_init(...) IS this exact function
-    object. bot_data is PTB's own per-Application storage, sanctioned for
+    parameter: the composite post_init (what make_app hands to
+    ApplicationBuilder().post_init) awaits this with just `app`, never a
+    cfg-bound wrapper, so there is no parameter slot for it. The identity pin
+    sits on post_init now, not here: test_bot_stream.py's
+    test_post_init_registers_command_menu pins bot.post_init as the object
+    handed to .post_init(...), and test_post_init_awaits_register_commands
+    pins that post_init awaits this function in turn. bot_data is PTB's own
+    per-Application storage, sanctioned for
     exactly this kind of side channel. Every existing direct-call site
     (this project's own tests included) hands this a bare app with no
     bot_data attribute at all, which degrades to the original start-only

@@ -76,8 +76,8 @@ logger = logging.getLogger("everthine")
 DIARY_IDLE_MINUTES = 30          # she must be away this long before he writes
 DIARY_WINDOW_END_HOUR = 8        # the nightly window always closes at 08:00
 DIARY_MIN_INTERVAL_HOURS = 4     # min spacing between entries (matters when DIARY_MAX_DAILY > 1)
-DIARY_LOOKBACK_HOURS = 24        # how much conversation the page draws from (a later task uses this)
-DIARY_CONTEXT_MAX_CHARS = 24000  # material cap before tail-truncation (a later task uses this)
+DIARY_LOOKBACK_HOURS = 24        # how much conversation the page draws from (build_material's window)
+DIARY_CONTEXT_MAX_CHARS = 24000  # material cap before build_material tail-truncates
 DIARY_TIMEOUT_S = 90             # engine budget for one entry (write_once's call)
 
 _DIARY_FILENAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{6}\.json$")

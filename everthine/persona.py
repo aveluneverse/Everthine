@@ -117,18 +117,25 @@ _FORBIDDEN_LINE_KEYS = frozenset({"unauthorized_silence", "cli_missing"})
 # plus "thinking" (a rotating-placeholder list, handled separately below).
 _LINE_KEY_WHITELIST = (frozenset(messages._MESSAGES) - _FORBIDDEN_LINE_KEYS) | {"thinking"}
 _KNOWN_TOP_LEVEL_KEYS = frozenset({"companion", "partner", "relationship", "lines"})
-# Line-override keys whose value is rendered with .format(stage=...) at
-# button-press time (bot.py's stage views and acks). A persona that overrides
-# one with a broken format string -- a misspelled field ({stag}), a
-# positional {0}, an unbalanced brace -- would blow up only when that button
-# is finally pressed; validating the override at load time turns that into a
-# fail-loud boot error naming the key, like every other settings.yaml
-# mistake. A value with no placeholder at all is legal: str.format ignores an
-# absent field, so a persona may write a stage line that never interpolates
-# the name.
-_STAGE_FORMAT_KEYS = frozenset({
-    "stage_intro", "stage_advanced_ack", "stage_retreat_confirm",
-    "stage_retreated_ack"})
+# Line-override keys whose value is rendered with str.format() at button-press
+# time (bot.py's stage views and acks), mapped to the single named field each
+# one interpolates: the four stage-name lines fill {stage}, and
+# stage_road_clipped fills {n} (the count of collapsed milestones, shown only
+# once the road runs past its clip). A persona that overrides one with a broken
+# format string -- a misspelled field ({stag}), a positional {0}, an unbalanced
+# brace -- would blow up only when that view is finally rendered (and
+# stage_road_clipped later still: not until a history long enough to clip);
+# probing each override with its own field at load time turns that into a
+# fail-loud boot error naming the key, like every other settings.yaml mistake.
+# A value with no placeholder at all is legal: str.format ignores an absent
+# field, so a persona may write a line that never interpolates anything.
+_FORMAT_PROBE_KEYS = {
+    "stage_intro": {"stage": "probe"},
+    "stage_advanced_ack": {"stage": "probe"},
+    "stage_retreat_confirm": {"stage": "probe"},
+    "stage_retreated_ack": {"stage": "probe"},
+    "stage_road_clipped": {"n": 0},
+}
 _LIVING_VALUES = frozenset({"together", "long_distance"})
 _REUNION_VALUES = frozenset({"expressive", "gentle", "neutral"})
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -281,13 +288,15 @@ def _parse_lines(lines_section: dict) -> tuple[dict[str, str], list[str] | None]
         if not isinstance(value, str) or not value.strip():
             raise ConfigError(f"settings.yaml: lines.{key} must be a non-empty string")
         cleaned = value.strip()
-        if key in _STAGE_FORMAT_KEYS:
+        if key in _FORMAT_PROBE_KEYS:
+            probe = _FORMAT_PROBE_KEYS[key]
             try:
-                cleaned.format(stage="probe")
+                cleaned.format(**probe)
             except (KeyError, IndexError, ValueError) as exc:
+                field = next(iter(probe))
                 raise ConfigError(
                     f"settings.yaml: lines.{key} has an invalid format string "
-                    f"({exc!r}); it may use the {{stage}} placeholder or none "
+                    f"({exc!r}); it may use the {{{field}}} placeholder or none "
                     "at all, but nothing else") from exc
         lines[key] = cleaned
     return lines, thinking

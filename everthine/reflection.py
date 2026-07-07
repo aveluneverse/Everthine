@@ -335,10 +335,20 @@ def append_entry(cfg: Config, text: str, now: datetime) -> None:
     enough to be practically unique across a lifetime of reflections
     without the visual noise of a full UUID) and now's own isoformat
     timestamp, aware, so a later reader never has to guess its timezone.
+
+    The text's Unicode line separators (U+2028/U+2029/U+0085) are flattened to
+    spaces first, so the entry stays one physical line -- see the inline note
+    for why a raw one would silently lose the whole reflection.
     """
     path = Path(cfg.reflections_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    entry = {"id": uuid4().hex[:8], "created_at": now.isoformat(), "text": text}
+    # json.dumps(ensure_ascii=False) emits U+2028/U+2029/U+0085 raw, and the
+    # str.splitlines() prune reads the file back with treats all three as line
+    # boundaries: a text carrying one would be written as a single line that
+    # tears into two malformed halves on the next read, both pruned -- the
+    # reflection gone with no trace. Flatten them to a plain space first.
+    safe_text = text.translate({0x2028: " ", 0x2029: " ", 0x0085: " "})
+    entry = {"id": uuid4().hex[:8], "created_at": now.isoformat(), "text": safe_text}
     line = json.dumps(entry, ensure_ascii=False) + "\n"
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(line)
@@ -460,4 +470,5 @@ def reflect_once(cfg: Config, user_msg: str, reply_text: str, now: datetime) -> 
         record_written(cfg.reflection_state_path, now)
         logger.info("reflection: recorded")
     except Exception as exc:
-        logger.warning("reflection: swallowed %s: %s", type(exc).__name__, exc)
+        logger.warning("reflection: swallowed %s: %s", type(exc).__name__, exc,
+                       exc_info=True)

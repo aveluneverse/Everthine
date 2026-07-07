@@ -673,5 +673,65 @@ class TestMarkSharedTurnCounting(unittest.TestCase):
             mark.assert_not_called()   # diary off -> no counting, no page-turn
 
 
+# --- 9. Page-turn timing on the STREAMING path (streaming_enabled=True, the
+#        production default): a mirror of section 8, guarding bot.py's second
+#        counting site against one-sided drift from its non-streaming twin ----
+
+class TestMarkSharedTurnCountingStreaming(unittest.TestCase):
+    def setUp(self):
+        _install_resets(self)
+
+    def _app_and_handler(self, **overrides):
+        cfg = _folder_cfg(self.root, streaming_enabled=True,
+                          reflection_enabled=False, **overrides)
+        app = bot.make_app(cfg)
+        return cfg, _handler(app, MessageHandler)
+
+    def _drive_success(self, on_text, context, text="a good long message to reply to"):
+        with mock.patch.object(engine, "stream_once",
+                               ScriptedEngine(ok_script(["a warm ",
+                                                         "reply here."])).stream_once):
+            asyncio.run(on_text(FakeUpdate(FakeMessage(text)), context))
+
+    def _drive_failure(self, on_text, context, text="this message fails to reply now"):
+        # A stream that ends ok=False: mirrors section 4's failure script.
+        script = [{"type": "text", "text": "partial"},
+                  {"type": "done",
+                   "reply": EngineReply("partial", None, ok=False,
+                                        error_kind="nonzero")}]
+        with mock.patch.object(engine, "stream_once",
+                               ScriptedEngine(script).stream_once):
+            asyncio.run(on_text(FakeUpdate(FakeMessage(text)), context))
+
+    def test_fires_only_on_second_successful_stream(self):
+        cfg, on_text = self._app_and_handler(diary_enabled=True)
+        context = FakeContext()
+        with mock.patch.object(diary, "mark_shared") as mark:
+            self._drive_success(on_text, context)
+            mark.assert_not_called()       # after the 1st success: page still open
+            self._drive_success(on_text, context)
+            mark.assert_called_once()       # after the 2nd: pages turned
+            self.assertEqual(mark.call_args.args[0], cfg)
+
+    def test_failed_stream_never_counts(self):
+        cfg, on_text = self._app_and_handler(diary_enabled=True)
+        context = FakeContext()
+        with mock.patch.object(diary, "mark_shared") as mark:
+            self._drive_success(on_text, context)   # success #1
+            self._drive_failure(on_text, context)   # must NOT increment
+            mark.assert_not_called()
+            self._drive_success(on_text, context)   # success #2 -> now it fires
+            mark.assert_called_once()
+
+    def test_diary_flag_off_never_marks_shared(self):
+        cfg, on_text = self._app_and_handler(diary_enabled=False)
+        context = FakeContext()
+        with mock.patch.object(diary, "mark_shared") as mark:
+            self._drive_success(on_text, context)
+            self._drive_success(on_text, context)
+            self._drive_success(on_text, context)
+            mark.assert_not_called()   # diary off -> no counting, no page-turn
+
+
 if __name__ == "__main__":
     unittest.main()

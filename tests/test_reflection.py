@@ -268,6 +268,36 @@ class TestAppendEntry(unittest.TestCase):
         self.assertEqual(texts, ["a quiet thought", "another passing one"])
 
 
+class TestAppendEntrySeparatorSafety(unittest.TestCase):
+    """F6: json.dumps(ensure_ascii=False) emits U+2028/U+2029/U+0085 raw, and
+    str.splitlines() -- the very splitter prune reads the file back with --
+    treats all three as line boundaries. A reflection whose text carried one
+    would be written as a single physical line that splits into two malformed
+    halves on the next read, and prune would drop both: the entry vanishes
+    silently. append_entry flattens the three to a single space before dumping."""
+
+    def test_all_three_separators_stay_one_line_and_round_trip(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            text = "first\u2028second\u2029third\u0085fourth"
+            reflection.append_entry(cfg, text, NOW)
+            raw = cfg.reflections_path.read_text(encoding="utf-8")
+        # One physical line by the SAME splitter prune reads the file with.
+        self.assertEqual(len(raw.splitlines()), 1)
+        entry = json.loads(raw.splitlines()[0])  # still legal JSON on its own
+        self.assertEqual(entry["text"], "first second third fourth")
+
+    def test_sanitized_entry_is_kept_by_prune(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            reflection.append_entry(cfg, "a thought\u2028split by a separator", NOW)
+            reflection.prune(cfg, NOW)  # fresh + well-shaped: must survive whole
+            lines = cfg.reflections_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])["text"],
+                         "a thought split by a separator")
+
+
 # ---------------------------------------------------------------------
 # prune: retention + malformed-line sweep, rewrite only when something drops
 # ---------------------------------------------------------------------
