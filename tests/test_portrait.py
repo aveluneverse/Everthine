@@ -561,6 +561,24 @@ class TestBuildMaterialReflectionFilter(unittest.TestCase):
         self.assertIn("REFLECTION05", material)
         self.assertIn("REFLECTION19", material)
 
+    def test_invalid_utf8_reflections_file_degrades_to_empty(self):
+        # A corrupt-encoding reflections.jsonl raises UnicodeDecodeError (a
+        # ValueError subclass) out of read_text; build_material must still
+        # assemble from the diary alone rather than let the error escape and
+        # make the inner-life tick log a failure every round until it's fixed.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            _write_diary_entry(cfg, "2026-07-05_090000.json", date="2026-07-05",
+                               content="DIARY_SURVIVES the unreadable reflections file")
+            cfg.reflections_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg.reflections_path.write_bytes(b"\xff\xfe not utf8")
+            with self.assertLogs("everthine", level="WARNING") as cm:
+                material = portrait.build_material(cfg, None)
+        self.assertIsNotNone(material)
+        self.assertIn("DIARY_SURVIVES the unreadable reflections file", material)
+        self.assertNotIn(portrait.REFLECTION_HEADER, material)
+        self.assertTrue(any("reflections unreadable" in line.lower() for line in cm.output))
+
 
 class TestBuildMaterialNoneGuard(unittest.TestCase):
     def test_no_diary_no_reflection_returns_none_even_with_previous(self):
@@ -793,7 +811,8 @@ class TestUpdateOnce(unittest.TestCase):
     def test_success_saves_snapshot_and_pins_engine_kwargs(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = self._folder_cfg(td)
-            _write_diary_entry(cfg, "2026-07-06_090000.json", date=TODAY, content="today")
+            _write_diary_entry(cfg, "2026-07-06_090000.json", date=TODAY,
+                               content="DIARY_MATERIAL_SENTINEL a quiet, ordinary day")
             good = EngineReply(
                 '{"content": "who I am lately, in my own words", '
                 '"opinions": [{"topic": "mornings", "opinion": "underrated"}], '
@@ -814,6 +833,9 @@ class TestUpdateOnce(unittest.TestCase):
         self.assertIsNone(kwargs["session_id"])
         self.assertEqual(kwargs["timeout_s"], portrait.PORTRAIT_TIMEOUT_S)
         self.assertIn("# Who you are, lately", kwargs["system_prompt"])
+        # the assembled material reached the engine as the positional prompt
+        # argument (args after cfg) -- a wrong-string wiring slip must fail here
+        self.assertIn("DIARY_MATERIAL_SENTINEL a quiet, ordinary day", run.call_args.args[1])
         self._assert_logged_at(cm, "INFO", f"portrait: updated (version {TODAY})")
 
 
@@ -911,6 +933,16 @@ class TestPortraitBlock(unittest.TestCase):
         self.assertNotIn("only opinion", block)
         self.assertNotIn("num topic", block)
         self.assertEqual(block.count("\n- "), 2)  # exactly the two well-shaped
+
+    def test_all_malformed_opinions_suppresses_dangling_header(self):
+        # A NON-empty opinions list whose every element is malformed leaves
+        # opinion_lines empty: the Positions header must be suppressed, not
+        # left dangling over nothing. (Distinct from the empty-list and
+        # not-a-list branches above, which never enter the per-item loop.)
+        block = portrait.portrait_block(
+            {"content": "CONTENT_SENTINEL just me", "opinions": [{"topic": 1}, "x", {}]})
+        self.assertIn("CONTENT_SENTINEL just me", block)
+        self.assertNotIn("Positions you have come to hold:", block)
 
     def test_observations_never_enter_block(self):
         block = portrait.portrait_block({

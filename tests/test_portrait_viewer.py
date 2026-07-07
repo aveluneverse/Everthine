@@ -42,7 +42,10 @@ class PortraitViewerTest(unittest.TestCase):
         (self.history_dir / name).write_text(text, encoding="utf-8")
 
     def _run(self):
-        return portrait_viewer.main(["--data-dir", str(self.data_dir)])
+        # main() prints the output path; keep it out of the test runner's
+        # stdout so a full-suite run stays print-clean (dots/summary only).
+        with contextlib.redirect_stdout(io.StringIO()):
+            return portrait_viewer.main(["--data-dir", str(self.data_dir)])
 
     def _html(self):
         return self.out.read_text(encoding="utf-8")
@@ -202,12 +205,35 @@ class PortraitViewerTest(unittest.TestCase):
         html = self._html()
         self.assertNotIn("http://", html)
         self.assertNotIn("https://", html)
+        # by design the page carries no images, scripts, or links: pin the
+        # absence of every external-resource vector, not just bare URLs.
+        self.assertNotIn("url(", html)
+        self.assertNotIn("<link", html)
+        self.assertNotIn("<script src", html)
+        self.assertNotIn("src=", html)
 
     def test_no_external_references_on_empty_page(self):
         self._run()
         html = self._html()
         self.assertNotIn("http://", html)
         self.assertNotIn("https://", html)
+        self.assertNotIn("url(", html)
+        self.assertNotIn("<link", html)
+        self.assertNotIn("<script src", html)
+        self.assertNotIn("src=", html)
+
+    def test_positions_render_topic_only_and_opinion_only(self):
+        # _render_positions renders a lenient one-part <li> for a hand-edited
+        # element that carries only a topic string, or only an opinion string.
+        self._seed("2026-07-01.json",
+                   _snapshot("2026-07-01", "body text",
+                             opinions=[{"topic": "TOPIC_ONLY_ITEM"},
+                                       {"opinion": "OPINION_ONLY_ITEM"}]))
+        self._run()
+        html = self._html()
+        self.assertIn("Positions", html)
+        self.assertIn('<span class="topic">TOPIC_ONLY_ITEM</span>', html)
+        self.assertIn("OPINION_ONLY_ITEM", html)
 
     def test_prints_output_path(self):
         self._seed("2026-07-01.json", _snapshot("2026-07-01", "x"))

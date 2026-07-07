@@ -67,19 +67,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger("everthine")
 
 # --- Module constants ---------------------------------------------------
-# Several of these have no consumer yet -- build_material and the prompt
-# that reads opinions/observations back out arrive in T3, the engine call's
-# own timeout in T4. Declaring them here, ahead of their first use, is by
-# design: the values are part of this milestone's contract, not dead code.
 
-PORTRAIT_RECENT_DIARY = 7           # how many recent diary entries a snapshot digests (T3)
-PORTRAIT_RECENT_REFLECTIONS = 15    # how many recent reflection lines a snapshot digests (T3)
-PORTRAIT_TIMEOUT_S = 120            # engine budget for composing one snapshot (T4)
+PORTRAIT_RECENT_DIARY = 7           # how many recent diary entries build_material digests
+PORTRAIT_RECENT_REFLECTIONS = 15    # how many recent reflection lines build_material digests
+PORTRAIT_TIMEOUT_S = 120            # engine budget for update_once's one compose call
 PORTRAIT_CONTENT_MAX_CHARS = 4000   # save_portrait's tail-truncation cap on `content`
-PORTRAIT_DIARY_SNIPPET_CHARS = 200  # per-entry diary snippet length fed into material (T3)
+PORTRAIT_DIARY_SNIPPET_CHARS = 200  # per-entry diary snippet length build_material feeds in
 PORTRAIT_OPINIONS_STORED_CAP = 10   # save_portrait's cap on stored `opinions`
 PORTRAIT_OBSERVATIONS_STORED_CAP = 10  # save_portrait's cap on stored `observations`
-PORTRAIT_OPINIONS_PROMPT_CAP = 5    # how many stored opinions resurface in a live prompt (T3)
+PORTRAIT_OPINIONS_PROMPT_CAP = 5    # how many stored opinions resurface in the live Layer 1 block (portrait_block)
 
 
 # ---------------------------------------------------------------------
@@ -153,9 +149,9 @@ def _atomic_write(path: Path, data: dict) -> None:
 
 def _clean_opinions(raw) -> list:
     """Keep only well-shaped {"topic": str, "opinion": str} elements for
-    save_portrait's `opinions` field. Any extra keys an element carries
-    beyond those two are dropped along with it being kept; anything not a
-    dict, or a dict missing either string field, is discarded outright.
+    save_portrait's `opinions` field. A well-shaped element is kept, but only
+    its two string fields -- any extra keys it carries are dropped; anything
+    not a dict, or a dict missing either string field, is discarded outright.
     Capped at PORTRAIT_OPINIONS_STORED_CAP, keeping the first entries in
     caller order."""
     if not isinstance(raw, list):
@@ -364,14 +360,24 @@ def _recent_reflection_texts(cfg: Config, count: int) -> list:
     Deliberately does NOT import reflection.py's private _keep_line: the module
     boundary stays clean, and a portrait needs only the text, not the
     freshness/timestamp checks a prune pass cares about. A missing file (the
-    ordinary case before the first reflection is ever written) or a
-    non-positive count is an empty list.
+    ordinary case before the first reflection is ever written), an unreadable
+    one (bad UTF-8 bytes, or a permission/TOCTOU error between the exists()
+    check and the read -- logged once, then skipped), or a non-positive count
+    is an empty list.
     """
     path = Path(cfg.reflections_path)
     if count <= 0 or not path.exists():
         return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        # Corrupt encoding (UnicodeDecodeError, a ValueError subclass) or a
+        # permission/TOCTOU error (OSError) between exists() and the read
+        # degrades to no reflections rather than crashing the inner-life tick.
+        logger.warning("portrait: reflections unreadable (%s)", exc)
+        return []
     texts = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in raw.splitlines():
         try:
             data = json.loads(line)
         except json.JSONDecodeError:
