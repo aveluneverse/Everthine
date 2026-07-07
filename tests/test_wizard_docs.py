@@ -167,5 +167,19 @@ class TestClaudeMd(WizardDocMixin, unittest.TestCase):
         self.assertIn("everthine-troubleshoot", text)
 
 
+class TestReadme(WizardDocMixin, unittest.TestCase):
+    DOC = README
+
+    def test_one_line_start_present(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("Set me up", text)
+        self.assertIn("幫我開始", text)
+
+    def test_bootstrap_section_for_claude_code(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("If you are Claude Code", text)
+        self.assertIn("git clone", text)
+
+
 if __name__ == "__main__":
     unittest.main()
