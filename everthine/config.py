@@ -79,6 +79,8 @@ class Config:
     diary_window_start_hour: int = 21
     diary_max_daily: int = 1
     reflection_daily_cap: int = 12
+    portrait_enabled: bool = True
+    portrait_interval_days: int = 7
 
     @property
     def engine_home(self) -> Path:
@@ -119,6 +121,14 @@ class Config:
     @property
     def reflection_state_path(self) -> Path:
         return self.data_dir / "reflection_state.json"
+
+    @property
+    def portrait_path(self) -> Path:
+        return self.data_dir / "portrait.json"
+
+    @property
+    def portrait_history_dir(self) -> Path:
+        return self.data_dir / "portrait_history"
 
     @property
     def expression_tag_taught(self) -> bool:
@@ -181,4 +191,6 @@ def load_config(env: Mapping | None = None) -> Config:
         diary_window_start_hour=_get_hour(env, "DIARY_WINDOW_START_HOUR", 21),
         diary_max_daily=_get_positive_int(env, "DIARY_MAX_DAILY", 1),
         reflection_daily_cap=_get_positive_int(env, "REFLECTION_DAILY_CAP", 12),
+        portrait_enabled=_get_bool(env, "PORTRAIT_ENABLED", True),
+        portrait_interval_days=_get_positive_int(env, "PORTRAIT_INTERVAL_DAYS", 7),
     )

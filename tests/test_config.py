@@ -193,5 +193,37 @@ class TestDiaryReflectionKnobs(unittest.TestCase):
                 self.assertIn(var, text)
 
 
+class TestPortraitKnobs(unittest.TestCase):
+    def test_defaults(self):
+        cfg = load_config(BASE)
+        self.assertIs(cfg.portrait_enabled, True)
+        self.assertEqual(cfg.portrait_interval_days, 7)
+
+    def test_paths_derive_from_data_dir(self):
+        cfg = load_config({**BASE, "DATA_DIR": "elsewhere"})
+        self.assertEqual(cfg.portrait_path, Path("elsewhere") / "portrait.json")
+        self.assertEqual(cfg.portrait_history_dir, Path("elsewhere") / "portrait_history")
+
+    def test_flag_and_interval_round_trip(self):
+        cfg = load_config({**BASE, "PORTRAIT_ENABLED": "false",
+                           "PORTRAIT_INTERVAL_DAYS": "14"})
+        self.assertIs(cfg.portrait_enabled, False)
+        self.assertEqual(cfg.portrait_interval_days, 14)
+
+    def test_bad_interval_raises(self):
+        for bad in ("0", "-5", "abc"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ConfigError):
+                    load_config({**BASE, "PORTRAIT_INTERVAL_DAYS": bad})
+
+    def test_env_example_documents_portrait_vars(self):
+        # Sibling of TestDiaryReflectionKnobs.test_env_example_documents_inner_life_vars,
+        # same shape: guards .env.example's 1:1 catalog for the portrait knobs.
+        text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        for var in ("PORTRAIT_ENABLED", "PORTRAIT_INTERVAL_DAYS"):
+            with self.subTest(var=var):
+                self.assertIn(var, text)
+
+
 if __name__ == "__main__":
     unittest.main()
