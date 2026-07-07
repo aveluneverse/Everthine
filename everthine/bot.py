@@ -52,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import queue
+import re
 import threading
 import time
 from datetime import datetime
@@ -1115,9 +1116,113 @@ def _allowed_updates(cfg: Config) -> list[str]:
     return updates
 
 
+# ---------------------------------------------------------------------
+# Root-logger token masking (M7 T7)
+# ---------------------------------------------------------------------
+
+# python-telegram-bot's underlying httpx client logs every outgoing request
+# at INFO, and long-polling's own getUpdates call embeds the complete bot
+# token in that URL, verbatim. Anyone who pastes their INFO-level log for
+# help (a support request, a GitHub issue, a terminal screenshot) hands
+# their live token to whoever reads it -- a real, repeated leak source this
+# pattern exists to close. It matches that URL shape wherever it appears in
+# a rendered log line: literal "bot", the numeric bot id, a colon, then a
+# secret of at least 30 URL-safe characters (a real Telegram secret runs
+# 35). Shape-only, on purpose: this project's own rule is that a token's
+# actual VALUE is never read by tooling that does not strictly need it, so
+# this cannot and does not compare against the real configured token.
+#
+# The trade-off that follows from matching by shape alone: the pattern is
+# NOT anchored to a word boundary before "bot", so an unrelated string that
+# merely CONTAINS that shape -- e.g. "androbot123456789:" followed by 30+
+# safe characters that are not a token at all -- would also get masked.
+# That is accepted deliberately: over-masking a look-alike costs one
+# slightly mangled log line; under-masking a real token costs the secret
+# itself. The >=30 floor is what keeps ordinary short text like
+# "bot123:short" (nowhere near a real secret's length) from ever matching.
+_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]{30,}")
+_TOKEN_MASK = "bot<TOKEN>"
+
+
+class TokenMaskFilter(logging.Filter):
+    """A logging.Filter that rewrites Telegram bot tokens by SHAPE in every
+    record it sees, wherever it is attached, and never drops one.
+
+    filter() always returns True. A logging.Filter's contract lets filter()
+    return False to drop a record entirely, but that is the wrong tool
+    here: this filter's whole job is to REWRITE a record in place, never to
+    decide what does or does not get logged -- conflating the two would
+    mean a bug in this filter could silently blind the app to real errors.
+    The same reasoning is why the body below never lets an exception
+    escape: record.getMessage() can itself raise (a %-style msg whose args
+    do not satisfy its own placeholders, or a msg object whose __str__
+    raises), and a filter that crashes on one malformed record would break
+    logging for that whole call site. Falling back to letting the record
+    through completely unmasked on any such trouble is the deliberate
+    choice -- one unmasked line is a far smaller cost than losing logging
+    altogether.
+
+    Attached at the HANDLER, not the logger -- see
+    _install_token_mask_filter's own docstring for why that distinction is
+    load-bearing here.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            text = record.getMessage()
+            masked = _TOKEN_RE.sub(_TOKEN_MASK, text)
+        except Exception:
+            return True
+        if masked != text:
+            # args are already consumed by getMessage()'s own %-expansion
+            # above; msg is now the final string, so args must be cleared,
+            # or a later getMessage() call (a handler's own formatter) would
+            # try to re-apply them to already-formatted text.
+            record.msg = masked
+            record.args = None
+        return True
+
+
+def _install_token_mask_filter() -> None:
+    """Attach a TokenMaskFilter to every handler on the root logger. Called
+    from main(), right after logging.basicConfig() -- kept as its own
+    function (mirroring _allowed_updates just above) so it is directly
+    testable without booting the whole application: main() itself calls
+    load_config() against real environment variables,
+    engine.check_claude_available() against a real Claude CLI subprocess,
+    and run_polling() blocks forever against live Telegram, none of which
+    belong anywhere near a unit test.
+
+    HANDLER-level, deliberately not logger-level: a filter added to a
+    Logger object only inspects records logged directly ON that logger.
+    httpx and python-telegram-bot log through their own logger instances
+    ("httpx", "telegram.ext.Application", ...), never through "everthine",
+    and those records only reach the root logger's OWN handlers via
+    propagation -- propagation hands a record straight to each ancestor's
+    handlers, without re-running that ancestor's own logger-level filters.
+    So a filter sitting on the root Logger object itself would still never
+    see them. Attaching to every handler on the root logger is what
+    actually covers every propagated record, regardless of which logger
+    emitted it.
+
+    Zero handlers is a theoretical edge here (logging.basicConfig() only
+    installs one when the root logger does not already own one, and
+    nothing in this codebase clears it afterward), but if it ever happens
+    this falls back to the same single-StreamHandler shape basicConfig()
+    itself would have installed, so masking is never silently absent just
+    because the handler list came up empty.
+    """
+    root = logging.getLogger()
+    if not root.handlers:
+        root.addHandler(logging.StreamHandler())
+    for handler in root.handlers:
+        handler.addFilter(TokenMaskFilter())
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    _install_token_mask_filter()
     cfg = load_config()
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     cfg.engine_home.mkdir(parents=True, exist_ok=True)
