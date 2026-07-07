@@ -91,6 +91,13 @@ NOTE_TIMEOUT_S = 300
 ALBUM_PAGE_SIZE = 5
 ALBUM_SNIPPET_CHARS = 30
 
+# /stage's road-so-far render cap (M5 T8c, D5 decision N=8): how many of the
+# newest milestones the view renders in full. Above this, a single count
+# line stands in for everything older -- nothing is deleted, the whole
+# history stays on disk, only the RENDER is clipped so a long road never
+# floods one message.
+STAGE_ROAD_CLIP = 8
+
 # M5 T6: the inner-life heartbeat -- how often the background tick wakes to
 # hand diary.write_once one complete attempt (the diary task deferred this
 # constant here, next to the module's other tuning knobs). The tick itself
@@ -172,7 +179,7 @@ def _reaction_emoji_set(reactions) -> set[str]:
 
 def produce_reply(cfg: Config, store: SessionStore, text: str,
                   now: datetime | None = None, engine_mod=engine,
-                  on_react=None) -> list:
+                  on_react=None, on_extra=None) -> list:
     now = now or datetime.now().astimezone()
     prompt, data, memory_block, inner_block = prepare_exchange(cfg, store, text, now)
 
@@ -203,8 +210,14 @@ def produce_reply(cfg: Config, store: SessionStore, text: str,
     memory_recall.sync(cfg, now)
 
     out = chunking.split_message(cleaned)
-    if store.detect_bloat(cfg, reply.session_id):
-        out.append(msg("notebook_full"))
+    # T7a: the "notebook is full" line is a SYSTEM notice, not companion
+    # speech -- it leaves through the opt-in on_extra sink (same convention
+    # as on_react above) instead of riding home in the chunk list. on_text
+    # sends chunks cached (so a heart on one keeps that moment) but sends
+    # extras uncached: a cached system line would be resolvable to a
+    # keepsake and pollute the album the instant she hearts it.
+    if store.detect_bloat(cfg, reply.session_id) and on_extra is not None:
+        on_extra(msg("notebook_full"))
     if out:
         return out
     if emoji is not None:
@@ -343,8 +356,11 @@ async def _consume_react(cfg: Config, update: Update, emoji: str | None,
         logger.warning("could not set a Telegram reaction on the partner's "
                        "message", exc_info=True)
     if emoji in _HEART_EMOJIS:
-        album.add_companion_flag(cfg, update.message.text,
-                                 update.message.message_id, now)
+        # T7b: album writes touch disk -- off the event loop so a slow
+        # write never stalls other updates.
+        await asyncio.to_thread(album.add_companion_flag, cfg,
+                                update.message.text,
+                                update.message.message_id, now)
 
 
 def _schedule_reflection(context, cfg: Config, user_msg: str,
@@ -442,7 +458,16 @@ def _stage_view(cfg: Config, names: tuple) -> tuple:
     state = stages.load_state(cfg.stage_path)
     index = stages.resolve_index(state, names)
     lines = [msg("stage_intro").format(stage=names[index])]
-    for entry in state.get("history") or []:
+    history = state.get("history") or []
+    # T8c: clip the render (never the data) to the newest STAGE_ROAD_CLIP
+    # milestones. When there are more, a count line right after the intro
+    # says how many older ones are collapsed (all still kept), then only the
+    # newest N render, in the same chronological order.
+    collapsed = len(history) - STAGE_ROAD_CLIP
+    if collapsed > 0:
+        lines.append(msg("stage_road_clipped").format(n=collapsed))
+        history = history[-STAGE_ROAD_CLIP:]
+    for entry in history:
         line = f'{entry["date"]} · {entry["stage"]}'
         if entry.get("note"):
             line += f' · "{entry["note"]}"'
@@ -819,7 +844,9 @@ def make_app(cfg: Config):
             elif data == "stg_note_skip":
                 if pending_note["active"]:
                     pending_note["active"] = False
-                    new_stage = stages.advance(cfg.stage_path, names, "", now)
+                    # T7b: off-loop -- stages.advance writes to disk.
+                    new_stage = await asyncio.to_thread(
+                        stages.advance, cfg.stage_path, names, "", now)
                     if new_stage is not None:
                         await query.edit_message_text(
                             msg("stage_advanced_ack").format(stage=new_stage))
@@ -841,7 +868,9 @@ def make_app(cfg: Config):
                         msg("stage_retreat_confirm").format(stage=names[index - 1]),
                         reply_markup=_retreat_confirm_keyboard())
             elif data == "stg_ret_yes":
-                new_stage = stages.retreat(cfg.stage_path, names, now)
+                # T7b: stages.retreat persists to disk -- run it off-loop.
+                new_stage = await asyncio.to_thread(
+                    stages.retreat, cfg.stage_path, names, now)
                 if new_stage is not None:
                     await query.edit_message_text(
                         msg("stage_retreated_ack").format(stage=new_stage))
@@ -862,7 +891,8 @@ def make_app(cfg: Config):
                 except ValueError:
                     logger.warning("malformed album callback data: %r", data)
                     return
-                album.remove_by_id(cfg, entry_id)
+                # T7b: album.remove_by_id writes to disk -- run it off-loop.
+                await asyncio.to_thread(album.remove_by_id, cfg, entry_id)
                 text, markup = _album_view(cfg, page)
                 await query.edit_message_text(text, reply_markup=markup)
             elif data.startswith("alb_page:"):
@@ -887,8 +917,10 @@ def make_app(cfg: Config):
             if time.monotonic() - pending_note["since"] <= NOTE_TIMEOUT_S:
                 pending_note["active"] = False
                 now = datetime.now().astimezone()
-                new_stage = stages.advance(cfg.stage_path, _stage_names(cfg),
-                                           update.message.text, now)
+                # T7b: stages.advance persists to disk -- run it off-loop.
+                new_stage = await asyncio.to_thread(
+                    stages.advance, cfg.stage_path, _stage_names(cfg),
+                    update.message.text, now)
                 if new_stage is not None:
                     await update.message.reply_text(msg("note_saved_ack"))
                     await update.message.reply_text(
@@ -918,14 +950,23 @@ def make_app(cfg: Config):
                     chat_id=update.effective_chat.id, action=ChatAction.TYPING)
                 # T7: produce_reply's on_react sink is how this branch learns
                 # the emoji it captured -- produce_reply's return value stays
-                # the plain chunk list every other caller depends on.
+                # the plain chunk list every other caller depends on. T7a:
+                # extra_sink collects the notebook_full SYSTEM notice, sent
+                # after the companion chunks but never cached.
                 react_sink: list = []
+                extra_sink: list = []
                 chunks = await asyncio.to_thread(produce_reply, cfg, store,
                                                  update.message.text,
-                                                 on_react=react_sink.append)
+                                                 on_react=react_sink.append,
+                                                 on_extra=extra_sink.append)
                 for chunk in chunks:
                     sent = await update.message.reply_text(chunk)
                     _cache_sent(sent, chunk)
+                # After the companion text, in order: the system notice(s).
+                # NOT _cache_sent -- a heart on a system line must miss the
+                # cache (album_expired), never resolve into the album.
+                for extra in extra_sink:
+                    await update.message.reply_text(extra)
                 await _consume_react(cfg, update,
                                     react_sink[0] if react_sink else None,
                                     datetime.now().astimezone())
@@ -936,10 +977,9 @@ def make_app(cfg: Config):
                     # returns an empty chunk list, so "\n".join is "" and the
                     # empty-text gate inside _schedule_reflection skips it
                     # naturally -- a gesture has no language to reflect on.
-                    # Known transitional bloat, accepted rather than patched
-                    # here: chunks may still carry a trailing notebook_full
-                    # system line (a later task moves it out of the chunk
-                    # list).
+                    # chunks is now pure companion speech: T7a moved the
+                    # notebook_full system line out into extra_sink, so it no
+                    # longer leaks into what he reflects on.
                     _schedule_reflection(context, cfg, update.message.text,
                                          "\n".join(chunks))
                     if cfg.diary_enabled:
@@ -1042,10 +1082,13 @@ def make_app(cfg: Config):
                                                msg("album_expired"))
             else:
                 cached_text, _ = cached
-                album.add_partner_flag(cfg, cached_text, reaction.message_id,
-                                       datetime.now().astimezone())
+                # T7b: album writes are disk I/O -- run them off-loop.
+                await asyncio.to_thread(
+                    album.add_partner_flag, cfg, cached_text,
+                    reaction.message_id, datetime.now().astimezone())
         if removed & _HEART_EMOJIS:
-            album.remove_by_message_id(cfg, reaction.message_id)
+            await asyncio.to_thread(album.remove_by_message_id, cfg,
+                                    reaction.message_id)
 
     # Flag off must reproduce M1's sequential update handling exactly: the
     # busy gate and cancel callback only make sense once updates run

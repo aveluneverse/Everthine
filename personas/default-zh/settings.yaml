@@ -57,5 +57,6 @@ lines:
   btn_retreat_yes: "嗯，退一步"
   btn_retreat_no: "留在這裡"
   stage_retreated_ack: "回到：{stage}"
+  stage_road_clipped: "⋯⋯更早還有 {n} 步，全都留著。"
   album_expired: "那則太久了，我搆不到了——沒能收進來。"
   album_empty: "還沒收藏任何時刻。對訊息按顆愛心，我就會收好。"

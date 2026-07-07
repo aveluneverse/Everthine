@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from everthine import archive, bot, messages
 from everthine.config import Config
@@ -111,6 +112,43 @@ class TestProduceReply(unittest.TestCase):
         chunks = bot.produce_reply(self.cfg, self.store, "hi", now=NOW,
                                    engine_mod=FakeEngineEmptyText())
         self.assertEqual(chunks, [messages.msg("generic_glitch")])
+
+
+class TestBloatExtraSink(unittest.TestCase):
+    """T7a: the notebook_full system notice no longer rides home in
+    produce_reply's chunk list (where on_text would _cache_sent it, letting
+    her heart a system line into the keepsake album). It flows through an
+    opt-in on_extra sink instead -- same convention as on_react -- so the
+    return value stays exactly the companion chunk list every caller depends
+    on, and the notice can be sent on different terms (uncached)."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        root = Path(self._td.name)
+        self.cfg = Config(bot_token="x", authorized_user_id=1, data_dir=root / "data")
+        self.store = SessionStore(self.cfg.session_path)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_bloat_reaches_extra_sink_and_not_return_list(self):
+        extra: list = []
+        with mock.patch.object(self.store, "detect_bloat", return_value=True):
+            chunks = bot.produce_reply(self.cfg, self.store, "hello", now=NOW,
+                                       engine_mod=FakeEngineOK(),
+                                       on_extra=extra.append)
+        self.assertEqual(chunks, ["nice to hear from you"])
+        self.assertEqual(extra, [messages.msg("notebook_full")])
+        self.assertNotIn(messages.msg("notebook_full"), chunks)
+
+    def test_no_bloat_leaves_extra_sink_untouched(self):
+        extra: list = []
+        with mock.patch.object(self.store, "detect_bloat", return_value=False):
+            chunks = bot.produce_reply(self.cfg, self.store, "hello", now=NOW,
+                                       engine_mod=FakeEngineOK(),
+                                       on_extra=extra.append)
+        self.assertEqual(chunks, ["nice to hear from you"])
+        self.assertEqual(extra, [])
 
 
 class TestExtractReact(unittest.TestCase):

@@ -59,6 +59,7 @@ _cfg() untouched.
 import asyncio
 import inspect
 import itertools
+import json
 import tempfile
 import threading
 import unittest
@@ -605,6 +606,55 @@ class TestReactionConsumptionGates(_AlbumWiringTestCase):
         self.assertEqual(her_message.replies[1].text, messages.msg("nonzero"))
 
 
+# --- T7a: the notebook_full system notice is sent after the companion
+#     reply, in order, but NEVER cached -- so hearting it misses the cache
+#     (album_expired) and a system line can never land in the keepsake
+#     album, while the companion reply itself stays cached and heartable. --
+
+class TestBloatNoticeNotCached(_AlbumWiringTestCase):
+    def test_bloat_notice_follows_reply_and_is_not_cacheable(self):
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        handle_reaction = _handler(app, MessageReactionHandler)
+        her_message = FakeMessage("tell me about your day")
+
+        with mock.patch.object(bot.SessionStore, "detect_bloat", return_value=True):
+            with mock.patch.object(
+                    engine, "run_once",
+                    return_value=EngineReply("it was quiet and good",
+                                             "sess-bloat", ok=True)):
+                asyncio.run(on_text(FakeUpdate(her_message), FakeContext()))
+
+        # The order she saw is unchanged: companion reply first, the system
+        # notice after it.
+        self.assertEqual([r.text for r in her_message.replies],
+                         ["it was quiet and good", messages.msg("notebook_full")])
+        companion_reply, notice = her_message.replies[0], her_message.replies[1]
+
+        # The companion reply was cached: her heart on it lands silently.
+        heart_reply = FakeReactionUpdate(
+            user_id=1, chat_id=1, message_id=companion_reply.message_id,
+            old_emojis=[], new_emojis=["❤️"])
+        ctx_reply = FakeContext()
+        asyncio.run(handle_reaction(heart_reply, ctx_reply))
+        self.assertEqual(ctx_reply.bot.sent_messages, [])
+        entries = album.all_entries(cfg)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["message"]["text"], "it was quiet and good")
+
+        # The system notice was NOT cached: a heart on it misses the cache
+        # (album_expired) and nothing new enters the album.
+        heart_notice = FakeReactionUpdate(
+            user_id=1, chat_id=1, message_id=notice.message_id,
+            old_emojis=[], new_emojis=["❤️"])
+        ctx_notice = FakeContext()
+        asyncio.run(handle_reaction(heart_notice, ctx_notice))
+        self.assertEqual(ctx_notice.bot.sent_messages,
+                         [(1, messages.msg("album_expired"))])
+        self.assertEqual(len(album.all_entries(cfg)), 1)
+
+
 # --- Streaming path end-to-end (fix round 1): the REAL on_text streaming
 #     branch -- real StreamingDisplay, real sent_sink -> cache fill, real
 #     consumption -- with only engine.stream_once scripted. ---------------
@@ -1050,6 +1100,58 @@ class TestStageView(_StageAlbumUITestCase):
         app2 = bot.make_app(cfg2)
         self.assertFalse(any(isinstance(h, CommandHandler) and "stage" in h.commands
                              for h in app2.handlers[0]))
+
+
+# --- T8c: the /stage road-so-far render is clipped at the newest N=8
+#     milestones. Above that, a single count line stands in for everything
+#     collapsed (all still kept on disk); the newest 8 render in order. At
+#     or below 8, the view is byte-identical to before. ---------------------
+
+def _write_history_state(cfg, n):
+    """Seed cfg.stage_path with a well-shaped state carrying n history
+    entries, each uniquely noted 'step 0'..'step n-1' so a specific
+    milestone's presence/absence is checkable by substring. current sits at
+    the top stage so resolve_index is stable and irrelevant to the road."""
+    cfg.stage_path.parent.mkdir(parents=True, exist_ok=True)
+    history = [{"stage": STAGE_NAMES[i % len(STAGE_NAMES)],
+                "date": "2026-01-01", "note": f"step {i}"} for i in range(n)]
+    cfg.stage_path.write_text(
+        json.dumps({"current": STAGE_NAMES[-1], "history": history}),
+        encoding="utf-8")
+
+
+class TestStageRoadClip(_StageAlbumUITestCase):
+    def test_eight_entries_render_in_full_without_count_line(self):
+        cfg = self._cfg()
+        _write_history_state(cfg, 8)
+        text, _ = bot._stage_view(cfg, STAGE_NAMES)
+        lines = text.split("\n")
+        self.assertEqual(len(lines), 1 + 8)  # intro + all 8, no count line
+        for i in range(8):
+            self.assertIn(f"step {i}", text)
+
+    def test_nine_entries_clip_to_newest_eight_with_count_line(self):
+        cfg = self._cfg()
+        _write_history_state(cfg, 9)
+        text, _ = bot._stage_view(cfg, STAGE_NAMES)
+        lines = text.split("\n")
+        self.assertEqual(len(lines), 1 + 1 + 8)  # intro + count + newest 8
+        self.assertEqual(lines[1], messages.msg("stage_road_clipped").format(n=1))
+        self.assertNotIn("step 0", text)  # oldest collapsed
+        self.assertIn("step 8", text)     # newest survives
+        for i in range(1, 9):             # exactly steps 1..8 remain
+            self.assertIn(f"step {i}", text)
+
+    def test_eighty_entries_count_line_is_seventy_two(self):
+        cfg = self._cfg()
+        _write_history_state(cfg, 80)
+        text, _ = bot._stage_view(cfg, STAGE_NAMES)
+        lines = text.split("\n")
+        self.assertEqual(len(lines), 1 + 1 + 8)
+        self.assertEqual(lines[1], messages.msg("stage_road_clipped").format(n=72))
+        self.assertNotIn("step 71", text)  # last collapsed milestone
+        self.assertIn("step 72", text)     # first surviving milestone
+        self.assertIn("step 79", text)     # newest
 
 
 # --- /stage: the advance flow (note prompt -> typed note / skip / cancel) -
