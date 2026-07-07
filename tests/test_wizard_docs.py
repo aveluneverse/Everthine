@@ -123,5 +123,20 @@ class TestGitignoreProtectsUserPersona(unittest.TestCase):
         self.assertIn("personas/mine/", lines)
 
 
+class TestSetupSkill(WizardDocMixin, unittest.TestCase):
+    DOC = SETUP_SKILL
+
+    def test_frontmatter_shape(self):
+        fm = _load_frontmatter(self.DOC)
+        self.assertEqual(fm.get("name"), "everthine-setup")
+        self.assertIn("description", fm)
+        self.assertLess(len(fm["description"]), 500)
+
+    def test_references_both_guides(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("references/interview.md", text)
+        self.assertIn("references/deploy.md", text)
+
+
 if __name__ == "__main__":
     unittest.main()
