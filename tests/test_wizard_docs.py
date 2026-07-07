@@ -1,0 +1,108 @@
+"""Integrity tests for the setup-wizard documents (M8).
+
+These documents are instructions for the *user's* Claude Code. A wrong
+path or a misspelled env key means a stranger's setup breaks on the very
+first day, so every reference they contain is pinned against the real
+repo here. Prose quality is reviewed by humans; this file only guards
+the mechanical layer.
+"""
+import re
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+
+CLAUDE_MD = REPO / "CLAUDE.md"
+SETUP_SKILL = REPO / ".claude" / "skills" / "everthine-setup" / "SKILL.md"
+INTERVIEW = REPO / ".claude" / "skills" / "everthine-setup" / "references" / "interview.md"
+DEPLOY = REPO / ".claude" / "skills" / "everthine-setup" / "references" / "deploy.md"
+TROUBLESHOOT = REPO / ".claude" / "skills" / "everthine-troubleshoot" / "SKILL.md"
+README = REPO / "README.md"
+
+# The engine-isolation guarantee CLAUDE.md must keep stating verbatim.
+ISOLATION_ANCHOR = ("The companion's engine runs with its working directory "
+                    "inside data/engine")
+
+# Paths quoted in wizard prose that intentionally do not exist yet
+# (created for the user during setup, or created at first boot).
+EXPECTED_ABSENT = {"personas/mine", "personas/mine/", "data", "data/",
+                   "data/engine", "data/portrait_timeline.html"}
+
+_PATH_RE = re.compile(r"`([A-Za-z0-9_.][A-Za-z0-9_./-]*)`")
+_ENV_ASSIGN_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})=")
+_ENV_TICK_RE = re.compile(r"`([A-Z][A-Z0-9_]{2,})`")
+
+
+def _extract_repo_paths(text: str) -> set[str]:
+    """Backtick-quoted tokens that look like repo-relative paths."""
+    out = set()
+    for tok in _PATH_RE.findall(text):
+        if "/" in tok and not tok.startswith(("http", "-")):
+            out.add(tok)
+    return out
+
+
+def _extract_env_keys(text: str) -> set[str]:
+    """Env keys named as `KEY=value` or as a bare backticked `KEY`."""
+    return set(_ENV_ASSIGN_RE.findall(text)) | set(_ENV_TICK_RE.findall(text))
+
+
+def _load_frontmatter(path: Path) -> dict:
+    import yaml
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        raise AssertionError(f"{path.name}: missing YAML frontmatter")
+    block = text.split("---\n", 2)[1]
+    data = yaml.safe_load(block)
+    if not isinstance(data, dict):
+        raise AssertionError(f"{path.name}: frontmatter is not a mapping")
+    return data
+
+
+def _known_env_keys() -> set[str]:
+    example = (REPO / ".env.example").read_text(encoding="utf-8")
+    return set(_ENV_ASSIGN_RE.findall(example))
+
+
+class WizardDocMixin:
+    """Shared checks; subclasses set DOC."""
+    DOC: Path
+
+    def test_exists(self):
+        self.assertTrue(self.DOC.is_file(), f"{self.DOC} missing")
+
+    def test_quoted_paths_exist(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        for rel in sorted(_extract_repo_paths(text)):
+            if rel in EXPECTED_ABSENT:
+                continue
+            with self.subTest(path=rel):
+                self.assertTrue(
+                    (REPO / rel).exists() or (self.DOC.parent / rel).exists(),
+                    f"{self.DOC.name} references {rel!r} which does not "
+                    f"exist in the repo (checked repo root and the "
+                    f"document's own folder)")
+
+    def test_env_keys_are_real(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        known = _known_env_keys()
+        for key in sorted(_extract_env_keys(text)):
+            with self.subTest(key=key):
+                self.assertIn(key, known,
+                              f"{self.DOC.name} mentions unknown env key "
+                              f"{key!r} -- a typo would break a user's setup")
+
+
+class TestInterview(WizardDocMixin, unittest.TestCase):
+    DOC = INTERVIEW
+
+    def test_mandatory_first_questions_present(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        # Naming first (2026-07-07 ruling), then both genders (R1).
+        self.assertIn("name their companion", text)
+        self.assertIn("user's own gender", text)
+        self.assertIn("companion's gender", text)
+
+
+if __name__ == "__main__":
+    unittest.main()
