@@ -13,10 +13,13 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from string import Formatter
+from unittest import mock
 
-from everthine import archive, scheduler
+from everthine import archive, recent_context, scheduler
 from everthine.config import Config, load_config
-from everthine.persona import PersonaSettings
+from everthine.engine import EngineReply
+from everthine.persona import PersonaSettings, reset_persona_cache
+from everthine.session_store import SessionStore
 
 BASE_ENV = {"BOT_TOKEN": "123456789:" + "A" * 35, "AUTHORIZED_USER_ID": "42"}
 
@@ -1010,6 +1013,336 @@ class TestBuildNudgePrompt(unittest.TestCase):
             self._cfg(), "greeting", settings, None, self.NOON, None)
         self.assertTrue(result.startswith("[Scheduled nudge from the framework"))
         self.assertNotIn("{partner_name}", result)
+
+
+# ---------------------------------------------------------------------
+# M7 T4: nudge_once -- the generation pipeline (thread side). The engine
+# seam is patched at everthine.scheduler's OWN engine reference, so the
+# module-attribute call (engine.try_run_once, not a bound import) is what
+# the patch intercepts; persona loads from a real tmp folder, never a
+# model; the dice roll and every clock value are supplied, so nothing is
+# random or real-time. record_nudge's accounting is trusted (pinned above);
+# these tests pin the PIPELINE around it.
+# ---------------------------------------------------------------------
+
+ENGINE_SEAM = "everthine.scheduler.engine.try_run_once"
+NOW = _aware(12)  # 2026-07-06 12:00 UTC: a plain afternoon, outside quiet hours
+
+
+def _persona_folder(td, share_topics=None):
+    """A minimal valid folder-mode persona under td. With share_topics, add a
+    share.topics section so settings.share_topics is a non-empty pool."""
+    folder = Path(td) / "persona"
+    folder.mkdir()
+    (folder / "identity.md").write_text("A steady, warm presence.", encoding="utf-8")
+    yaml_text = "companion:\n  name: Alex\npartner:\n  name: Sam\n"
+    if share_topics:
+        yaml_text += "share:\n  topics:\n" + "".join(f"    - {t}\n" for t in share_topics)
+    (folder / "settings.yaml").write_text(yaml_text, encoding="utf-8")
+    return folder
+
+
+def _folder_cfg(td, share_topics=None, **overrides):
+    return _cfg(td, PERSONA_PATH=str(_persona_folder(td, share_topics)), **overrides)
+
+
+def _seed_contact(cfg, now, minutes_ago=60):
+    """One 'user' archive entry `minutes_ago` before `now`: old enough to
+    clear partner_active, recent enough to be a real last_contact."""
+    archive.write_entry(cfg.archive_dir, "user", "hi there",
+                        ts=now - timedelta(minutes=minutes_ago))
+
+
+def _store(cfg, session_id=None):
+    store = SessionStore(cfg.session_path)
+    if session_id is not None:
+        store.save(session_id=session_id)
+    return store
+
+
+def _write_state(cfg, **fields):
+    state = {**FRESH_STATE, **fields}
+    cfg.scheduler_state_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.scheduler_state_path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def _ok_reply(text="a warm little hello", session_id="s2"):
+    return EngineReply(text, session_id, ok=True)
+
+
+class TestNudgeOnceSuccessPaths(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(reset_persona_cache)
+
+    def test_greeting_full_path_result_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td)
+            _seed_contact(cfg, NOW)
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM, return_value=_ok_reply(text="morning")) as run:
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.job, "greeting")
+        self.assertEqual(result.text, "morning")
+        self.assertEqual(result.session_id, "s2")           # from the reply
+        self.assertEqual(result.expected_session_id, "s1")  # store's id at call time
+        run.assert_called_once()
+
+    def test_miss_you_full_path_result_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td, MISS_YOU_AFTER_HOURS="6")
+            _seed_contact(cfg, NOW, minutes_ago=7 * 60)     # 7h away -> miss_you due
+            _write_state(cfg, greeting_date=TODAY)          # greeting already done
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM,
+                            return_value=_ok_reply(text="thinking of you")) as run:
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.99)
+        self.assertEqual(result.job, "miss_you")
+        self.assertEqual(result.text, "thinking of you")
+        self.assertEqual(result.session_id, "s2")
+        self.assertEqual(result.expected_session_id, "s1")
+        run.assert_called_once()
+
+    def test_share_full_path_topic_is_real_not_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td, GREETING_HOUR="8", MISS_YOU_AFTER_HOURS="6")
+            _seed_contact(cfg, NOW, minutes_ago=60)         # 1h -> not away for miss_you
+            _write_state(cfg, greeting_date=TODAY)          # greeting done
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM,
+                            return_value=_ok_reply(text="the rain just started")) as run:
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.001)  # dice hits
+            prompt = run.call_args.args[1]
+        self.assertEqual(result.job, "share")
+        self.assertIn("Today's thread: ", prompt)
+        self.assertNotIn("Today's thread: None", prompt)    # the T3 guard this layer owns
+
+
+class TestNudgeOnceTopicPool(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(reset_persona_cache)
+
+    def _force_share_cfg(self, td, share_topics=None):
+        cfg = _folder_cfg(td, share_topics=share_topics,
+                          GREETING_HOUR="8", MISS_YOU_AFTER_HOURS="6")
+        _seed_contact(cfg, NOW, minutes_ago=60)
+        _write_state(cfg, greeting_date=TODAY)
+        return cfg
+
+    def test_persona_pool_passed_to_choice(self):
+        with tempfile.TemporaryDirectory() as td:
+            topics = ("a book left open on the table", "the kettle just now")
+            cfg = self._force_share_cfg(td, share_topics=topics)
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM, return_value=_ok_reply()), \
+                    mock.patch("everthine.scheduler.random") as rnd:
+                rnd.choice.return_value = topics[0]
+                scheduler.nudge_once(cfg, store, NOW, roll=0.001)
+            rnd.choice.assert_called_once_with(topics)
+
+    def test_empty_pool_falls_back_to_framework_topics(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._force_share_cfg(td, share_topics=None)  # no share section -> ()
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM, return_value=_ok_reply()), \
+                    mock.patch("everthine.scheduler.random") as rnd:
+                rnd.choice.return_value = scheduler.SHARE_FALLBACK_TOPICS[0]
+                scheduler.nudge_once(cfg, store, NOW, roll=0.001)
+            rnd.choice.assert_called_once_with(scheduler.SHARE_FALLBACK_TOPICS)
+
+
+class TestNudgeOnceEngineOutcomes(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(reset_persona_cache)
+
+    def _greeting_cfg(self, td):
+        cfg = _folder_cfg(td)
+        _seed_contact(cfg, NOW)
+        return cfg
+
+    def test_busy_engine_yields_no_result_no_accounting(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._greeting_cfg(td)
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM, return_value=None) as run, \
+                    self.assertLogs("everthine", level="DEBUG") as cm:
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+            state = scheduler.load_state(cfg.scheduler_state_path)
+        self.assertIsNone(result)
+        run.assert_called_once()
+        self.assertEqual(state, FRESH_STATE)                # record_nudge never ran
+        self.assertTrue(any("scheduler: skip (engine_busy)" in line for line in cm.output))
+
+    def test_engine_not_ok_no_result_no_accounting(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._greeting_cfg(td)
+            store = _store(cfg, session_id="s1")
+            failed = EngineReply("", None, ok=False, error_kind="timeout")
+            with mock.patch(ENGINE_SEAM, return_value=failed), \
+                    self.assertLogs("everthine", level="WARNING") as cm:
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+            state = scheduler.load_state(cfg.scheduler_state_path)
+        self.assertIsNone(result)
+        self.assertEqual(state, FRESH_STATE)
+        self.assertTrue(any("scheduler: engine failed (timeout)" in line for line in cm.output))
+
+    def test_empty_reply_text_no_result_no_accounting(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._greeting_cfg(td)
+            store = _store(cfg, session_id="s1")
+            blank = EngineReply("   ", "s2", ok=True)
+            with mock.patch(ENGINE_SEAM, return_value=blank), \
+                    self.assertLogs("everthine", level="WARNING") as cm:
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+            state = scheduler.load_state(cfg.scheduler_state_path)
+        self.assertIsNone(result)
+        self.assertEqual(state, FRESH_STATE)
+        self.assertTrue(any("scheduler: empty engine reply" in line for line in cm.output))
+
+
+class TestNudgeOnceSkipsBeforeEngine(unittest.TestCase):
+    """Each skip reason ends the pipeline before any engine call, at the log
+    level the brief pins: never_met / budget are rare enough for INFO, every
+    other reason is all-tick-long normal and stays at DEBUG."""
+
+    def setUp(self):
+        self.addCleanup(reset_persona_cache)
+
+    def test_quiet_skips_debug_no_engine(self):
+        with tempfile.TemporaryDirectory() as td:
+            night = _aware(23)
+            cfg = _folder_cfg(td)
+            _seed_contact(cfg, night)                       # non-None -> past never_met
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM) as run, \
+                    self.assertLogs("everthine", level="DEBUG") as cm:
+                result = scheduler.nudge_once(cfg, store, night, roll=0.5)
+        self.assertIsNone(result)
+        run.assert_not_called()
+        self.assertTrue(any("scheduler: skip (quiet)" in line for line in cm.output))
+
+    def test_dice_skips_debug_no_engine(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td, GREETING_HOUR="8", MISS_YOU_AFTER_HOURS="6")
+            _seed_contact(cfg, NOW, minutes_ago=60)         # not away for miss_you
+            _write_state(cfg, greeting_date=TODAY)          # greeting done
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM) as run, \
+                    self.assertLogs("everthine", level="DEBUG") as cm:
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.99)  # dice miss
+        self.assertIsNone(result)
+        run.assert_not_called()
+        self.assertTrue(any("scheduler: skip (dice)" in line for line in cm.output))
+
+    def test_never_met_skips_info_no_engine(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td)                           # empty archive -> last_contact None
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM) as run, \
+                    self.assertLogs("everthine", level="INFO") as cm:
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+        self.assertIsNone(result)
+        run.assert_not_called()
+        self.assertTrue(any("scheduler: skip (never_met)" in line for line in cm.output))
+
+    def test_budget_skips_info_no_engine(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td, PROACTIVE_DAILY_MAX="1")
+            _seed_contact(cfg, NOW, minutes_ago=60)
+            _write_state(cfg, budget_date=TODAY, budget_used=1)  # allowance spent
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM) as run, \
+                    self.assertLogs("everthine", level="INFO") as cm:
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.001)
+        self.assertIsNone(result)
+        run.assert_not_called()
+        self.assertTrue(any("scheduler: skip (budget)" in line for line in cm.output))
+
+    def test_file_mode_persona_skips_debug_no_engine(self):
+        with tempfile.TemporaryDirectory() as td:
+            persona_file = Path(td) / "persona.md"
+            persona_file.write_text("You are Testbot.", encoding="utf-8")
+            cfg = _cfg(td, PERSONA_PATH=str(persona_file))
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM) as run, \
+                    self.assertLogs("everthine", level="DEBUG") as cm:
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+        self.assertIsNone(result)
+        run.assert_not_called()
+        self.assertTrue(any("scheduler: skip (file_mode)" in line for line in cm.output))
+
+
+class TestNudgeOnceAccountingTiming(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(reset_persona_cache)
+
+    def test_record_nudge_fires_before_return_no_send_needed(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td)
+            _seed_contact(cfg, NOW)
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM, return_value=_ok_reply(text="hi")):
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+            state = scheduler.load_state(cfg.scheduler_state_path)
+        # The result is in hand and NO send has happened (this task has none),
+        # yet the attempt is already counted -- accounting is at conception.
+        self.assertEqual(result.job, "greeting")
+        self.assertEqual(state["budget_used"], 1)
+        self.assertEqual(state["budget_date"], TODAY)
+        self.assertEqual(state["greeting_date"], TODAY)
+        self.assertEqual(state["last_nudge_at"], NOW.isoformat())
+
+
+class TestNudgeOnceEngineWiring(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(reset_persona_cache)
+
+    def test_resume_session_system_prompt_and_timeout_pinned(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td)
+            _seed_contact(cfg, NOW)
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM, return_value=_ok_reply()) as run:
+                scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+            kwargs = run.call_args.kwargs
+        self.assertEqual(kwargs["session_id"], "s1")                    # resumes live session
+        self.assertEqual(kwargs["timeout_s"], scheduler.PROACTIVE_TIMEOUT_S)
+        self.assertIsNotNone(kwargs["system_prompt"])
+        self.assertIn("# Who you are", kwargs["system_prompt"])         # persona's assembled top
+
+
+class TestNudgeOnceRecentContextPrefix(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(reset_persona_cache)
+
+    def test_warm_prefix_leads_the_prompt(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td)
+            _seed_contact(cfg, NOW)                        # in the injection window
+            store = _store(cfg, session_id="s1")
+            expected_block = recent_context.build_block(
+                cfg, store.load(), cfg.archive_dir, NOW)
+            self.assertIsNotNone(expected_block)           # fixture actually injects
+            with mock.patch(ENGINE_SEAM, return_value=_ok_reply()) as run:
+                scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+            prompt = run.call_args.args[1]
+        self.assertTrue(prompt.startswith(expected_block))
+        self.assertIn("[Scheduled nudge from the framework", prompt)  # nudge tail still there
+
+    def test_build_block_failure_is_fail_soft(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td)
+            _seed_contact(cfg, NOW)
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM, return_value=_ok_reply()) as run, \
+                    mock.patch("everthine.scheduler.recent_context.build_block",
+                               side_effect=RuntimeError("boom")), \
+                    self.assertLogs("everthine", level="WARNING") as cm:
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+            prompt = run.call_args.args[1]
+        self.assertIsNotNone(result)                        # pipeline still completed
+        self.assertTrue(prompt.startswith("[Scheduled nudge from the framework"))  # no prefix
+        self.assertTrue(any("warmth injection failed" in line for line in cm.output))
 
 
 if __name__ == "__main__":

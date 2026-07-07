@@ -2,9 +2,12 @@
 which, message a companion might send first -- a good-morning greeting,
 missing her after a long enough silence, or sharing something unprompted
 -- without ever calling the engine, touching the network, or importing
-bot.py. Wiring this onto the bot's background tick is a later milestone
-task; consuming these decisions to actually generate and send a message
-is the task after that. Beyond that decision logic, this module also holds
+bot.py. Built on top of those gates, nudge_once is the execution line: one
+complete attempt that turns a due decision into a generated message through
+the engine's non-blocking call. It still never sends (delivery) and never
+imports bot.py -- wiring it onto the background tick and delivering what it
+returns are both later milestone tasks. Beyond the decision logic and that
+pipeline, this module also holds
 the owner-approved instruction copy for the three proactive messages and the
 pure renderers that assemble them into a proactive system-prompt tail
 (build_nudge_prompt): the framing header that tells the companion this is a
@@ -44,26 +47,35 @@ named reasons, never a silent no-op. share_due's dice roll is a plain
 float argument the caller supplies, never rolled inside this module, so
 tests can hand it any value they like.
 
-Takes plain paths, dicts, and datetimes throughout; imports nothing from
-the framework at runtime beyond archive (truth_timeline's one data
-source). `Config` and `PersonaSettings` appear only in TYPE_CHECKING type
-hints, costing nothing at runtime.
+The gates, renderers, and state I/O take plain paths, dicts, and datetimes
+throughout, importing only archive from the framework at runtime
+(truth_timeline's one data source). nudge_once, the execution line built on
+top of them, reaches further by design -- the engine (try_run_once only,
+the non-blocking call), persona's function surface (current_settings /
+contact_signals / build_system_prompt_nudge), and recent_context (the warm
+cross-session prefix) -- exactly as diary.write_once reaches past its own
+module's pure core; it also uses the standard library's random to pick a
+share topic. `Config`, `PersonaSettings`, and `SessionStore` appear only in
+TYPE_CHECKING type hints, costing nothing at runtime.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import random
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import archive
+from . import archive, engine, persona, recent_context
 
 if TYPE_CHECKING:
     from .config import Config
     from .persona import PersonaSettings
+    from .session_store import SessionStore
 
 logger = logging.getLogger("everthine")
 
@@ -673,3 +685,159 @@ def build_nudge_prompt(cfg: Config, job: str, settings: PersonaSettings,
         raise ValueError(f"unknown proactive job: {job!r}")
     prefix = (timeline_text + "\n\n") if timeline_text else ""
     return header + "\n\n" + prefix + instruction
+
+
+# ---------------------------------------------------------------------
+# Execution: one complete nudge attempt (the background tick's worker)
+# ---------------------------------------------------------------------
+#
+# Everything above is pure -- gates, renderers, state round-trips. nudge_once
+# is the execution line that stitches them into a generation pipeline, the
+# proactive twin of diary.write_once: decide -> generate -> count, handing the
+# text back for a later layer to actually deliver.
+
+# Skip reasons rare enough to log at INFO -- a handful a day at most, worth
+# seeing. Every other pick_job reason is all-tick-long normal (the engine is
+# busy, the dice missed, quiet hours), so it stays at DEBUG and the
+# high-frequency tick never floods the log.
+_NUDGE_SKIP_INFO_REASONS = frozenset({"never_met", "budget"})
+
+
+@dataclass
+class NudgeResult:
+    """One generated proactive message, handed back for a later layer to send.
+
+    `job` is the due job that produced it ("greeting"/"miss_you"/"share");
+    `text` is the engine's reply, ready to deliver; `session_id` is the
+    session the engine actually ran in (echoed back so the caller can persist
+    it); `expected_session_id` is the session nudge_once resumed from -- the
+    store's current pointer at call time. The two ids let a caller notice, and
+    record, a session the CLI silently rotated mid-turn.
+    """
+
+    job: str
+    text: str
+    session_id: str | None
+    expected_session_id: str | None
+
+
+def nudge_once(cfg: Config, store: SessionStore, now: datetime,
+               roll: float) -> NudgeResult | None:
+    """One complete attempt to conceive a proactive message this tick: decide
+    whether (and which) to reach out, generate it, and count the attempt --
+    returning a NudgeResult when a message was produced, or None behind a named
+    log line for every other outcome, so a quiet tick is always explainable
+    after the fact. Actually delivering the returned text is a later layer's
+    job; this function never sends.
+
+    `now` must be timezone-aware (caller contract), exactly as pick_job and
+    common_gate document. `store` is the SessionStore whose current pointer
+    this reach-out resumes: his proactive words belong to the same live
+    conversation, so this passes session_id=<store's id> to the engine --
+    unlike the diary, which always starts a fresh session. `roll` is
+    share_due's dice seam, supplied by the caller so the whole pipeline stays
+    deterministic under test.
+
+    The order is deliberate, and in one place load-bearing: record_nudge fires
+    AFTER the engine returns a usable message and BEFORE this returns -- the
+    attempt is counted at conception, never at delivery. A send that fails
+    downstream still spent its slot in the budget; that is a delivery problem
+    to log elsewhere, never a reason to roll the accounting back and let the
+    same silence be nudged into twice.
+
+    Two tz notes. contact_signals hands back naive-local (its live-prompt
+    consumers' shape); pick_job and record_nudge want timezone-aware, so the
+    value is normalized once at that handoff with a single .astimezone() --
+    the same lossless wall-clock conversion diary.write_once makes, and made
+    in exactly one place so the miss_you anchor is stored and later compared
+    in one consistent shape. build_system_prompt_nudge collapses `now` to
+    naive local itself, mirroring the live path.
+
+    Like diary.write_once, this does NOT swallow unexpected exceptions: the
+    background tick that will call it wraps every round in its own try/except,
+    and burying a bug here would only hide it. The single internal fail-soft
+    point is the recent-context warm prefix, mirroring bot.prepare_exchange --
+    a broken warmth injection must never cost the whole reach-out.
+    """
+    settings = persona.current_settings(cfg)
+    if settings is None:
+        # Defensive second layer: the tick gates folder mode at boot; a
+        # file-mode persona has no settings to voice a reach-out with.
+        logger.debug("scheduler: skip (file_mode)")
+        return None
+
+    # contact_signals returns naive-local; pick_job/record_nudge require
+    # aware. A naive value's astimezone() presumes system local -- exactly
+    # what it already is -- so this is lossless, made once here and nowhere
+    # deeper (the diary's tz handoff, mirrored).
+    last_contact, _ = persona.contact_signals(cfg, now)
+    if last_contact is not None:
+        last_contact = last_contact.astimezone()
+
+    state = load_state(cfg.scheduler_state_path)
+    job, skip_reason = pick_job(cfg, now, last_contact, state, roll)
+    if job is None:
+        level = logging.INFO if skip_reason in _NUDGE_SKIP_INFO_REASONS else logging.DEBUG
+        logger.log(level, "scheduler: skip (%s)", skip_reason)
+        return None
+
+    # Only "share" carries a topic, and it must never reach build_nudge_prompt
+    # as None -- SHARE_INSTRUCTION would then render the literal "Today's
+    # thread: None". This layer is the single guard: the persona's own pool
+    # when it has one, the framework fallback otherwise (never empty), so the
+    # chosen topic is always a real, non-empty string.
+    if job == "share":
+        topics = settings.share_topics or SHARE_FALLBACK_TOPICS
+        topic = random.choice(topics)
+    else:
+        topic = None
+
+    timeline = truth_timeline(cfg, now)
+    data = store.load()
+    expected = data.get("session_id")
+
+    prompt = build_nudge_prompt(cfg, job, settings, timeline, now, topic)
+    # Warm cross-session prefix, the same fail-soft contract
+    # bot.prepare_exchange uses: a broken build_block degrades to no prefix,
+    # never a lost reach-out. The block leads, joined to the nudge tail by the
+    # one blank line every block boundary in this codebase uses -- NOT
+    # recent_context.prepend, whose "[The user says now]" mark would frame this
+    # framework cue as an incoming message and undo the NUDGE_HEADER's whole
+    # purpose.
+    block = None
+    try:
+        block = recent_context.build_block(cfg, data, cfg.archive_dir, now)
+    except Exception:
+        logger.warning("warmth injection failed; continuing without it",
+                       exc_info=True)
+    if block is not None:
+        prompt = block + "\n\n" + prompt
+
+    system_prompt = persona.build_system_prompt_nudge(cfg, now)
+
+    # try_run_once (never run_once): a proactive reach-out always yields to
+    # live conversation, so a busy engine is a skip, not a wait. Resume the
+    # live session (session_id=expected). Module-attribute access
+    # (engine.try_run_once, not a bound import) so a test patch on
+    # everthine.scheduler.engine.try_run_once intercepts it.
+    reply = engine.try_run_once(cfg, prompt, session_id=expected,
+                                system_prompt=system_prompt,
+                                timeout_s=PROACTIVE_TIMEOUT_S)
+    if reply is None:
+        # Engine busy -> yield. DEBUG on purpose: the tick fires every few
+        # minutes and a live conversation holding the lock is the common case,
+        # so INFO would flood the log.
+        logger.debug("scheduler: skip (engine_busy)")
+        return None
+    if not reply.ok:
+        logger.warning("scheduler: engine failed (%s)", reply.error_kind)
+        return None
+    if not reply.text.strip():
+        logger.warning("scheduler: empty engine reply")
+        return None
+
+    # Count the attempt at conception: a usable message exists, no send yet.
+    # See the docstring -- the accounting is the reach-out, not its receipt.
+    record_nudge(cfg.scheduler_state_path, job, now, last_contact)
+    logger.info("scheduler: nudge ready (%s)", job)
+    return NudgeResult(job, reply.text, reply.session_id, expected)
