@@ -353,6 +353,60 @@ class TestThinking(unittest.TestCase):
             self.assertNotIn("thinking", persona.settings.lines)
 
 
+class TestStageLineFormatValidation(unittest.TestCase):
+    """N5: the four stage line-override keys are rendered with
+    .format(stage=...) at button-press time (bot.py's stage views/acks), so
+    a broken format string in an override must fail loud at LOAD time --
+    naming the key -- instead of only when that button is finally pressed. A
+    value with no {stage} placeholder is still legal: str.format ignores an
+    absent field, so a persona may write a stage line that never
+    interpolates the name."""
+
+    def _settings(self, key: str, value: str) -> str:
+        return ("companion:\n  name: Alex\npartner:\n  name: Sam\n"
+                f'lines:\n  {key}: "{value}"\n')
+
+    def test_misspelled_placeholder_raises_naming_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=self._settings("stage_intro", "You are at {stag}"))
+            with self.assertRaises(ConfigError) as cm:
+                load_persona(_cfg(root))
+            self.assertIn("stage_intro", str(cm.exception))
+
+    def test_positional_placeholder_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=self._settings("stage_advanced_ack", "Now at {0}"))
+            with self.assertRaises(ConfigError) as cm:
+                load_persona(_cfg(root))
+            self.assertIn("stage_advanced_ack", str(cm.exception))
+
+    def test_unbalanced_brace_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=self._settings("stage_retreat_confirm", "Back to {stage"))
+            with self.assertRaises(ConfigError) as cm:
+                load_persona(_cfg(root))
+            self.assertIn("stage_retreat_confirm", str(cm.exception))
+
+    def test_no_placeholder_is_accepted(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=self._settings("stage_intro", "Here we are, together."))
+            persona = load_persona(_cfg(root))  # must not raise
+            self.assertEqual(persona.settings.lines["stage_intro"],
+                             "Here we are, together.")
+
+    def test_correct_placeholder_is_accepted(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_folder(root, settings=self._settings("stage_retreated_ack", "Back at {stage}"))
+            persona = load_persona(_cfg(root))  # must not raise
+            self.assertEqual(persona.settings.lines["stage_retreated_ack"],
+                             "Back at {stage}")
+
+
 class TestVoiceAndBoundaries(unittest.TestCase):
     def test_absent_default_to_empty_string(self):
         with tempfile.TemporaryDirectory() as td:
