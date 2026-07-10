@@ -19,6 +19,7 @@ DEPLOY = REPO / ".claude" / "skills" / "everthine-setup" / "references" / "deplo
 TROUBLESHOOT = REPO / ".claude" / "skills" / "everthine-troubleshoot" / "SKILL.md"
 README = REPO / "README.md"
 PERSONA_GUIDE = REPO / "docs" / "persona-guide.zh-TW.md"
+PERSONA_GUIDE_EN = REPO / "docs" / "persona-guide.md"
 FAQ = REPO / "docs" / "faq.zh-TW.md"
 README_ZH = REPO / "README.zh-TW.md"
 
@@ -195,6 +196,18 @@ class TestPersonaGuide(WizardDocMixin, unittest.TestCase):
     def test_five_house_rules_present(self):
         text = self.DOC.read_text(encoding="utf-8")
         self.assertIn("## 五條家規", text)
+
+    def test_placeholder_warning_present(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("{stage}", text)
+
+
+class TestPersonaGuideEn(WizardDocMixin, unittest.TestCase):
+    DOC = PERSONA_GUIDE_EN
+
+    def test_five_house_rules_present(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("## Five house rules", text)
 
     def test_placeholder_warning_present(self):
         text = self.DOC.read_text(encoding="utf-8")
