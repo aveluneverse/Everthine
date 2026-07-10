@@ -84,6 +84,48 @@ logger = logging.getLogger("everthine")
 # person and Telegram treats them as distinct reaction strings.
 _HEART_EMOJIS = frozenset({"❤️", "❤"})
 
+# Telegram's Bot API accepts only ITS OWN fixed list of reaction emoji;
+# anything else earns a 400 straight from the API (merge-acceptance bug,
+# 2026-07-10: a model-chosen 🫂 on a get-well message died silently and
+# the gesture never reached her). The set below is that list, spelled the
+# way Telegram spells it -- WITHOUT the U+FE0F variation selector -- so
+# incoming emoji are matched only after _normalize_reaction strips theirs.
+_TG_REACTION_EMOJIS = frozenset({
+    "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬",
+    "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴",
+    "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯", "🤣", "⚡", "🍌", "🏆",
+    "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴", "😭", "🤓",
+    "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", "🤝", "✍", "🤗",
+    "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿", "🆒", "💘", "🙉", "🦄",
+    "😘", "💊", "🙊", "😎", "👾", "🤷‍♂", "🤷", "🤷‍♀", "😡",
+})
+
+# The nearest accepted cousin for emoji a persona plausibly reaches for
+# that Telegram's reaction list doesn't carry. Deliberately small and
+# same-sentiment-only: a wrong-but-accepted emoji is worse than none, so
+# anything unmapped is skipped (with a named log line), never guessed at.
+_REACTION_FALLBACKS = {
+    "🫂": "🤗",   # people hugging -> hugging face
+    "☺": "🥰",   # classic smile -> smiling with hearts
+    "😊": "🥰",   # smiling eyes -> smiling with hearts
+    "😅": "😁",   # relieved grin -> grin
+    "💕": "❤",   # every plain love-heart variant -> the heart Telegram has
+    "💖": "❤",
+    "💗": "❤",
+    "💓": "❤",
+    "💞": "❤",
+    "🩷": "❤",
+}
+
+
+def _normalize_reaction(emoji: str) -> str:
+    """Telegram spells its accepted reactions WITHOUT the U+FE0F variation
+    selector (its heart is "❤", not "❤️"), while a
+    model-composed [react:...] tag usually carries one. Strip every FE0F so
+    both spellings of the same emoji meet the whitelist -- and the API --
+    in Telegram's own form."""
+    return emoji.replace("\ufe0f", "")
+
 # make_app's _message_cache: how long a companion message stays resolvable
 # to its text after a heart on it (TTL), and how many entries the cache
 # holds at once (cap) before the oldest survivors get pruned. Both are
@@ -362,12 +404,24 @@ async def _consume_react(cfg: Config, update: Update, emoji: str | None,
     """
     if not cfg.album_enabled or not emoji:
         return
+    emoji = _normalize_reaction(emoji)
+    if emoji not in _TG_REACTION_EMOJIS:
+        fallback = _REACTION_FALLBACKS.get(emoji)
+        if fallback is None:
+            # A known 400: don't spend the API call. Named, not silent --
+            # the gesture was real even though Telegram can't carry it.
+            logger.info("reaction %r is outside Telegram's accepted set "
+                        "and has no fallback; skipped", emoji)
+            return
+        logger.info("reaction %r is outside Telegram's accepted set; "
+                    "sending its nearest cousin %r instead", emoji, fallback)
+        emoji = fallback
     try:
         await update.message.set_reaction([ReactionTypeEmoji(emoji)])
     except Exception:
-        # Telegram's accepted reaction set is neither fixed nor under this
-        # project's control; a persona emitting one it no longer recognizes
-        # must never take the whole reply down with it.
+        # The whitelist above tracks Telegram's accepted reaction set, but
+        # that set is neither fixed nor under this project's control; a
+        # stale list must never take the whole reply down with it.
         logger.warning("could not set a Telegram reaction on the partner's "
                        "message", exc_info=True)
     if emoji in _HEART_EMOJIS:

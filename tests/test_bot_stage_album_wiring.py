@@ -369,8 +369,11 @@ class TestCompanionReactionConsumption(_AlbumWiringTestCase):
                                          "sess-1", ok=True)):
             asyncio.run(on_text(update, FakeContext()))
 
+        # The tag carried a variation selector (U+FE0F); the reaction goes
+        # out in Telegram's own spelling -- the bare heart -- after
+        # _normalize_reaction strips it (whitelist fix, 2026-07-10).
         self.assertEqual(her_message.reactions_set,
-                         [[ReactionTypeEmoji("❤️")]])
+                         [[ReactionTypeEmoji("❤")]])
         entries = album.all_entries(cfg)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["direction"], "companion_flagged")
@@ -379,6 +382,74 @@ class TestCompanionReactionConsumption(_AlbumWiringTestCase):
         self.assertEqual(entries[0]["message_id"], her_message.message_id)
         # The reply itself still landed, tag stripped.
         self.assertEqual(her_message.replies[0].text, "me too")
+
+    def test_out_of_set_reaction_with_fallback_sends_nearest_cousin(self):
+        # Merge-acceptance bug (2026-07-10): the model chose 🫂 on a
+        # get-well message, Telegram's fixed reaction list doesn't carry
+        # it, and the 400 ate the gesture silently. The whitelist now
+        # catches it BEFORE the API and sends the accepted cousin instead.
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her_message = FakeMessage("I caught the flu, feeling awful")
+        update = FakeUpdate(her_message)
+
+        with mock.patch.object(
+                engine, "run_once",
+                return_value=EngineReply("[react:\U0001fac2] rest now",
+                                         "sess-hug", ok=True)):
+            with self.assertLogs("everthine", level="INFO") as cm:
+                asyncio.run(on_text(update, FakeContext()))
+
+        self.assertEqual(her_message.reactions_set,
+                         [[ReactionTypeEmoji("\U0001f917")]])  # 🤗
+        self.assertTrue(any("nearest cousin" in m for m in cm.output))
+        # A hug is not a heart: no album flag.
+        self.assertEqual(album.all_entries(cfg), [])
+        self.assertEqual(her_message.replies[0].text, "rest now")
+
+    def test_out_of_set_reaction_without_fallback_is_skipped(self):
+        # No same-sentiment cousin -> no API call at all (a known 400),
+        # one named log line, and the reply is untouched.
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her_message = FakeMessage("look at my new cactus")
+        update = FakeUpdate(her_message)
+
+        with mock.patch.object(
+                engine, "run_once",
+                return_value=EngineReply("[react:\U0001f335] it suits you",
+                                         "sess-cactus", ok=True)):
+            with self.assertLogs("everthine", level="INFO") as cm:
+                asyncio.run(on_text(update, FakeContext()))
+
+        self.assertEqual(her_message.reactions_set, [])
+        self.assertTrue(any("no fallback; skipped" in m for m in cm.output))
+        self.assertEqual(album.all_entries(cfg), [])
+        self.assertEqual(her_message.replies[0].text, "it suits you")
+
+    def test_heart_variant_fallback_still_flags_the_album(self):
+        # 💖 falls back to the plain heart -- and a heart is a keepsake:
+        # the album flag rides on the emoji actually sent, so the love
+        # lands in the album exactly as if he had chosen ❤ himself.
+        cfg = self._cfg()
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her_message = FakeMessage("I finished the book you gave me")
+        update = FakeUpdate(her_message)
+
+        with mock.patch.object(
+                engine, "run_once",
+                return_value=EngineReply("[react:\U0001f496] knew you would",
+                                         "sess-sparkle", ok=True)):
+            asyncio.run(on_text(update, FakeContext()))
+
+        self.assertEqual(her_message.reactions_set,
+                         [[ReactionTypeEmoji("❤")]])
+        entries = album.all_entries(cfg)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["direction"], "companion_flagged")
 
     def test_companion_non_heart_tag_sets_reaction_but_no_flag(self):
         cfg = self._cfg()
@@ -666,8 +737,9 @@ class TestStreamingPathReactionWiring(_AlbumWiringTestCase):
             cfg, ok_script(["[react:❤️] warm and here."]),
             text="I kept your note")
 
+        # Sent in Telegram's own spelling: bare heart, FE0F stripped.
         self.assertEqual(her_message.reactions_set,
-                         [[ReactionTypeEmoji("❤️")]])
+                         [[ReactionTypeEmoji("❤")]])
         entries = album.all_entries(cfg)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["direction"], "companion_flagged")
@@ -741,8 +813,9 @@ class TestTagOnlyReplyWiring(_AlbumWiringTestCase):
         placeholder = her_message.replies[0]
         self.assertTrue(placeholder.deleted)
         self._assert_no_glitch(her_message.replies)
-        # The reaction still landed on her message and the heart was kept.
-        self.assertEqual(her_message.reactions_set, [[ReactionTypeEmoji("❤️")]])
+        # The reaction still landed on her message (bare heart -- Telegram's
+        # spelling) and the heart was kept.
+        self.assertEqual(her_message.reactions_set, [[ReactionTypeEmoji("❤")]])
         entries = album.all_entries(cfg)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["direction"], "companion_flagged")
@@ -764,8 +837,9 @@ class TestTagOnlyReplyWiring(_AlbumWiringTestCase):
 
         # Zero reply_text sent -- the gesture is the whole message.
         self.assertEqual(her_message.replies, [])
-        # ...but the reaction was consumed and the heart kept.
-        self.assertEqual(her_message.reactions_set, [[ReactionTypeEmoji("❤️")]])
+        # ...but the reaction was consumed (bare heart -- Telegram's
+        # spelling) and the heart kept.
+        self.assertEqual(her_message.reactions_set, [[ReactionTypeEmoji("❤")]])
         entries = album.all_entries(cfg)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["direction"], "companion_flagged")
