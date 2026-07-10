@@ -21,6 +21,7 @@ README = REPO / "README.md"
 PERSONA_GUIDE = REPO / "docs" / "persona-guide.zh-TW.md"
 PERSONA_GUIDE_EN = REPO / "docs" / "persona-guide.md"
 FAQ = REPO / "docs" / "faq.zh-TW.md"
+FAQ_EN = REPO / "docs" / "faq.md"
 README_ZH = REPO / "README.zh-TW.md"
 
 # The engine-isolation guarantee CLAUDE.md must keep stating verbatim.
@@ -221,6 +222,17 @@ class TestFaq(WizardDocMixin, unittest.TestCase):
         text = self.DOC.read_text(encoding="utf-8")
         for marker in ("他不會主動對你揭露", "token 已經自動遮罩",
                        "LOG_LEVEL", "電腦關著，還能找到他嗎"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
+
+class TestFaqEn(WizardDocMixin, unittest.TestCase):
+    DOC = FAQ_EN
+
+    def test_honest_disclosures_present(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        for marker in ("won't volunteer", "bot<TOKEN>",
+                       "LOG_LEVEL", "computer is off"):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
 
