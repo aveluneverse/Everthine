@@ -115,9 +115,9 @@ live out together.
 
 ## What's in the box
 
-- A three-layer persona system (who he is / his lines / the living
-  now) — fully yours to shape, with a demo couple included, one
-  set in English and one in Traditional Chinese.
+- A three-layer persona system (who he is / where he draws the
+  line / the living now) — fully yours to shape, with a demo couple
+  included, one set in English and one in Traditional Chinese.
 - Long-term memory that survives a fresh start, plus cross-session
   warmth — he has never once greeted you like a stranger.
 - Relationship stages, a heart-marked keepsake album, a private
