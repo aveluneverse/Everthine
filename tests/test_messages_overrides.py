@@ -156,11 +156,14 @@ class TestStageAlbumKeys(_OverrideResetTest):
         self.assertEqual(messages.msg("btn_stage_retreat"), "Step back one stage")
         self.assertEqual(messages.msg("btn_stage_close"), "Close")
         self.assertEqual(messages.msg("stage_note_prompt"),
-                         "A word to mark this step? Reply with one line, or skip.")
-        self.assertEqual(messages.msg("btn_note_skip"), "Skip the note")
+                         "A word to mark this step? The next message you "
+                         "send is kept beside it, word for word -- it goes "
+                         "to the record, not into the chat. Or skip below.")
+        self.assertEqual(messages.msg("btn_note_skip"), "No note -- step forward")
         self.assertEqual(messages.msg("btn_note_cancel"), "Cancel this step")
         self.assertEqual(messages.msg("stage_advanced_ack"), "You are now at: {stage}")
-        self.assertEqual(messages.msg("note_saved_ack"), "Kept, word for word.")
+        self.assertEqual(messages.msg("note_saved_ack"),
+                         "Kept beside this step, word for word.")
         self.assertEqual(messages.msg("stage_retreat_confirm"), 'Step back to "{stage}"?')
         self.assertEqual(messages.msg("btn_retreat_yes"), "Yes, step back")
         self.assertEqual(messages.msg("btn_retreat_no"), "Stay here")

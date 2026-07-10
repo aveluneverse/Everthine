@@ -39,11 +39,13 @@ _MESSAGES = {
     "btn_stage_advance": "Take a step forward",
     "btn_stage_retreat": "Step back one stage",
     "btn_stage_close": "Close",
-    "stage_note_prompt": "A word to mark this step? Reply with one line, or skip.",
-    "btn_note_skip": "Skip the note",
+    "stage_note_prompt": ("A word to mark this step? The next message you "
+                          "send is kept beside it, word for word -- it goes "
+                          "to the record, not into the chat. Or skip below."),
+    "btn_note_skip": "No note -- step forward",
     "btn_note_cancel": "Cancel this step",
     "stage_advanced_ack": "You are now at: {stage}",
-    "note_saved_ack": "Kept, word for word.",
+    "note_saved_ack": "Kept beside this step, word for word.",
     "stage_retreat_confirm": 'Step back to "{stage}"?',
     "btn_retreat_yes": "Yes, step back",
     "btn_retreat_no": "Stay here",
