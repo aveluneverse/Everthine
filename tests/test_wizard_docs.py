@@ -18,6 +18,7 @@ INTERVIEW = REPO / ".claude" / "skills" / "everthine-setup" / "references" / "in
 DEPLOY = REPO / ".claude" / "skills" / "everthine-setup" / "references" / "deploy.md"
 TROUBLESHOOT = REPO / ".claude" / "skills" / "everthine-troubleshoot" / "SKILL.md"
 README = REPO / "README.md"
+PERSONA_GUIDE = REPO / "docs" / "persona-guide.zh-TW.md"
 
 # The engine-isolation guarantee CLAUDE.md must keep stating verbatim.
 ISOLATION_ANCHOR = ("The companion's engine runs in a neutral working "
@@ -180,6 +181,18 @@ class TestReadme(WizardDocMixin, unittest.TestCase):
         text = self.DOC.read_text(encoding="utf-8")
         self.assertIn("If you are Claude Code", text)
         self.assertIn("git clone", text)
+
+
+class TestPersonaGuide(WizardDocMixin, unittest.TestCase):
+    DOC = PERSONA_GUIDE
+
+    def test_five_house_rules_present(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("## 五條家規", text)
+
+    def test_placeholder_warning_present(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("{stage}", text)
 
 
 if __name__ == "__main__":
