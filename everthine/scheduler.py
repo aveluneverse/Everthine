@@ -108,6 +108,18 @@ PROACTIVE_TIMEOUT_S = 120        # engine budget for one proactive message; a la
 # but a chance to share persists all day long.
 SHARE_CHANCE_PER_TICK = 0.02
 
+# A good-morning has a shelf life: once now.hour is this many hours past
+# GREETING_HOUR, the moment is gone and the day's greeting is skipped
+# rather than sent absurdly late. The cap matters most on cold starts -- a
+# bot first booted (or a ledger recreated) in the evening must not "catch
+# up" on a morning that never happened inside this ledger's lifetime
+# (merge-acceptance bug, 2026-07-10: a "greeting" delivered at 18:53).
+# When greeting_hour + window crosses midnight (greeting_hour >= 21 with
+# the default 4), now.hour (0..23) can never reach the sum, so the cap
+# silently never fires -- the quiet-hours gate is what bounds those
+# late-evening configurations instead.
+GREETING_WINDOW_HOURS = 4
+
 
 # ---------------------------------------------------------------------
 # Proactive message copy (owner-approved product copy, transcribed
@@ -373,12 +385,17 @@ def common_gate(cfg: Config, now: datetime, last_contact: datetime | None,
 def greeting_due(cfg: Config, now: datetime, state: dict) -> str | None:
     """Is a good-morning greeting due? None means yes; otherwise, in
     order: "disabled" (cfg.greeting_enabled is False), "before_hour"
-    (now.hour hasn't reached cfg.greeting_hour yet), "already_today"
-    (state's greeting_date is already today -- one per day, always)."""
+    (now.hour hasn't reached cfg.greeting_hour yet), "window_passed"
+    (now.hour is GREETING_WINDOW_HOURS or more past cfg.greeting_hour --
+    a morning greeting sent in the evening is worse than none),
+    "already_today" (state's greeting_date is already today -- one per
+    day, always)."""
     if not cfg.greeting_enabled:
         return "disabled"
     if now.hour < cfg.greeting_hour:
         return "before_hour"
+    if now.hour >= cfg.greeting_hour + GREETING_WINDOW_HOURS:
+        return "window_passed"
     if state.get("greeting_date") == now.date().isoformat():
         return "already_today"
     return None
@@ -980,6 +997,21 @@ def start_tick(app, cfg: Config, store: SessionStore) -> None:
     if persona.current_settings(cfg) is None:
         logger.info("inner-life: disabled (file-mode persona)")
         return
+    state_path = Path(cfg.scheduler_state_path)
+    if cfg.scheduler_enabled and not state_path.exists():
+        # First boot (or a hand-deleted ledger): the proactive ledger
+        # starts today, with today's greeting marked already-taken.
+        # Without this stamp, a bot first started in the evening sees an
+        # empty ledger, finds the hour past GREETING_HOUR, and "catches
+        # up" on a morning that never happened inside this ledger's
+        # lifetime (merge-acceptance bug, 2026-07-10; GREETING_WINDOW_HOURS
+        # bounds the same mistake for later cold starts, but a first boot
+        # INSIDE the window would still fire without this). One synchronous
+        # write, once per ledger lifetime, at boot -- not on the tick path.
+        first_state = _fresh_state()
+        first_state["greeting_date"] = datetime.now().astimezone().date().isoformat()
+        _atomic_write(state_path, first_state)
+        logger.info("scheduler: fresh ledger -- first greeting waits for tomorrow morning")
     app.bot_data["_inner_tick_task"] = asyncio.create_task(
         tick_loop(cfg, store, app))
     if cfg.diary_enabled:

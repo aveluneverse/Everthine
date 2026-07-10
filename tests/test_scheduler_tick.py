@@ -248,6 +248,63 @@ class TestStartTickMounting(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(task)
 
 
+# --- 1b. start_tick's fresh-ledger stamp (merge-acceptance fix, 2026-07-10):
+#         a missing scheduler-state file at arm time is created with
+#         greeting_date = today, so a bot first booted in the evening never
+#         "catches up" on a morning greeting that predates its own ledger ----
+
+class TestStartTickFreshLedgerStamp(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        _install_resets(self)
+
+    async def _cancel(self, task):
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_missing_ledger_created_with_todays_greeting_taken(self):
+        cfg = _folder_cfg(self.root)
+        app = FakeApp()
+        self.assertFalse(Path(cfg.scheduler_state_path).exists())
+        with self.assertLogs("everthine", level="INFO") as cm:
+            scheduler.start_tick(app, cfg, SessionStore(cfg.session_path))
+        self.assertTrue(Path(cfg.scheduler_state_path).exists())
+        state = scheduler.load_state(cfg.scheduler_state_path)
+        today = datetime.now().astimezone().date().isoformat()
+        self.assertEqual(state["greeting_date"], today)
+        # Every other field is still fresh: only the greeting is marked taken.
+        self.assertEqual(state["miss_you_anchor"], "")
+        self.assertEqual(state["share_date"], "")
+        self.assertEqual(state["share_count"], 0)
+        self.assertEqual(state["budget_used"], 0)
+        self.assertEqual(state["last_nudge_at"], "")
+        self.assertTrue(any("fresh ledger" in m for m in cm.output))
+        await self._cancel(app.bot_data["_inner_tick_task"])
+
+    async def test_existing_ledger_left_untouched(self):
+        cfg = _folder_cfg(self.root)
+        seeded = scheduler._fresh_state()
+        seeded["greeting_date"] = "2020-01-01"
+        seeded["budget_used"] = 3
+        scheduler._atomic_write(Path(cfg.scheduler_state_path), seeded)
+        app = FakeApp()
+        scheduler.start_tick(app, cfg, SessionStore(cfg.session_path))
+        reread = scheduler.load_state(cfg.scheduler_state_path)
+        self.assertEqual(reread["greeting_date"], "2020-01-01")
+        self.assertEqual(reread["budget_used"], 3)
+        await self._cancel(app.bot_data["_inner_tick_task"])
+
+    async def test_scheduler_off_creates_no_ledger(self):
+        # The stamp is the scheduler's own bootstrap; a diary/portrait-only
+        # run must not leave a proactive ledger behind (L1: scheduler off
+        # is byte-identical to M6, on disk included).
+        cfg = _folder_cfg(self.root, scheduler_enabled=False)
+        app = FakeApp()
+        scheduler.start_tick(app, cfg, SessionStore(cfg.session_path))
+        self.assertFalse(Path(cfg.scheduler_state_path).exists())
+        await self._cancel(app.bot_data["_inner_tick_task"])
+
+
 # --- 2. the tick loop is unkillable: a raising call in the diary or portrait
 #        segment is logged and the loop keeps going, never blocking the other;
 #        write_once/update_once always receive the same aware now. Migrated in

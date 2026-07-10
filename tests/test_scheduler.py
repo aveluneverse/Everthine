@@ -373,6 +373,34 @@ class TestGreetingDue(unittest.TestCase):
             reason = scheduler.greeting_due(cfg, now, state)
         self.assertIsNone(reason)
 
+    def test_window_passed_blocks_late_greeting(self):
+        # The merge-acceptance bug (2026-07-10): a fresh ledger plus an
+        # evening clock let a "good morning" out at 18:53. Past
+        # GREETING_HOUR + GREETING_WINDOW_HOURS the moment is gone.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td, GREETING_HOUR="8")
+            now = _aware(8 + scheduler.GREETING_WINDOW_HOURS)
+            reason = scheduler.greeting_due(cfg, now, dict(FRESH_STATE))
+        self.assertEqual(reason, "window_passed")
+
+    def test_window_open_until_its_last_minute(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td, GREETING_HOUR="8")
+            now = _aware(8 + scheduler.GREETING_WINDOW_HOURS - 1, 59)
+            reason = scheduler.greeting_due(cfg, now, dict(FRESH_STATE))
+        self.assertIsNone(reason)
+
+    def test_late_evening_hour_is_never_window_capped(self):
+        # greeting_hour >= 21 pushes hour + window past 23, so now.hour can
+        # never reach the sum: the cap silently never fires and the
+        # quiet-hours gate is what bounds such configurations instead
+        # (documented on GREETING_WINDOW_HOURS).
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td, GREETING_HOUR="21")
+            now = _aware(23)
+            reason = scheduler.greeting_due(cfg, now, dict(FRESH_STATE))
+        self.assertIsNone(reason)
+
 
 # ---------------------------------------------------------------------
 # miss_you_due + the anchor's dedup cycle
@@ -531,7 +559,7 @@ class TestPickJob(unittest.TestCase):
     def test_greeting_wins_when_greeting_and_miss_you_both_due(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = _cfg(td, GREETING_HOUR="8", MISS_YOU_AFTER_HOURS="6")
-            now = _aware(12)
+            now = _aware(11)  # inside the greeting window (8-12)
             last_contact = now - timedelta(hours=7)  # away long enough for miss_you too
             job, reason = scheduler.pick_job(cfg, now, last_contact, dict(FRESH_STATE), 0.5)
         self.assertEqual(job, "greeting")
@@ -1027,7 +1055,10 @@ class TestBuildNudgePrompt(unittest.TestCase):
 # ---------------------------------------------------------------------
 
 ENGINE_SEAM = "everthine.scheduler.engine.try_run_once"
-NOW = _aware(12)  # 2026-07-06 12:00 UTC: a plain afternoon, outside quiet hours
+NOW = _aware(11)  # 2026-07-06 11:00 UTC: a plain late morning, outside quiet
+                  # hours AND inside the greeting window (GREETING_HOUR=8 +
+                  # GREETING_WINDOW_HOURS=4 ends at 12:00) -- the suite leans
+                  # on "greeting is due at NOW" to drive nudge_once
 
 
 def _persona_folder(td, share_topics=None):
