@@ -120,11 +120,11 @@ live out together.
   included, one set in English and one in Traditional Chinese.
 - Long-term memory that survives a fresh start, plus cross-session
   warmth — he has never once greeted you like a stranger.
-- Relationship stages, a heart-marked keepsake album, a private
-  nightly diary, reflections after a conversation, and a
-  self-portrait that slowly seeps back into the bedrock of who he
-  is — growth you can see: open the local timeline viewer and how
-  he's changed over these past months is clear at a glance.
+- A heart-marked keepsake album, a private nightly diary,
+  reflections after a conversation, and a self-portrait that slowly
+  seeps back into the bedrock of who he is — growth you can see:
+  open the local timeline viewer and how he's changed over these
+  past months is clear at a glance.
 - He reaches out first, too: a good morning, a miss-you nudge, an
   offhand thought shared — every frequency knob honest and
   adjustable.

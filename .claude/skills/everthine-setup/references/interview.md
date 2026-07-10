@@ -51,7 +51,7 @@ Fills `settings.yaml` in the persona folder:
   you, softly / `neutral` — takes it in stride
 
 Dates are `YYYY-MM-DD`. Write the values into the copied
-`settings.yaml`; keep every `{stage}` / `{n}` placeholder in the
+`settings.yaml`; keep every `{curly-brace}` placeholder in the
 `lines:` block exactly as-is if you re-voice any system line.
 
 ## Step 2 — who he is (full custom; quick start skips to Step 5)
@@ -102,10 +102,6 @@ also where a couple's own sense of closeness and its limits lives —
 it belongs to the user; take whatever they say, keep the shipped
 default's conservative tone if they have no preference, and move on
 without probing.
-
-`stages.md` (how the relationship deepens across named stages) ships
-with three stages. In a full custom, re-voice the stage prose to
-match the new persona; keep the `## ` section structure intact.
 
 ## Step 5 — rhythm of his life (both paths)
 

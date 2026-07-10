@@ -44,9 +44,9 @@ above. `.env` is gitignored; leave it that way.
   to `personas/mine` — the user's own persona folder, which is
   gitignored so it never leaves their machine.
 - Apply the interview material: `settings.yaml` values first, then
-  (full custom) rewrite `identity.md`, `voice.md`, `boundaries.md`,
-  `stages.md` per the interview guide. Keep every `{stage}` / `{n}`
-  placeholder in re-voiced lines.
+  (full custom) rewrite `identity.md`, `voice.md`, and
+  `boundaries.md` per the interview guide. Keep every
+  `{curly-brace}` placeholder in re-voiced lines.
 - Set `PERSONA_PATH` to `personas/mine` in `.env`.
 - Write the rhythm answers from the interview into `.env` now
   (`GREETING_HOUR` and friends). Only write keys the user actually

@@ -12,7 +12,7 @@ slowly.
 
 Your companion lives inside one folder (put it in
 `personas/mine` — it stays out of git and never leaves your
-machine). Five files — all of him there is:
+machine). Four files — all of him there is:
 
 | File | What's in it |
 |---|---|
@@ -20,7 +20,6 @@ machine). Five files — all of him there is:
 | `identity.md` | who he is — his character, his tastes, how the two of you met |
 | `voice.md` | the texture of how he talks |
 | `boundaries.md` | his measure, and where he draws the line |
-| `stages.md` | how the two of you grow close, one stage at a time |
 
 Copy `personas/default/` (the English demo couple) and start
 editing — it's a complete, working example, and every section
@@ -91,9 +90,10 @@ The framework treats every combination exactly the same.
   first.
 - The `lines:` block is his system-line pack — buttons, menus,
   and waiting messages can all be re-voiced in his register.
-  The `{stage}` and `{n}` inside them are placeholders: **keep
-  them exactly as they are when you re-voice a line**. Delete or
-  translate them and the matching feature loses its voice.
+  Anything wrapped in `{curly braces}` inside a line is a
+  placeholder: **keep it exactly as it is when you re-voice the
+  line**. Delete or translate one and the matching feature
+  loses its voice.
 - The waiting lines (`thinking:`) can hold several that take
   turns on screen. Want examples with some flavor? The demo
   couple retired three bookish ones — "Let me finish this page
@@ -105,7 +105,7 @@ The framework treats every combination exactly the same.
   the whole section (he'll fall back on a built-in set of
   topics).
 
-## boundaries.md and stages.md
+## boundaries.md
 
 - `boundaries.md` is where you write what he'll gently turn
   down, which topics need a little extra care, and how close
@@ -114,10 +114,6 @@ The framework treats every combination exactly the same.
   make it, conservative out of the box. Start the whole file
   with a single top-level heading and break the body into
   whatever sections you like.
-- `stages.md` is split into sections with `## Stage name` (the
-  demo has three). Rewrite the narrative however you want, but
-  keep the `##` structure — that's how the engine recognizes
-  each stage.
 
 ## Making it take effect
 

@@ -133,8 +133,11 @@ class TestConfig(unittest.TestCase):
 
 class TestStageAlbumKnobs(unittest.TestCase):
     def test_defaults(self):
+        # Stages ship OFF (owner ruling, 2026-07-10): out of the box the
+        # companion is fully warm from the first message -- no closeness to
+        # unlock. The album is the default-on half of M4.
         cfg = load_config(BASE)
-        self.assertTrue(cfg.stages_enabled)
+        self.assertFalse(cfg.stages_enabled)
         self.assertTrue(cfg.album_enabled)
 
     def test_paths_derive_from_data_dir(self):
@@ -152,11 +155,14 @@ class TestStageAlbumKnobs(unittest.TestCase):
 
     def test_env_example_documents_stage_album_vars(self):
         # Sibling of TestConfig.test_env_example_documents_memory_vars, same
-        # shape: guards .env.example's 1:1 catalog for the stage/album knobs.
+        # shape: guards .env.example's catalog for the album knob -- and pins
+        # the stages knob's ABSENCE. Stages are an undocumented, off-by-
+        # default capability (owner ruling, 2026-07-10): the flag still
+        # parses for anyone who reads the source, but no shipped document
+        # advertises it, .env.example included.
         text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
-        for var in ("STAGES_ENABLED", "ALBUM_ENABLED"):
-            with self.subTest(var=var):
-                self.assertIn(var, text)
+        self.assertIn("ALBUM_ENABLED", text)
+        self.assertNotIn("STAGES_ENABLED", text)
 
 
 class TestDiaryReflectionKnobs(unittest.TestCase):

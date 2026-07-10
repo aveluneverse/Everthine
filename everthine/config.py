@@ -72,7 +72,12 @@ class Config:
     memory_enabled: bool = True
     memory_top_k: int = 3
     memory_embedding_model: str = "BAAI/bge-small-zh-v1.5"
-    stages_enabled: bool = True
+    # Off by default (owner ruling, 2026-07-10): people who reach for an AI
+    # companion want to be cared for from the first message, not to unlock
+    # closeness stage by stage. The machinery stays in the codebase for
+    # anyone who deliberately flips STAGES_ENABLED=true, but out of the box
+    # the companion is fully warm and no stage UI exists.
+    stages_enabled: bool = False
     album_enabled: bool = True
     diary_enabled: bool = True
     reflection_enabled: bool = True
@@ -201,7 +206,7 @@ def load_config(env: Mapping | None = None) -> Config:
         memory_enabled=_get_bool(env, "MEMORY_ENABLED", True),
         memory_top_k=_get_positive_int(env, "MEMORY_TOP_K", 3),
         memory_embedding_model=str(env.get("MEMORY_EMBEDDING_MODEL", "")).strip() or "BAAI/bge-small-zh-v1.5",
-        stages_enabled=_get_bool(env, "STAGES_ENABLED", True),
+        stages_enabled=_get_bool(env, "STAGES_ENABLED", False),
         album_enabled=_get_bool(env, "ALBUM_ENABLED", True),
         diary_enabled=_get_bool(env, "DIARY_ENABLED", True),
         reflection_enabled=_get_bool(env, "REFLECTION_ENABLED", True),

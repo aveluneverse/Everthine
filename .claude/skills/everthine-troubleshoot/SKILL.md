@@ -21,7 +21,7 @@ Safe to know: bot tokens are automatically masked in all logs
 | Startup dies: `BOT_TOKEN is required` | `.env` missing or empty token | Re-run the token step of the everthine-setup deploy guide |
 | Startup dies: `AUTHORIZED_USER_ID is required` or `must be an integer` | id missing or has stray characters | Get the numeric id again (@userinfobot), fix `.env` |
 | Startup dies mentioning the Claude CLI | `claude` not found by a plain shell | Reinstall or relink the Claude Code CLI; verify `claude --version` in a fresh terminal |
-| Startup dies naming a persona file and key | That persona file is malformed — the message names the exact file and field | Fix exactly what it names; placeholders like `{stage}` must survive re-voicing |
+| Startup dies naming a persona file and key | That persona file is malformed — the message names the exact file and field | Fix exactly what it names; `{curly-brace}` placeholders must survive re-voicing |
 | He replies with his "need to log in again" line | The Claude CLI session expired (an auth error from the engine) | Run `claude` once in a terminal and complete the login; no restart needed |
 | Bot runs, but total silence to *everyone* | Wrong `AUTHORIZED_USER_ID` — he answers one id and no one else; **silence is by design** for strangers | Confirm the user's own numeric id matches `.env` |
 | First start very slow, seems stuck | One-time memory-model download (a few hundred MB) | Wait; later boots load from disk in seconds |

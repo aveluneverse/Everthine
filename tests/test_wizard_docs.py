@@ -207,8 +207,12 @@ class TestPersonaGuide(WizardDocMixin, unittest.TestCase):
         self.assertIn("## 五條家規", text)
 
     def test_placeholder_warning_present(self):
+        # The warning is generic on purpose ({curly braces}, not a named
+        # placeholder): stages are retired from every shipped document
+        # (owner ruling, 2026-07-10), so no doc may name {stage} again.
         text = self.DOC.read_text(encoding="utf-8")
-        self.assertIn("{stage}", text)
+        self.assertIn("{大括號}", text)
+        self.assertNotIn("{stage}", text)
 
 
 class TestPersonaGuideEn(WizardDocMixin, unittest.TestCase):
@@ -219,8 +223,11 @@ class TestPersonaGuideEn(WizardDocMixin, unittest.TestCase):
         self.assertIn("## Five house rules", text)
 
     def test_placeholder_warning_present(self):
+        # Generic on purpose -- see TestPersonaGuide's twin for why no
+        # shipped document may name {stage} again.
         text = self.DOC.read_text(encoding="utf-8")
-        self.assertIn("{stage}", text)
+        self.assertIn("{curly braces}", text)
+        self.assertNotIn("{stage}", text)
 
 
 class TestFaq(WizardDocMixin, unittest.TestCase):

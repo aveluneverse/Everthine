@@ -43,6 +43,18 @@ NOW_NAIVE = _NOW_AWARE.astimezone().replace(tzinfo=None)
 # `lines` both in the loader and here).
 OVERRIDABLE_KEYS = frozenset(messages._MESSAGES) - {"unauthorized_silence", "cli_missing", "thinking"}
 
+# The stage-feature line keys. Stages are retired from everything shipped
+# (owner ruling, 2026-07-10: off by default, no document names them, demos
+# carry neither a stages.md nor these lines) -- the keys still parse for a
+# source-reader who enables the flag and voices their own.
+STAGE_LINE_KEYS = frozenset({
+    "cmd_stage_desc", "stage_intro", "btn_stage_advance",
+    "btn_stage_retreat", "btn_stage_close", "stage_note_prompt",
+    "btn_note_skip", "btn_note_cancel", "stage_advanced_ack",
+    "note_saved_ack", "stage_retreat_confirm", "btn_retreat_yes",
+    "btn_retreat_no", "stage_retreated_ack", "stage_road_clipped",
+})
+
 
 def _cfg(persona_path: Path) -> Config:
     return Config(bot_token="x", authorized_user_id=1, persona_path=persona_path)
@@ -103,9 +115,12 @@ class TestAssemblyIntegration(unittest.TestCase):
 
 class TestZhPackCompleteness(unittest.TestCase):
     def test_zh_lines_cover_every_overridable_key(self):
+        # Complete coverage of everything shipped-and-on; the retired
+        # stage keys are pinned ABSENT (a demo must not voice a feature
+        # no shipped document admits exists).
         p = _load(ZH_DIR)
         keys = set(p.settings.lines.keys())
-        self.assertEqual(keys, set(OVERRIDABLE_KEYS))
+        self.assertEqual(keys, set(OVERRIDABLE_KEYS) - STAGE_LINE_KEYS)
 
     def test_zh_thinking_is_a_nonempty_list(self):
         p = _load(ZH_DIR)
@@ -146,21 +161,23 @@ class TestGitignoreBehavior(unittest.TestCase):
         self.assertFalse(self._is_ignored("personas/default-zh/settings.yaml"))
 
 
-# --- 6. M4 stage catalog: both demos walk the same three-stage arc ---------
+# --- 6. Stages are retired from the shipped demos (owner ruling,
+#        2026-07-10): out of the box the companion is fully warm from the
+#        first message -- no stages.md, no stage lines, nothing to unlock.
+#        The engine still parses a stages.md for a source-reader who
+#        enables the flag and writes one; the demos just don't carry it. --
 
 class TestDemoStages(unittest.TestCase):
-    def test_both_demo_personas_have_three_stages(self):
+    def test_neither_demo_ships_a_stages_file(self):
         for folder in (EN_DIR, ZH_DIR):
-            p = _load(folder)
-            self.assertIsNotNone(p.stages)
-            self.assertEqual(len(p.stages), 3)
+            with self.subTest(folder=folder.name):
+                self.assertFalse((folder / "stages.md").exists())
 
-    def test_demo_stage_names_match_catalog(self):
-        en = _load(EN_DIR).stages
-        self.assertEqual(tuple(n for n, _ in en),
-                         ("Settling in", "In rhythm", "Deep water"))
-        zh = _load(ZH_DIR).stages
-        self.assertEqual(tuple(n for n, _ in zh), ("安頓", "合拍", "深水區"))
+    def test_neither_demo_parses_any_stages(self):
+        for folder in (EN_DIR, ZH_DIR):
+            with self.subTest(folder=folder.name):
+                p = _load(folder)
+                self.assertFalse(p.stages)
 
 
 # --- 7. M7 share-topic pools: both demos ship a five-topic pool -------------
