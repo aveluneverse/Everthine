@@ -206,8 +206,8 @@ class TestFaq(WizardDocMixin, unittest.TestCase):
 
     def test_honest_disclosures_present(self):
         text = self.DOC.read_text(encoding="utf-8")
-        for marker in ("他不會唸日記給你聽", "token 已經自動遮罩",
-                       "LOG_LEVEL"):
+        for marker in ("他不會主動對你揭露", "token 已經自動遮罩",
+                       "LOG_LEVEL", "電腦關著，還能找到他嗎"):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
 

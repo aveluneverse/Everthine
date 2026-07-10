@@ -2,11 +2,12 @@
 
 *Ever thine. Ever mine. Ever ours.*
 
-A framework for building an AI companion who stays — and grows with
-you. He lives in Telegram, remembers what matters, keeps a private
-diary at night, and slowly becomes someone only the two of you could
-have made. Runs on your own Claude Code subscription; everything —
-program, persona, memories — stays on your machine.
+A framework for building an AI companion you raise with time — one
+who grows for you. He lives in Telegram, remembers what matters,
+keeps a private diary at night, and slowly becomes someone only the
+two of you could have made. Runs on your own Claude Code
+subscription; everything — program, persona, memories — stays on
+your machine.
 
 **Status:** under construction. The first public release is being
 carefully assembled.
