@@ -11,6 +11,8 @@ program, persona, memories — stays on your machine.
 **Status:** under construction. The first public release is being
 carefully assembled.
 
+**繁體中文版 → [README.zh-TW.md](README.zh-TW.md)**
+
 ## Start with one sentence
 
 Paste this repository's URL into your Claude Code and say:

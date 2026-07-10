@@ -184,6 +184,10 @@ class TestReadme(WizardDocMixin, unittest.TestCase):
         self.assertIn("If you are Claude Code", text)
         self.assertIn("git clone", text)
 
+    def test_links_chinese_readme(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("README.zh-TW.md", text)
+
 
 class TestPersonaGuide(WizardDocMixin, unittest.TestCase):
     DOC = PERSONA_GUIDE
@@ -222,6 +226,14 @@ class TestReadmeZh(WizardDocMixin, unittest.TestCase):
     def test_cost_section_present(self):
         text = self.DOC.read_text(encoding="utf-8")
         self.assertIn("## 費用，誠實說", text)
+
+    def test_relative_markdown_links_resolve(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        for target in re.findall(r"\]\(((?!https?://)[^)#]+)\)", text):
+            with self.subTest(link=target):
+                self.assertTrue((REPO / target).exists(),
+                                f"README.zh-TW.md links to {target!r} "
+                                f"which does not exist")
 
 
 if __name__ == "__main__":
