@@ -85,14 +85,14 @@ The framework treats every combination exactly the same.
 ## Notes on settings.yaml
 
 - Dates are always `YYYY-MM-DD`. Birthdays and anniversaries
-  feed into his sense of the present, so a future date is one
-  he'll actually count down to — if he starts looking forward
+  feed into his sense of the present, so **a future date is one
+  he'll actually count down to** — if he starts looking forward
   to a day that shouldn't exist, come back and check here
   first.
 - The `lines:` block is his system-line pack — buttons, menus,
   and waiting messages can all be re-voiced in his register.
-  The `{stage}` and `{n}` inside them are placeholders: keep
-  them exactly as they are when you re-voice a line. Delete or
+  The `{stage}` and `{n}` inside them are placeholders: **keep
+  them exactly as they are when you re-voice a line**. Delete or
   translate them and the matching feature loses its voice.
 - The waiting lines (`thinking:`) can hold several that take
   turns on screen. Want examples with some flavor? The demo

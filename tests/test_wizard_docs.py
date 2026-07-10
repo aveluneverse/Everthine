@@ -190,6 +190,14 @@ class TestReadme(WizardDocMixin, unittest.TestCase):
         text = self.DOC.read_text(encoding="utf-8")
         self.assertIn("README.zh-TW.md", text)
 
+    def test_relative_markdown_links_resolve(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        for target in re.findall(r"\]\(((?!https?://)[^)#]+)\)", text):
+            with self.subTest(link=target):
+                self.assertTrue((REPO / target).exists(),
+                                f"README.zh-TW.md links to {target!r} "
+                                f"which does not exist")
+
 
 class TestPersonaGuide(WizardDocMixin, unittest.TestCase):
     DOC = PERSONA_GUIDE

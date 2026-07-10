@@ -129,8 +129,8 @@ live out together.
   offhand thought shared — every frequency knob honest and
   adjustable.
 
-Want to go deeper: [persona guide](docs/persona-guide.zh-TW.md) |
-[FAQ](docs/faq.zh-TW.md)
+Want to go deeper: [persona guide](docs/persona-guide.md) |
+[FAQ](docs/faq.md)
 
 ## The cost, honestly
 
