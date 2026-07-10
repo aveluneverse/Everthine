@@ -20,6 +20,7 @@ TROUBLESHOOT = REPO / ".claude" / "skills" / "everthine-troubleshoot" / "SKILL.m
 README = REPO / "README.md"
 PERSONA_GUIDE = REPO / "docs" / "persona-guide.zh-TW.md"
 FAQ = REPO / "docs" / "faq.zh-TW.md"
+README_ZH = REPO / "README.zh-TW.md"
 
 # The engine-isolation guarantee CLAUDE.md must keep stating verbatim.
 ISOLATION_ANCHOR = ("The companion's engine runs in a neutral working "
@@ -205,6 +206,22 @@ class TestFaq(WizardDocMixin, unittest.TestCase):
                        "LOG_LEVEL"):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
+
+
+class TestReadmeZh(WizardDocMixin, unittest.TestCase):
+    DOC = README_ZH
+
+    def test_decree_copy_anchors(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        for anchor in ("自訂是出廠設定；養成是歲月",
+                       "這個迴圈就是養成引擎",
+                       "快不了，也假不了"):
+            with self.subTest(anchor=anchor):
+                self.assertIn(anchor, text)
+
+    def test_cost_section_present(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("## 費用，誠實說", text)
 
 
 if __name__ == "__main__":
