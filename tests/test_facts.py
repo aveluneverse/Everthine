@@ -350,6 +350,26 @@ class TestSelectFacts(unittest.TestCase):
         out = facts.select_facts("同樣的事實", [a, b], 2, TODAY)
         self.assertEqual([f["category"] for f in out], ["first", "second"])
 
+    def test_empty_message_orders_by_recency_only(self):
+        # The proactive nudge path (scheduler.nudge_once) has no incoming
+        # message to rank against, so it calls select_facts with message="".
+        # extract_bigrams("") is the empty set, which zeroes relevance for
+        # every fact regardless of its text (already pinned in isolation by
+        # TestRelevanceScore.test_empty_message_is_zero) -- this test pins
+        # the consequence one level up, at select_facts itself: with
+        # relevance out of the equation the 0.6/0.4 blend collapses to pure
+        # recency, so the newest fact always leads. Fed deliberately out of
+        # date order (oldest first) so a bug that just passed input order
+        # through unsorted could not masquerade as a real recency sort.
+        oldest = {"text": "she prefers tea over coffee", "category": "preference",
+                 "date": "2026-06-11"}          # 30 days old -> recency 0.0
+        middle = {"text": "her sister visited last month", "category": "family",
+                 "date": "2026-07-01"}          # 10 days old -> recency ~0.667
+        newest = {"text": "she started a pottery class", "category": "hobby",
+                 "date": "2026-07-11"}          # today -> recency 1.0
+        out = facts.select_facts("", [oldest, middle, newest], 3, TODAY)
+        self.assertEqual(out, [newest, middle, oldest])
+
 
 # ---------------------------------------------------------------------
 # 4. Eligibility gate

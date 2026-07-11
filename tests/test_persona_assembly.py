@@ -798,6 +798,33 @@ class TestBuildSystemPromptNudge(unittest.TestCase):
             self.assertEqual(build_system_prompt_nudge(cfg, self._now()),
                              DEFAULT_PERSONA)
 
+    def test_facts_block_seam_sentinel_appears_in_folder_mode(self):
+        # The one seam this task opens on the proactive path (the other
+        # three -- memory, inner, expression -- stay closed). A
+        # caller-supplied facts_block threads straight through to
+        # assemble_folder_prompt exactly as it does on the live path -- this
+        # only proves the seam is wired, not what the caller puts in it
+        # (that is scheduler.nudge_once's job, tested in test_scheduler.py).
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona")
+            cfg = self._cfg(folder, Path(td) / "state")
+            out = build_system_prompt_nudge(
+                cfg, self._now(), facts_block="SENTINEL-FACTS-BLOCK-4f7c")
+            self.assertIn("SENTINEL-FACTS-BLOCK-4f7c", out)
+
+    def test_facts_block_default_none_matches_explicit_none(self):
+        # The L1 rollback pin for this seam: a caller that never passes
+        # facts_block (every existing call site before this task) must get
+        # back exactly what an explicit facts_block=None produces -- zero
+        # drift on the default path.
+        with tempfile.TemporaryDirectory() as td:
+            folder = self._write_folder(Path(td) / "persona")
+            cfg = self._cfg(folder, Path(td) / "state")
+            now = self._now()
+            out_default = build_system_prompt_nudge(cfg, now)
+            out_explicit_none = build_system_prompt_nudge(cfg, now, facts_block=None)
+            self.assertEqual(out_default, out_explicit_none)
+
 
 class TestPortraitNeverEntersDynamicContext(unittest.TestCase):
     def test_dynamic_context_source_has_no_portrait(self):

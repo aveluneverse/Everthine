@@ -141,10 +141,11 @@ def build_system_prompt(cfg: Config, memory_block: str | None = None,
     return DEFAULT_PERSONA
 
 
-def build_system_prompt_nudge(cfg: Config, now: datetime) -> str:
+def build_system_prompt_nudge(cfg: Config, now: datetime,
+                              facts_block: str | None = None) -> str:
     """Assemble the proactive system prompt: build_system_prompt's sibling for
     a scheduled reach-out, mirroring its folder branch with two deliberate
-    differences and three seams held closed.
+    differences, three seams held closed, and one -- facts -- held open.
 
     Folder mode composes the same three layers, the same stage block, and the
     same evolved self-portrait as the live path -- relationship state and who he
@@ -155,9 +156,17 @@ def build_system_prompt_nudge(cfg: Config, now: datetime) -> str:
     conjure a message that never came. Forcing those two inputs makes both
     sections fall away on their own, through dynamic_context's existing
     conditions, rather than by stripping text after the fact. memory_block,
-    inner_block, and the expression note are all None: a proactive turn has no
-    retrieval, no page-turn count to react to, and no just-sent message for a
-    reaction tag to sit on.
+    inner_block, and the expression note are all still None: a proactive turn
+    has no retrieval, no page-turn count to react to, and no just-sent message
+    for a reaction tag to sit on. facts_block (optional, default None) is the
+    one seam left open, threading straight through to assemble_folder_prompt
+    exactly as it does on the live path: a reach-out still carries what he
+    knows about her -- just ranked differently, since there is no incoming
+    message to weigh relevance against. The caller builds it from an empty
+    message (see scheduler.nudge_once), which collapses facts.select_facts's
+    relevance/recency blend to pure recency: the most recent impressions
+    about her lead, exactly the ranking a reach-out with nothing to react to
+    should use.
 
     `now` is supplied by the caller (timezone-aware) instead of read from the
     clock here, so the fact baseline is fully deterministic and testable; it is
@@ -207,7 +216,8 @@ def build_system_prompt_nudge(cfg: Config, now: datetime) -> str:
         return assemble_folder_prompt(
             persona_obj, now_naive, last_contact, first_today, None,
             stage_block=stage_blk, inner_block=None,
-            expression_note=None, portrait_block=portrait_blk)
+            expression_note=None, portrait_block=portrait_blk,
+            facts_block=facts_block)
 
     # --- Legacy file mode: pinned byte-for-byte, same as build_system_prompt --
     try:

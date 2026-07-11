@@ -16,10 +16,10 @@ from pathlib import Path
 from string import Formatter
 from unittest import mock
 
-from everthine import archive, chunking, recent_context, scheduler
+from everthine import archive, chunking, facts, recent_context, scheduler
 from everthine.config import Config, load_config
 from everthine.engine import EngineReply
-from everthine.persona import PersonaSettings, reset_persona_cache
+from everthine.persona import PersonaSettings, build_system_prompt_nudge, reset_persona_cache
 from everthine.session_store import SessionStore
 
 BASE_ENV = {"BOT_TOKEN": "123456789:" + "A" * 35, "AUTHORIZED_USER_ID": "42"}
@@ -1375,6 +1375,67 @@ class TestNudgeOnceRecentContextPrefix(unittest.TestCase):
         self.assertIsNotNone(result)                        # pipeline still completed
         self.assertTrue(prompt.startswith("[Scheduled nudge from the framework"))  # no prefix
         self.assertTrue(any("warmth injection failed" in line for line in cm.output))
+
+
+# ---------------------------------------------------------------------
+# nudge_once's facts seam: the D1 facts block, threaded into the proactive
+# system prompt the same way bot.prepare_exchange threads it into the live
+# one -- so a scheduled reach-out also opens knowing what he knows about her.
+# ---------------------------------------------------------------------
+
+NUDGE_FACT = {"text": "she just started a pottery class", "category": "hobby",
+             "date": "2026-07-06"}
+
+
+class TestNudgeOnceFactsWiring(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(reset_persona_cache)
+
+    def test_facts_enabled_with_data_reaches_system_prompt(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td, FACTS_ENABLED="true")
+            facts.append_facts(cfg.facts_path, [NUDGE_FACT], cfg.facts_max)
+            _seed_contact(cfg, NOW)
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM, return_value=_ok_reply()) as run:
+                scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+            system_prompt = run.call_args.kwargs["system_prompt"]
+        self.assertIn("# What you know about Sam", system_prompt)
+        self.assertIn("- [hobby] she just started a pottery class", system_prompt)
+
+    def test_facts_block_failure_is_fail_soft_and_logged(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td, FACTS_ENABLED="true")
+            facts.append_facts(cfg.facts_path, [NUDGE_FACT], cfg.facts_max)
+            _seed_contact(cfg, NOW)
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM, return_value=_ok_reply()), \
+                    mock.patch.object(facts, "prompt_block",
+                                      side_effect=RuntimeError("boom")), \
+                    self.assertLogs("everthine", level="WARNING") as cm:
+                result = scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+        self.assertIsNotNone(result)   # facts dying never costs the reach-out
+        self.assertTrue(any("facts block failed" in line for line in cm.output))
+
+    def test_facts_disabled_system_prompt_byte_identical_to_no_facts_call(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _folder_cfg(td, FACTS_ENABLED="false")
+            # On disk but ignored -- proves the flag gate, not an empty book.
+            facts.append_facts(cfg.facts_path, [NUDGE_FACT], cfg.facts_max)
+            _seed_contact(cfg, NOW)
+            store = _store(cfg, session_id="s1")
+            with mock.patch(ENGINE_SEAM, return_value=_ok_reply()) as run:
+                scheduler.nudge_once(cfg, store, NOW, roll=0.5)
+            system_prompt = run.call_args.kwargs["system_prompt"]
+            # L1 pin: byte-identical to a build_system_prompt_nudge call with
+            # no facts_block threaded through at all -- the end-to-end
+            # flag-off path must be indistinguishable from before this task
+            # existed. Computed here, still inside the temp persona folder's
+            # lifetime -- cfg.persona_path must still exist on disk for this
+            # direct call to take the same folder-mode branch nudge_once did.
+            expected = build_system_prompt_nudge(cfg, NOW)
+        self.assertNotIn("# What you know about", system_prompt)
+        self.assertEqual(system_prompt, expected)
 
 
 # ---------------------------------------------------------------------

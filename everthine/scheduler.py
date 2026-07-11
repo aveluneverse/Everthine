@@ -61,9 +61,10 @@ throughout, importing only archive from the framework at runtime
 (truth_timeline's one data source). nudge_once, the execution line built on
 top of them, reaches further by design -- the engine (try_run_once only,
 the non-blocking call), persona's function surface (current_settings /
-contact_signals / build_system_prompt_nudge), and recent_context (the warm
-cross-session prefix) -- exactly as diary.write_once reaches past its own
-module's pure core; it also uses the standard library's random to pick a
+contact_signals / build_system_prompt_nudge), facts (prompt_block, the same
+D1 structured-facts block the live path injects), and recent_context (the
+warm cross-session prefix) -- exactly as diary.write_once reaches past its
+own module's pure core; it also uses the standard library's random to pick a
 share topic. `Config`, `PersonaSettings`, and `SessionStore` appear only in
 TYPE_CHECKING type hints, costing nothing at runtime.
 """
@@ -80,7 +81,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import archive, chunking, diary, engine, facts_extract, persona, portrait, recent_context
+from . import (archive, chunking, diary, engine, facts, facts_extract, persona,
+              portrait, recent_context)
 
 if TYPE_CHECKING:
     from .config import Config
@@ -783,9 +785,11 @@ def nudge_once(cfg: Config, store: SessionStore, now: datetime,
 
     Like diary.write_once, this does NOT swallow unexpected exceptions: the
     background tick that will call it wraps every round in its own try/except,
-    and burying a bug here would only hide it. The single internal fail-soft
-    point is the recent-context warm prefix, mirroring bot.prepare_exchange --
-    a broken warmth injection must never cost the whole reach-out.
+    and burying a bug here would only hide it. Two internal points ARE
+    fail-soft on their own, each mirroring its bot.prepare_exchange sibling
+    exactly: the recent-context warm prefix and the facts block -- a broken
+    warmth injection or a broken facts read must never cost the whole
+    reach-out.
     """
     settings = persona.current_settings(cfg)
     if settings is None:
@@ -841,7 +845,31 @@ def nudge_once(cfg: Config, store: SessionStore, now: datetime,
     if block is not None:
         prompt = block + "\n\n" + prompt
 
-    system_prompt = persona.build_system_prompt_nudge(cfg, now)
+    # The Layer 3 facts block, gated on the flag and fail-soft exactly the
+    # way bot.prepare_exchange's own facts block is -- a broken read must
+    # never cost the whole reach-out. Unlike that sibling, `settings` here
+    # is used as-is, not re-fetched inside the try: nudge_once already holds
+    # it from the top-of-function persona.current_settings() call (guarded
+    # by its own None early-return above), so a second fetch would only
+    # re-read the same module-cached persona for no isolation benefit --
+    # bot.py's re-fetch exists solely because ITS facts try sits nested
+    # inside the memory block's own try scope, a constraint that does not
+    # apply here. The message argument is deliberately "", not real text: a
+    # scheduled reach-out has no incoming message to weigh relevance
+    # against. extract_bigrams("") is the empty set, so relevance_score
+    # comes back 0.0 for every fact and select_facts's 0.6*relevance +
+    # 0.4*recency blend collapses to pure recency -- the freshest things he
+    # knows about her lead, exactly what a turn with nothing to react to
+    # should carry.
+    facts_block = None
+    if cfg.facts_enabled:
+        try:
+            facts_block = facts.prompt_block(cfg, "", now, settings.partner_name)
+        except Exception:
+            logger.warning("facts block failed; continuing without it",
+                           exc_info=True)
+    system_prompt = persona.build_system_prompt_nudge(cfg, now,
+                                                      facts_block=facts_block)
 
     # try_run_once (never run_once): a proactive reach-out always yields to
     # live conversation, so a busy engine is a skip, not a wait. Resume the
