@@ -1,16 +1,19 @@
 """scheduler.py's background inner-life tick: start_tick (the arm-time gate
 and its log lines) and tick_loop (the heartbeat that hands the diary, the
-self-portrait, and -- new in M7 T6 -- one proactive reach-out each one
-attempt per round).
+self-portrait, -- new in M7 T6 -- one proactive reach-out, and -- new in D1
+T5 -- one facts extraction, one attempt each per round).
 
 M7 T6 moved this tick out of bot.py (where M5 T6 first built it for the diary
 and M6 T6 widened it to the self-portrait) into scheduler.py, its permanent
-home next to nudge_once/deliver, and added the proactive third segment. The
-tick mounting and loop-survival assertions below are migrated verbatim in
-semantics from tests/test_bot_inner_life.py's old TestInnerTickMounting /
-TestInnerTickLoopSurvives (which drove bot._start_inner_tick /
-bot._inner_tick_loop); the proactive segment, the three-flag arm gate, and
-the L1 pins are new.
+home next to nudge_once/deliver, and added the proactive third segment; D1 T5
+inserted facts extraction as a new third segment, pushing proactive to
+fourth, and a fourth arm-gate flag (facts_enabled) alongside its own armed
+log line. The tick mounting and loop-survival assertions below are migrated
+verbatim in semantics from tests/test_bot_inner_life.py's old
+TestInnerTickMounting / TestInnerTickLoopSurvives (which drove
+bot._start_inner_tick / bot._inner_tick_loop); the proactive segment, the
+three-flag arm gate, and the L1 pins were new in M7 T6, and the facts
+segment, the fourth flag, and its own isolation/arm pins are new here.
 
 Conventions follow tests/test_bot_inner_life.py (the tmp-dir + persona-cache
 reset harness, the folder/file persona cfg builders, the done-event +
@@ -28,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from everthine import archive, diary, engine, persona, portrait, scheduler
+from everthine import archive, diary, engine, facts_extract, persona, portrait, scheduler
 from everthine.config import Config
 from everthine.engine import EngineReply
 from everthine.session_store import SessionStore
@@ -106,8 +109,8 @@ ENGINE_SEAM = "everthine.scheduler.engine.try_run_once"
 
 
 # --- 1. start_tick mounting: armed for a folder persona whenever ANY of the
-#        three organ flags (diary / portrait / scheduler) is on; refused when
-#        all are off or the persona is file-mode -----------------------------
+#        four organ flags (diary / portrait / scheduler / facts) is on;
+#        refused when all are off or the persona is file-mode ---------------
 
 class TestStartTickMounting(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -119,15 +122,17 @@ class TestStartTickMounting(unittest.IsolatedAsyncioTestCase):
             await task
 
     async def test_tick_armed_all_flags_on(self):
-        cfg = _folder_cfg(self.root)  # diary/portrait/scheduler default True
+        cfg = _folder_cfg(self.root)  # diary/portrait/scheduler/facts default True
         app = FakeApp()
         store = SessionStore(cfg.session_path)
         with self.assertLogs("everthine", level="INFO") as cm:
             scheduler.start_tick(app, cfg, store)
-        # Byte-identical literal pins: the deployment SOP greps for the first
-        # two; the third is M7 T6's new proactive arm line.
+        # Byte-identical literal pins: the deployment SOP greps for all four --
+        # the first two predate M7 T6, the third is M7 T6's proactive arm
+        # line, the fourth is D1 T5's facts arm line.
         self.assertTrue(any("diary: inner-life tick started" in m for m in cm.output))
         self.assertTrue(any("portrait: armed (interval 7d)" in m for m in cm.output))
+        self.assertTrue(any("facts: extraction armed (idle 30m)" in m for m in cm.output))
         self.assertTrue(any(
             "scheduler: proactive armed (greeting=True miss_you=True share=True)" in m
             for m in cm.output))
@@ -140,12 +145,13 @@ class TestStartTickMounting(unittest.IsolatedAsyncioTestCase):
 
     async def test_tick_armed_diary_only_no_other_lines(self):
         cfg = _folder_cfg(self.root, portrait_enabled=False,
-                          scheduler_enabled=False)
+                          scheduler_enabled=False, facts_enabled=False)
         app = FakeApp()
         with self.assertLogs("everthine", level="INFO") as cm:
             scheduler.start_tick(app, cfg, SessionStore(cfg.session_path))
         self.assertTrue(any("diary: inner-life tick started" in m for m in cm.output))
         self.assertFalse(any("portrait: armed" in m for m in cm.output))
+        self.assertFalse(any("facts: extraction armed" in m for m in cm.output))
         self.assertFalse(any("scheduler: proactive armed" in m for m in cm.output))
         await self._cancel(app.bot_data["_inner_tick_task"])
 
@@ -153,28 +159,48 @@ class TestStartTickMounting(unittest.IsolatedAsyncioTestCase):
         # A non-default interval on purpose: proves the armed line's {n} reads
         # cfg.portrait_interval_days, not a hardcoded 7.
         cfg = _folder_cfg(self.root, diary_enabled=False,
-                          scheduler_enabled=False, portrait_interval_days=3)
+                          scheduler_enabled=False, facts_enabled=False,
+                          portrait_interval_days=3)
         app = FakeApp()
         with self.assertLogs("everthine", level="INFO") as cm:
             scheduler.start_tick(app, cfg, SessionStore(cfg.session_path))
         self.assertFalse(any("tick started" in m for m in cm.output))
         self.assertTrue(any("portrait: armed (interval 3d)" in m for m in cm.output))
+        self.assertFalse(any("facts: extraction armed" in m for m in cm.output))
         self.assertFalse(any("scheduler: proactive armed" in m for m in cm.output))
         await self._cancel(app.bot_data["_inner_tick_task"])
 
     async def test_tick_armed_scheduler_only_no_other_lines(self):
         """New M7 arm source: scheduler_enabled alone arms the tick even with
-        both diary and portrait off -- the proactive segment is reason enough
-        to keep the heartbeat running."""
-        cfg = _folder_cfg(self.root, diary_enabled=False, portrait_enabled=False)
+        diary, portrait, and facts all off -- the proactive segment is reason
+        enough to keep the heartbeat running."""
+        cfg = _folder_cfg(self.root, diary_enabled=False, portrait_enabled=False,
+                          facts_enabled=False)
         app = FakeApp()
         with self.assertLogs("everthine", level="INFO") as cm:
             scheduler.start_tick(app, cfg, SessionStore(cfg.session_path))
         self.assertFalse(any("tick started" in m for m in cm.output))
         self.assertFalse(any("portrait: armed" in m for m in cm.output))
+        self.assertFalse(any("facts: extraction armed" in m for m in cm.output))
         self.assertTrue(any(
             "scheduler: proactive armed (greeting=True miss_you=True share=True)" in m
             for m in cm.output))
+        self.assertIsInstance(app.bot_data.get("_inner_tick_task"), asyncio.Task)
+        await self._cancel(app.bot_data["_inner_tick_task"])
+
+    async def test_tick_armed_facts_only_no_other_lines(self):
+        """New D1 T5 arm source: facts_enabled alone arms the tick even with
+        diary, portrait, and scheduler all off -- extraction is reason enough
+        to keep the heartbeat running."""
+        cfg = _folder_cfg(self.root, diary_enabled=False, portrait_enabled=False,
+                          scheduler_enabled=False)
+        app = FakeApp()
+        with self.assertLogs("everthine", level="INFO") as cm:
+            scheduler.start_tick(app, cfg, SessionStore(cfg.session_path))
+        self.assertFalse(any("tick started" in m for m in cm.output))
+        self.assertFalse(any("portrait: armed" in m for m in cm.output))
+        self.assertFalse(any("scheduler: proactive armed" in m for m in cm.output))
+        self.assertTrue(any("facts: extraction armed (idle 30m)" in m for m in cm.output))
         self.assertIsInstance(app.bot_data.get("_inner_tick_task"), asyncio.Task)
         await self._cancel(app.bot_data["_inner_tick_task"])
 
@@ -203,12 +229,14 @@ class TestStartTickMounting(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any("scheduler: proactive armed" in m for m in cm.output))
         await self._cancel(app.bot_data["_inner_tick_task"])
 
-    async def test_tick_not_armed_when_all_three_disabled(self):
+    async def test_tick_not_armed_when_all_four_disabled(self):
         """L1 pin, standalone: the tick is structurally absent (no task,
-        nothing to cancel) the moment ALL THREE organ flags are off, even
-        though any one alone is enough to arm it."""
+        nothing to cancel) the moment ALL FOUR organ flags are off, even
+        though any one alone is enough to arm it. Byte-identical to the old
+        three-flag claim: no facts log lines either, since start_tick returns
+        before any per-organ line is ever reached."""
         cfg = _folder_cfg(self.root, diary_enabled=False, portrait_enabled=False,
-                          scheduler_enabled=False)
+                          scheduler_enabled=False, facts_enabled=False)
         app = FakeApp()
         scheduler.start_tick(app, cfg, SessionStore(cfg.session_path))
         self.assertNotIn("_inner_tick_task", app.bot_data)
@@ -222,22 +250,22 @@ class TestStartTickMounting(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("file-mode persona" in m for m in cm.output))
 
     async def test_tick_gate_matrix(self):
-        """The full sixteen-cell gate truth table: diary_enabled x
-        portrait_enabled x scheduler_enabled x persona mode. Folder mode arms
-        whenever ANY flag is on; file mode never arms, regardless of the three
-        flags. The load-bearing corners (any-one-on, all-off, file mode) also
-        have dedicated log-line tests above; this sweep is the systematic
-        cross-check that no cell was missed."""
+        """The full thirty-two-cell gate truth table: diary_enabled x
+        portrait_enabled x scheduler_enabled x facts_enabled x persona mode.
+        Folder mode arms whenever ANY flag is on; file mode never arms,
+        regardless of the four flags. The load-bearing corners (any-one-on,
+        all-off, file mode) also have dedicated log-line tests above; this
+        sweep is the systematic cross-check that no cell was missed."""
         cases = []
-        for d, p, s in itertools.product([True, False], repeat=3):
-            cases.append(("folder", d, p, s, d or p or s))
-            cases.append(("file", d, p, s, False))
+        for d, p, s, f in itertools.product([True, False], repeat=4):
+            cases.append(("folder", d, p, s, f, d or p or s or f))
+            cases.append(("file", d, p, s, f, False))
 
-        for mode, d, p, s, expect_armed in cases:
-            with self.subTest(mode=mode, diary=d, portrait=p, scheduler=s):
+        for mode, d, p, s, f, expect_armed in cases:
+            with self.subTest(mode=mode, diary=d, portrait=p, scheduler=s, facts=f):
                 cfg_fn = _folder_cfg if mode == "folder" else _file_cfg
                 cfg = cfg_fn(self.root, diary_enabled=d, portrait_enabled=p,
-                             scheduler_enabled=s)
+                             scheduler_enabled=s, facts_enabled=f)
                 app = FakeApp()
                 scheduler.start_tick(app, cfg, SessionStore(cfg.session_path))
                 task = app.bot_data.get("_inner_tick_task")
@@ -309,8 +337,10 @@ class TestStartTickFreshLedgerStamp(unittest.IsolatedAsyncioTestCase):
 #        segment is logged and the loop keeps going, never blocking the other;
 #        write_once/update_once always receive the same aware now. Migrated in
 #        semantics from the old two-segment loop, with the proactive segment
-#        turned off (scheduler_enabled=False) so these reproduce it exactly --
-#        the third segment gets its own isolation tests in section 3. --------
+#        turned off (scheduler_enabled=False) so these largely reproduce it
+#        exactly -- one test below was extended for D1 T5 to also pin facts
+#        (the new third segment); the proactive segment (now fourth) gets its
+#        own isolation tests in section 3. -----------------------------------
 
 class TestTickLoopSurvives(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -390,25 +420,40 @@ class TestTickLoopSurvives(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("diary: tick iteration failed" in m for m in cm.output))
 
     async def test_portrait_failure_does_not_block_diary_next_round(self):
+        """Extended for D1 T5: a portrait round that always raises must not
+        skip facts EITHER (facts sits right after portrait in the fixed
+        order, same round) -- the symmetric half of "diary/portrait raising
+        doesn't skip facts"."""
         cfg = self._bare_cfg()
         store = SessionStore(cfg.session_path)
         app = FakeApp()
         diary_calls = []
+        facts_calls = []
         done = asyncio.Event()
         loop = asyncio.get_running_loop()
 
         def fake_write_once(cfg_arg, now):
             diary_calls.append(now)
-            if len(diary_calls) >= 2:
-                loop.call_soon_threadsafe(done.set)
             return False
 
         def fake_update_once(cfg_arg, now):
             raise RuntimeError("portrait explodes every round")
 
+        def fake_extract_once(cfg_arg, now):
+            # Signal from facts, the LAST of the three segments this round --
+            # not diary (the first) -- so the wake-up is never racing this
+            # same round's later segments: by the time facts_calls reaches 2,
+            # that round's diary call (sequenced strictly before it) is
+            # already guaranteed to have happened too.
+            facts_calls.append(now)
+            if len(facts_calls) >= 2:
+                loop.call_soon_threadsafe(done.set)
+            return False
+
         with mock.patch.object(scheduler, "TICK_INTERVAL_S", 0), \
              mock.patch.object(diary, "write_once", fake_write_once), \
              mock.patch.object(portrait, "update_once", fake_update_once), \
+             mock.patch.object(facts_extract, "extract_once", fake_extract_once), \
              self.assertLogs("everthine", level="WARNING") as cm:
             task = asyncio.create_task(scheduler.tick_loop(cfg, store, app))
             try:
@@ -419,20 +464,22 @@ class TestTickLoopSurvives(unittest.IsolatedAsyncioTestCase):
                     await task
 
         self.assertGreaterEqual(len(diary_calls), 2)  # survived across rounds
+        self.assertGreaterEqual(len(facts_calls), 2)  # facts kept pace too
         self.assertTrue(any("portrait: tick iteration failed" in m for m in cm.output))
 
     async def test_cancel_during_sleep_propagates(self):
         """Cancelling while the loop is still asleep -- before any segment's
         call has even started -- must raise CancelledError out of the task
         uncaught. Sleep sits outside every segment's try/except, so this pins
-        that its own cancellation is never accidentally swallowed. All three
-        segments (proactive included) must be untouched."""
+        that its own cancellation is never accidentally swallowed. All four
+        segments (facts and proactive included) must be untouched."""
         cfg = self._bare_cfg(scheduler_enabled=True)
         store = SessionStore(cfg.session_path)
         app = FakeApp()
         with mock.patch.object(scheduler, "TICK_INTERVAL_S", 100), \
              mock.patch.object(diary, "write_once") as fake_diary, \
              mock.patch.object(portrait, "update_once") as fake_portrait, \
+             mock.patch.object(facts_extract, "extract_once") as fake_facts, \
              mock.patch.object(scheduler, "nudge_once") as fake_nudge:
             task = asyncio.create_task(scheduler.tick_loop(cfg, store, app))
             await asyncio.sleep(0)  # let the task start and enter the sleep
@@ -441,12 +488,17 @@ class TestTickLoopSurvives(unittest.IsolatedAsyncioTestCase):
                 await task
         fake_diary.assert_not_called()
         fake_portrait.assert_not_called()
+        fake_facts.assert_not_called()
         fake_nudge.assert_not_called()
 
 
-# --- 3. the proactive third segment (M7 T6): runs after diary and portrait on
-#        the same shared now, is isolated from their failures and they from
-#        its, and is skipped entirely when scheduler_enabled is off ----------
+# --- 3. the proactive segment (M7 T6), now fourth in line behind facts (D1
+#        T5): runs after diary, portrait, and facts on the same shared now,
+#        is isolated from their failures and they from its (facts' own
+#        order/identity/isolation pins are folded into this section's
+#        shared-now and diary-failure tests below, and facts' own reciprocal
+#        pin -- that ITS failure doesn't skip proactive -- gets a dedicated
+#        test), and is skipped entirely when scheduler_enabled is off -------
 
 class TestTickLoopProactiveSegment(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -458,33 +510,40 @@ class TestTickLoopProactiveSegment(unittest.IsolatedAsyncioTestCase):
         kwargs.update(overrides)
         return Config(**kwargs)
 
-    async def test_shared_now_across_diary_portrait_and_nudge(self):
-        """One round hands diary.write_once, portrait.update_once, and
-        nudge_once the SAME now object -- the shared-timestamp pin, extended to
-        the proactive segment."""
+    async def test_shared_now_and_order_across_diary_portrait_facts_and_nudge(self):
+        """One round hands diary.write_once, portrait.update_once,
+        facts_extract.extract_once, and nudge_once the SAME now object -- the
+        shared-timestamp pin, extended to the facts segment -- AND calls them
+        in the fixed order diary -> portrait -> facts -> proactive (D1 T5's
+        segment-order pin)."""
         cfg = self._cfg()
         store = SessionStore(cfg.session_path)
         app = FakeApp()
-        diary_now, portrait_now, nudge_now = [], [], []
+        calls = []
         done = asyncio.Event()
         loop = asyncio.get_running_loop()
 
         def fake_write_once(c, now):
-            diary_now.append(now)
+            calls.append(("diary", now))
             return False
 
         def fake_update_once(c, now):
-            portrait_now.append(now)
+            calls.append(("portrait", now))
+            return False
+
+        def fake_extract_once(c, now):
+            calls.append(("facts", now))
             return False
 
         def fake_nudge(c, s, now, roll):
-            nudge_now.append(now)
+            calls.append(("nudge", now))
             loop.call_soon_threadsafe(done.set)
             return None
 
         with mock.patch.object(scheduler, "TICK_INTERVAL_S", 0), \
              mock.patch.object(diary, "write_once", fake_write_once), \
              mock.patch.object(portrait, "update_once", fake_update_once), \
+             mock.patch.object(facts_extract, "extract_once", fake_extract_once), \
              mock.patch.object(scheduler, "nudge_once", fake_nudge):
             task = asyncio.create_task(scheduler.tick_loop(cfg, store, app))
             try:
@@ -494,20 +553,26 @@ class TestTickLoopProactiveSegment(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(asyncio.CancelledError):
                     await task
 
-        self.assertGreaterEqual(len(nudge_now), 1)
-        # identity, not just equality: the exact same object flows to all three
-        self.assertIs(diary_now[0], nudge_now[0])
-        self.assertIs(portrait_now[0], nudge_now[0])
-        self.assertIsNotNone(nudge_now[0].utcoffset())  # aware
+        self.assertGreaterEqual(len(calls), 4)
+        first_round = calls[:4]
+        # Fixed order pin: facts runs after portrait, before proactive.
+        self.assertEqual([name for name, _ in first_round],
+                         ["diary", "portrait", "facts", "nudge"])
+        # identity, not just equality: the exact same object flows to all four
+        now0 = first_round[0][1]
+        for _, now in first_round:
+            self.assertIs(now, now0)
+        self.assertIsNotNone(now0.utcoffset())  # aware
 
-    async def test_diary_failure_does_not_block_portrait_and_proactive_same_round(self):
-        """Crash isolation extended to the third segment: a diary round that
-        raises must still let BOTH portrait and the proactive segment run in
-        that same round."""
+    async def test_diary_failure_does_not_block_portrait_facts_and_proactive_same_round(self):
+        """Crash isolation extended to the fourth segment: a diary round that
+        raises must still let portrait, facts, AND the proactive segment run
+        in that same round (the "diary raising doesn't skip facts" half of
+        D1 T5's isolation pin)."""
         cfg = self._cfg()
         store = SessionStore(cfg.session_path)
         app = FakeApp()
-        portrait_calls, nudge_calls = [], []
+        portrait_calls, facts_calls, nudge_calls = [], [], []
         done = asyncio.Event()
         loop = asyncio.get_running_loop()
 
@@ -518,6 +583,10 @@ class TestTickLoopProactiveSegment(unittest.IsolatedAsyncioTestCase):
             portrait_calls.append(now)
             return False
 
+        def fake_extract_once(c, now):
+            facts_calls.append(now)
+            return False
+
         def fake_nudge(c, s, now, roll):
             nudge_calls.append(now)
             loop.call_soon_threadsafe(done.set)
@@ -526,6 +595,7 @@ class TestTickLoopProactiveSegment(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(scheduler, "TICK_INTERVAL_S", 0), \
              mock.patch.object(diary, "write_once", fake_write_once), \
              mock.patch.object(portrait, "update_once", fake_update_once), \
+             mock.patch.object(facts_extract, "extract_once", fake_extract_once), \
              mock.patch.object(scheduler, "nudge_once", fake_nudge), \
              self.assertLogs("everthine", level="WARNING") as cm:
             task = asyncio.create_task(scheduler.tick_loop(cfg, store, app))
@@ -537,8 +607,45 @@ class TestTickLoopProactiveSegment(unittest.IsolatedAsyncioTestCase):
                     await task
 
         self.assertGreaterEqual(len(portrait_calls), 1)  # portrait still ran
+        self.assertGreaterEqual(len(facts_calls), 1)     # facts still ran
         self.assertGreaterEqual(len(nudge_calls), 1)     # proactive still ran
         self.assertTrue(any("diary: tick iteration failed" in m for m in cm.output))
+
+    async def test_facts_failure_does_not_block_proactive_same_round(self):
+        """The reciprocal half of D1 T5's isolation pin: a facts round that
+        raises must still let the proactive segment run in that same round --
+        one organ's bug is never another's outage, including the new one."""
+        cfg = self._cfg()
+        store = SessionStore(cfg.session_path)
+        app = FakeApp()
+        nudge_calls = []
+        done = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def fake_extract_once(c, now):
+            raise RuntimeError("facts explodes")
+
+        def fake_nudge(c, s, now, roll):
+            nudge_calls.append(now)
+            loop.call_soon_threadsafe(done.set)
+            return None
+
+        with mock.patch.object(scheduler, "TICK_INTERVAL_S", 0), \
+             mock.patch.object(diary, "write_once", lambda c, n: False), \
+             mock.patch.object(portrait, "update_once", lambda c, n: False), \
+             mock.patch.object(facts_extract, "extract_once", fake_extract_once), \
+             mock.patch.object(scheduler, "nudge_once", fake_nudge), \
+             self.assertLogs("everthine", level="WARNING") as cm:
+            task = asyncio.create_task(scheduler.tick_loop(cfg, store, app))
+            try:
+                await asyncio.wait_for(done.wait(), timeout=5)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        self.assertGreaterEqual(len(nudge_calls), 1)  # proactive still ran
+        self.assertTrue(any("facts: tick iteration failed" in m for m in cm.output))
 
     async def test_proactive_deliver_failure_does_not_block_next_round_diary(self):
         """A proactive segment that blows up INSIDE deliver (the send tail)
@@ -626,10 +733,14 @@ class TestProactiveSubFlagThroughTick(unittest.IsolatedAsyncioTestCase):
 
     def _greeting_cfg(self, **overrides):
         # miss_you/share off so greeting is the only candidate job; greeting's
-        # own flag is what these two tests flip.
+        # own flag is what these two tests flip. facts off so its own
+        # engine call (the seeded contact below is old enough to clear its
+        # idle gate) never muddies these proactive-only engine-call
+        # assertions.
         return _folder_cfg(self.root, diary_enabled=True, portrait_enabled=True,
                            scheduler_enabled=True, miss_you_enabled=False,
-                           share_enabled=False, greeting_hour=8, **overrides)
+                           share_enabled=False, greeting_hour=8,
+                           facts_enabled=False, **overrides)
 
     async def test_greeting_flag_off_suppresses_greeting_through_tick(self):
         cfg = self._greeting_cfg(greeting_enabled=False)
