@@ -33,7 +33,7 @@ startup hook: the command menu first, then scheduler.start_tick's background
 tick -- a TICK_INTERVAL_S heartbeat, owned by scheduler.py (M7 T6 moved it
 out of this module), that hands diary.write_once and portrait.update_once
 each one complete attempt per round and, when scheduler_enabled, also runs
-one proactive reach-out (scheduler.nudge_once -> deliver) as a third segment.
+one proactive reach-out (scheduler.nudge_once -> deliver) as a fourth segment.
 So the tick now DOES send -- but only through that proactive segment; the
 diary and portrait segments still never send a Telegram message. The tick
 arms for a folder-mode persona whenever ANY of diary_enabled /

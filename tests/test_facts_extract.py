@@ -303,6 +303,23 @@ class TestExtractOnce(unittest.TestCase):
         self.assertTrue(run.call_args.args[1].startswith(facts_extract.EXTRACT_INSTRUCTION))
         self.assertIn("I started learning the piano", run.call_args.args[1])
 
+    # --- unparseable cursor: warns, treated as unset, still succeeds ----------
+
+    def test_unparseable_cursor_is_treated_as_unset_and_still_succeeds(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._folder_cfg(td)
+            facts.save_state(cfg.facts_state_path, {"last_extracted_ts": "not-a-timestamp"})
+            self._seed_idle_user(cfg, minutes_ago=40)
+            good = EngineReply(GOOD_JSON, "s", ok=True)
+            with mock.patch(ENGINE_SEAM, return_value=good), \
+                    self.assertLogs("everthine", level="WARNING") as cm:
+                result = facts_extract.extract_once(cfg, NOW)
+            cursor = self._cursor(cfg)
+        self.assertTrue(result)
+        self.assertTrue(any("facts: unparseable cursor" in line for line in cm.output))
+        # Valid ISO ts afterwards, not the garbage value it started as.
+        self.assertIsInstance(datetime.fromisoformat(cursor), datetime)
+
     # --- eligibility skips: no engine call, cursor untouched ------------------
 
     def test_disabled_skip(self):

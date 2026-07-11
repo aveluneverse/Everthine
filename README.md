@@ -140,9 +140,8 @@ the factory defaults, a day of his "inner life" runs roughly:
 - Replying to you — as many turns as the two of you talk.
 - A private diary — at most once (at night, and only when there's
   real material from your time together to write from).
-- Fact-keeping: a low-frequency background call after about half
-  an hour of idle; a day's usage is in the same ballpark as the
-  diary.
+- Fact-keeping — a low-frequency background call after ~30 minutes
+  of idle; a day's usage is in the same ballpark as the diary.
 - Reflections after a conversation — at most twelve (the
   one-or-two-sentence kind).
 - A self-portrait — about once a week.

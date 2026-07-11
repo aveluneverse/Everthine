@@ -159,6 +159,26 @@ class TestAppendFacts(unittest.TestCase):
             self.assertEqual([f["text"] for f in facts.load_facts(p)],
                              [f3["text"], f4["text"], f5["text"]])
 
+    def test_prune_by_position_even_when_last_inserted_has_oldest_date(self):
+        # Dates here are deliberately NOT monotonic with insertion order --
+        # f5 is inserted last but carries the OLDEST date of the five. A
+        # prune that (wrongly) kept the newest-by-DATE would drop f5 (and
+        # keep f1/f2/f3, the three newest-dated); position-based FIFO
+        # pruning keeps f5 because it is the newest-by-POSITION, dropping
+        # f1/f2 off the front exactly as the plain-chronological fixture
+        # above does. This is what actually distinguishes the two policies.
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "facts.json"
+            f1 = {"text": "喜歡藍色", "category": "a", "date": "2026-07-08"}
+            f2 = {"text": "住在台北", "category": "a", "date": "2026-07-09"}
+            f3 = {"text": "養了一隻貓", "category": "a", "date": "2026-07-10"}
+            f4 = {"text": "週末去爬山", "category": "a", "date": "2026-07-11"}
+            f5 = {"text": "最近在學鋼琴", "category": "a", "date": "2026-01-01"}
+            self.assertEqual(facts.append_facts(p, [f1, f2, f3], 3), 3)
+            self.assertEqual(facts.append_facts(p, [f4, f5], 3), 2)
+            self.assertEqual([f["text"] for f in facts.load_facts(p)],
+                             [f3["text"], f4["text"], f5["text"]])
+
     def test_atomic_write_leaves_no_temp_litter(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "facts.json"
