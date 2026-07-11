@@ -404,3 +404,65 @@ def eligibility(cfg: Config, now: datetime, last_user_ts: datetime | None,
     if cursor_ts is not None and last_user_ts <= cursor_ts:
         return "no_new_material"
     return None
+
+
+# ---------------------------------------------------------------------
+# 5. Prompt block (pure): the few facts that bear on this message
+# ---------------------------------------------------------------------
+
+# The Layer 3 facts section, rendered once per live turn. Its guard lines are
+# the whole point of injecting facts as impressions rather than a database:
+# what the person says NOW outranks what is remembered, and an uncertain fact
+# is a cue to ask, never to guess. Kept here (not in a prompt-assembly module)
+# because facts.py owns the fact vocabulary; the block it produces is opaque to
+# dynamic_context, slotted in verbatim the same way memory_block/inner_block are.
+FACTS_BLOCK_TEMPLATE = """# What you know about {partner_name}
+
+These are impressions you have quietly gathered over time — they live in
+you, not in any list you would ever mention out loud.
+
+- They may be out of date. What {partner_name} says right now always
+  outranks what you remember.
+- Never invent details these lines do not actually say. When you are
+  not sure, ask — asking is warmer than guessing.
+
+{facts_lines}"""
+
+
+def prompt_block(cfg: Config, current_message: str, now: datetime,
+                 partner_name: str) -> str | None:
+    """Render the Layer 3 facts block for one live turn, or None when there
+    is nothing worth injecting. The third sibling of the memory and diary
+    blocks: build a caller-supplied Layer 3 section, or return None (never an
+    empty string) so the seam is a clean no-op.
+
+    Returns None, short-circuiting in order, when: cfg.facts_enabled is False
+    (the master switch -- flag off is byte-identical to the pre-feature
+    prompt); the book is empty (nothing recorded yet); or select_facts yields
+    nothing (the cfg.facts_prompt_max <= 0 edge). Otherwise the top
+    cfg.facts_prompt_max facts for `current_message` (ranked by
+    relevance * 0.6 + recency * 0.4, `now`'s local date as the recency
+    anchor) render one per line as "- [category] text", in select_facts
+    order, inside FACTS_BLOCK_TEMPLATE.
+
+    Pure, by deliberate design: `partner_name` is a caller argument, not
+    looked up here -- facts.py must never import persona (the caller,
+    bot.prepare_exchange, already holds the settings). `now` is passed in,
+    not read from a clock, so the block is fully testable. The only I/O is
+    load_facts' fail-soft read of cfg.facts_path; a corrupt book degrades to
+    empty (a quarantined corpse) and this returns None, never raising.
+    """
+    if not cfg.facts_enabled:
+        return None
+    stored = load_facts(cfg.facts_path)
+    if not stored:
+        return None
+    selected = select_facts(current_message, stored, cfg.facts_prompt_max,
+                            today=now.date())
+    if not selected:
+        return None
+    facts_lines = "\n".join(
+        f"- [{fact.get('category', '')}] {fact.get('text', '')}"
+        for fact in selected)
+    return FACTS_BLOCK_TEMPLATE.format(
+        partner_name=partner_name, facts_lines=facts_lines)

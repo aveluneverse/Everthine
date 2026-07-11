@@ -43,7 +43,8 @@ DEFAULT_PERSONA = (
 
 
 def build_system_prompt(cfg: Config, memory_block: str | None = None,
-                        inner_block: str | None = None) -> str:
+                        inner_block: str | None = None,
+                        facts_block: str | None = None) -> str:
     """Assemble the per-turn system prompt from cfg.persona_path.
 
     Folder mode: compose the three layers (static Layer 1/2 + the dynamic
@@ -59,7 +60,10 @@ def build_system_prompt(cfg: Config, memory_block: str | None = None,
     ignores the argument entirely. `inner_block` (optional, default None)
     is the M5 diary seam and threads through exactly the same way: folder
     mode passes it to assemble_folder_prompt; file mode ignores it too, for
-    the same L1-rollback reason.
+    the same L1-rollback reason. `facts_block` (optional, default None) is the
+    D1 structured-facts seam and threads through identically: folder mode
+    passes it to assemble_folder_prompt; file mode ignores it too, same
+    L1-rollback reason.
 
     Folder mode also builds the M4 stage block here, when cfg.stages_enabled
     and the persona actually defines stages (a persona with no stages.md
@@ -119,7 +123,8 @@ def build_system_prompt(cfg: Config, memory_block: str | None = None,
         return assemble_folder_prompt(
             persona_obj, now_naive, last_contact, first_today, memory_block,
             stage_block=stage_blk, inner_block=inner_block,
-            expression_note=expression_note, portrait_block=portrait_blk)
+            expression_note=expression_note, portrait_block=portrait_blk,
+            facts_block=facts_block)
 
     # --- Legacy file mode: pinned byte-for-byte (do not "improve") ---------
     # Per-call read, strip, non-empty -> return verbatim; otherwise fall back.
@@ -845,6 +850,7 @@ def assemble_folder_prompt(
     inner_block: str | None = None,
     expression_note: str | None = None,
     portrait_block: str | None = None,
+    facts_block: str | None = None,
 ) -> str:
     """Join the static Layer 1/2 composition and the dynamic Layer 3 block with
     a single blank line. Pure and deterministic given its arguments -- directly
@@ -854,6 +860,10 @@ def assemble_folder_prompt(
     `inner_block` (optional, default None) threads through the same way and
     lands just before the memory block (his own recent days ahead of her
     long-term memory), with the identical None/empty no-op contract.
+    `facts_block` (optional, default None) threads through the same way and
+    lands between the inner block and the memory block (his recent days, then
+    her long-term facts, then the passages recalled for this message), with
+    the identical None/empty no-op contract.
     `stage_block` (optional, default None) threads straight through to
     compose_stable(), which prepends it ahead of the declaration when truthy
     and is a no-op (byte-identical to the pre-M4 composition) when it is None
@@ -879,4 +889,4 @@ def assemble_folder_prompt(
                            portrait_block=portrait_block) + "\n\n"
             + build_dynamic_context(
                 persona_obj.settings, now_naive, last_contact, first_today,
-                memory_block, inner_block=inner_block))
+                memory_block, inner_block=inner_block, facts_block=facts_block))

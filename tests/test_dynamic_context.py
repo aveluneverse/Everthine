@@ -622,5 +622,67 @@ class TestInnerBlockSeam(unittest.TestCase):
         self.assertEqual(with_inner_none, memory_only)
 
 
+class TestFactsBlockSeam(unittest.TestCase):
+    """D1 T4 seam: the optional facts_block parameter (her long-term facts
+    file). Placement (after the inner block, BEFORE the memory block and the
+    final check -- his near-past, then her facts, then the passages recalled
+    for this very message), the "no argument at all" vs. explicit None/""
+    byte-identity pin, and the exact double-newline join. Mirrors
+    TestInnerBlockSeam/TestMemoryBlockSeam above; all three seams are
+    independent (facts_block=None must not perturb the inner+memory output,
+    and vice versa).
+    """
+
+    def test_facts_block_after_inner_before_memory_and_final_check(self):
+        settings = _settings(anniversary=date(2021, 7, 5))  # on-day yearly trigger
+        now = datetime(2026, 7, 5, 14, 0)
+        inner_block = ("# Your own recent days\n\n"
+                       "- [diary, 2026-07-04] mood: quiet. A thought: enough")
+        facts_block = "# What you know about Sam\n\n- [preference] tea, not coffee"
+        memory_block = "# Things you remember\n\n- x"
+        result = build_dynamic_context(
+            settings, now, None, False, memory_block=memory_block,
+            inner_block=inner_block, facts_block=facts_block)
+        i_inner = result.index(inner_block)
+        i_facts = result.index(facts_block)
+        i_memory = result.index(memory_block)
+        i_final = result.index(FINAL_CHECK_TEMPLATE)
+        self.assertLess(i_inner, i_facts)      # his near-past before her facts
+        self.assertLess(i_facts, i_memory)     # her facts before recalled passages
+        self.assertLess(i_memory, i_final)     # final check stays the last words
+        self.assertTrue(result.endswith(FINAL_CHECK_TEMPLATE))
+        self.assertNotIn("\n\n\n", result)
+
+    def test_facts_block_none_or_empty_is_byte_identical_to_omitted(self):
+        settings = _settings(anniversary=date(2021, 7, 5))
+        now = datetime(2026, 7, 5, 14, 0)
+        baseline = build_dynamic_context(settings, now, None, False)
+        self.assertEqual(
+            build_dynamic_context(settings, now, None, False, facts_block=None), baseline)
+        self.assertEqual(
+            build_dynamic_context(settings, now, None, False, facts_block=""), baseline)
+
+    def test_facts_block_joined_by_double_newline(self):
+        settings = _settings(anniversary=date(2021, 7, 5))
+        now = datetime(2026, 7, 5, 14, 0)
+        facts_block = "# What you know about Sam\n\n- [preference] tea, not coffee"
+        # no inner/memory block -> facts sits immediately before the final check
+        result = build_dynamic_context(settings, now, None, False, facts_block=facts_block)
+        self.assertIn("\n\n" + facts_block + "\n\n" + FINAL_CHECK_TEMPLATE, result)
+        self.assertNotIn("\n\n\n", result)
+
+    def test_facts_none_leaves_inner_and_memory_output_unperturbed(self):
+        settings = _settings(anniversary=date(2021, 7, 5))
+        now = datetime(2026, 7, 5, 14, 0)
+        inner_block = "# Your own recent days\n\n- [diary, 2026-07-04] mood: quiet."
+        memory_block = "# Things you remember\n\n- x"
+        with_facts_none = build_dynamic_context(
+            settings, now, None, False, memory_block=memory_block,
+            inner_block=inner_block, facts_block=None)
+        without_facts = build_dynamic_context(
+            settings, now, None, False, memory_block=memory_block, inner_block=inner_block)
+        self.assertEqual(with_facts_none, without_facts)
+
+
 if __name__ == "__main__":
     unittest.main()

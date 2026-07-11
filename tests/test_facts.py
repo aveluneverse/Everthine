@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from everthine import facts
-from everthine.config import load_config
+from everthine.config import Config, load_config
 
 BASE_ENV = {"BOT_TOKEN": "123456789:" + "A" * 35, "AUTHORIZED_USER_ID": "42"}
 NOW = datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc)
@@ -400,6 +400,95 @@ class TestEligibility(unittest.TestCase):
             cfg = _cfg(td, FACTS_IDLE_MINUTES="30")
             last = NOW - timedelta(minutes=30)
             self.assertIsNone(facts.eligibility(cfg, NOW, last, None))
+
+
+# ---------------------------------------------------------------------
+# 5. Prompt block (D1 Task 4): the few facts that bear on this message,
+#    rendered for a live turn. Pure -- partner_name is a caller argument
+#    (facts.py never imports persona), and `now` is passed in, not read.
+# ---------------------------------------------------------------------
+
+# A fact strongly relevant to a "coffee" message (its bigrams cover the
+# message's), a fact dated today but irrelevant (recency only), and a fact
+# both old and irrelevant (scores ~0). With prompt_max=2 the first two win.
+_COFFEE = {"text": "her coffee is always black", "category": "preference",
+           "date": "2026-07-11"}
+_PIANO = {"text": "she is learning the piano now", "category": "hobby",
+          "date": "2026-07-11"}
+_MOTHER = {"text": "her mother is called Wen", "category": "family",
+           "date": "2026-05-11"}  # ~61 days before TODAY -> recency 0.0
+
+
+class TestPromptBlock(unittest.TestCase):
+    def test_flag_off_returns_none_even_with_facts_on_disk(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td, FACTS_ENABLED="false")
+            facts.append_facts(cfg.facts_path, [_COFFEE], cfg.facts_max)
+            self.assertIsNone(facts.prompt_block(cfg, "coffee", NOW, "Wren"))
+
+    def test_empty_book_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)  # facts_enabled default True, no facts.json yet
+            self.assertIsNone(facts.prompt_block(cfg, "coffee", NOW, "Wren"))
+
+    def test_max_zero_selects_nothing_returns_none(self):
+        # A non-empty book, but facts_prompt_max=0 -> select_facts returns []
+        # -> None (never ""). Built directly because load_config rejects a
+        # non-positive FACTS_PROMPT_MAX.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(bot_token="x", authorized_user_id=1,
+                         data_dir=Path(td), facts_prompt_max=0)
+            facts.append_facts(cfg.facts_path, [_COFFEE], cfg.facts_max)
+            self.assertIsNone(facts.prompt_block(cfg, "coffee", NOW, "Wren"))
+
+    def test_anchor_lines_header_and_fact_line_render(self):
+        # The template's two guard lines are byte-present, the header renders
+        # partner_name, and each selected fact renders "- [category] text".
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            facts.append_facts(cfg.facts_path, [_COFFEE], cfg.facts_max)
+            block = facts.prompt_block(cfg, "what about coffee", NOW, "Wren")
+            self.assertIsNotNone(block)
+            self.assertIn("# What you know about Wren", block)
+            self.assertIn("outranks what you remember", block)
+            self.assertIn("asking is warmer than guessing", block)
+            self.assertIn("- [preference] her coffee is always black", block)
+
+    def test_selection_wiring_top_two_by_score(self):
+        # prompt_max=2 with a relevant + a recent + an old-irrelevant fact:
+        # the block carries the relevant and the recent one, not the old
+        # one. Membership only -- ordering is select_facts' own tested job.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td, FACTS_PROMPT_MAX="2")
+            facts.append_facts(cfg.facts_path, [_COFFEE, _PIANO, _MOTHER],
+                               cfg.facts_max)
+            block = facts.prompt_block(cfg, "what about coffee", NOW, "Wren")
+            self.assertIsNotNone(block)
+            self.assertIn("her coffee is always black", block)   # relevant
+            self.assertIn("she is learning the piano now", block)  # recent
+            self.assertNotIn("her mother is called Wen", block)   # old, dropped
+
+    def test_never_returns_empty_string(self):
+        # Every None path above returns None, never "" -- one consolidated
+        # pin so a future refactor can't quietly start emitting "".
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td, FACTS_ENABLED="false")
+            self.assertIsNone(facts.prompt_block(cfg, "coffee", NOW, "Wren"))
+
+    def test_template_wording_pin(self):
+        # Hand-transcribed (not derived from prompt_block's output) so this
+        # guards the canonical product copy against transcription drift,
+        # mirroring test_dynamic_context.py's TestWordingPins.
+        self.assertEqual(
+            facts.FACTS_BLOCK_TEMPLATE,
+            "# What you know about {partner_name}\n\n"
+            "These are impressions you have quietly gathered over time — they live in\n"
+            "you, not in any list you would ever mention out loud.\n\n"
+            "- They may be out of date. What {partner_name} says right now always\n"
+            "  outranks what you remember.\n"
+            "- Never invent details these lines do not actually say. When you are\n"
+            "  not sure, ask — asking is warmer than guessing.\n\n"
+            "{facts_lines}")
 
 
 if __name__ == "__main__":

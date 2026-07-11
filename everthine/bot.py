@@ -67,7 +67,7 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, ContextTypes, MessageHandler,
                           MessageReactionHandler, filters)
 
-from . import (album, archive, chunking, diary, engine, memory_recall,
+from . import (album, archive, chunking, diary, engine, facts, memory_recall,
               messages, persona, recent_context, reflection, scheduler,
               stages)
 from .config import Config, load_config
@@ -218,12 +218,13 @@ def decide_start_buttons(has_session: bool) -> list:
 
 def prepare_exchange(cfg: Config, store: SessionStore, text: str, now) -> tuple:
     """Archive the user's turn, assemble the engine prompt, recall long-term
-    memories relevant to it, and gather his own recent diary days.
+    memories relevant to it, gather his own recent diary days, and select the
+    stored facts that bear on this message.
 
-    Returns (prompt, session_data, memory_block, inner_block). Both blocks
-    are independently fail-soft: the reply proceeds without either one if it
-    cannot be built, and both are None-by-default so a flag-off run is
-    byte-identical to the pre-feature prompt.
+    Returns (prompt, session_data, memory_block, inner_block, facts_block).
+    All three blocks are independently fail-soft: the reply proceeds without
+    any one of them if it cannot be built, and all are None-by-default so a
+    flag-off run is byte-identical to the pre-feature prompt.
     """
     if cfg.archive_enabled:
         archive.write_entry(cfg.archive_dir, "user", text, ts=now)
@@ -256,7 +257,29 @@ def prepare_exchange(cfg: Config, store: SessionStore, text: str, now) -> tuple:
         except Exception:
             logger.warning("diary block failed; continuing without it",
                            exc_info=True)
-    return recent_context.prepend(block, text), data, memory_block, inner_block
+    # The stored facts that bear on this message (the Layer 3 facts block).
+    # Gated on the facts flag so flag-off stays byte-identical, and fail-soft
+    # the same way the other two blocks are. partner_name comes from the
+    # persona settings, fetched again here inside this block's OWN try rather
+    # than reusing the memory block's `settings`: that fetch lives inside the
+    # memory try precisely because current_settings() can raise on a broken
+    # persona, and hoisting it out would change memory_block's failure
+    # isolation. A second current_settings() is cheap (the persona is
+    # module-cached). File mode has no settings (None) and so no partner_name
+    # -- like memory, facts is a folder-mode feature, absent in the file-mode
+    # L1 rollback.
+    facts_block = None
+    if cfg.facts_enabled:
+        try:
+            facts_settings = persona.current_settings(cfg)
+            if facts_settings is not None:
+                facts_block = facts.prompt_block(
+                    cfg, text, now, facts_settings.partner_name)
+        except Exception:
+            logger.warning("facts block failed; continuing without it",
+                           exc_info=True)
+    return (recent_context.prepend(block, text), data, memory_block,
+            inner_block, facts_block)
 
 
 def _extract_react(text: str) -> tuple[str | None, str]:
@@ -295,12 +318,14 @@ def produce_reply(cfg: Config, store: SessionStore, text: str,
     pass a sink to receive it.
     """
     now = now or datetime.now().astimezone()
-    prompt, data, memory_block, inner_block = prepare_exchange(cfg, store, text, now)
+    prompt, data, memory_block, inner_block, facts_block = prepare_exchange(
+        cfg, store, text, now)
 
     reply = engine_mod.run_once(
         cfg, prompt, session_id=data.get("session_id"),
         system_prompt=persona.build_system_prompt(
-            cfg, memory_block=memory_block, inner_block=inner_block))
+            cfg, memory_block=memory_block, inner_block=inner_block,
+            facts_block=facts_block))
     if not reply.ok:
         return [msg(reply.error_kind or "generic_glitch")]
 
@@ -362,14 +387,14 @@ async def stream_reply(cfg: Config, store: SessionStore, text: str,
     now = now or datetime.now().astimezone()
     # Off-loop: prepare_exchange touches disk (archive writes + memory
     # recall), so it must never run synchronously on the event loop.
-    prompt, data, memory_block, inner_block = await asyncio.to_thread(
+    prompt, data, memory_block, inner_block, facts_block = await asyncio.to_thread(
         prepare_exchange, cfg, store, text, now)
     # Off-loop too: this retires the standing event-loop debt -- as the
     # archive grows, building the system prompt synchronously here would
     # block every other update.
     system_prompt = await asyncio.to_thread(
         persona.build_system_prompt, cfg, memory_block=memory_block,
-        inner_block=inner_block)
+        inner_block=inner_block, facts_block=facts_block)
 
     events: queue.Queue = queue.Queue()
     worker = threading.Thread(

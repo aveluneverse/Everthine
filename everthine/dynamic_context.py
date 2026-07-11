@@ -12,12 +12,12 @@ Everything here is a pure function of its arguments: no filesystem, no
 datetime.now() inside -- the caller passes `now`. A later task derives
 `last_contact`/`first_today` from the conversation archive and wires
 build_dynamic_context()'s output into persona.build_system_prompt(); that
-wiring is out of scope here. The optional `memory_block` and `inner_block`
-parameters are this module's other seams: caller-supplied sections slotted
-in verbatim between the milestones section and the final check (inner_block
-first, then memory_block), with no effect at all when they are None or empty
--- producing and formatting those blocks is other tasks' job, not this
-one's. This module is layers.py's sibling, not its caller:
+wiring is out of scope here. The optional `memory_block`, `inner_block`, and
+`facts_block` parameters are this module's other seams: caller-supplied
+sections slotted in verbatim between the milestones section and the final
+check (inner_block first, then facts_block, then memory_block), with no
+effect at all when they are None or empty -- producing and formatting those
+blocks is other tasks' job, not this one's. This module is layers.py's sibling, not its caller:
 same constants-then-functions layout, same docstring conventions.
 """
 from __future__ import annotations
@@ -245,6 +245,7 @@ def build_dynamic_context(
     first_today: bool,
     memory_block: str | None = None,
     inner_block: str | None = None,
+    facts_block: str | None = None,
 ) -> str:
     """Compose Layer 3: the full "what's true right now" block.
 
@@ -262,11 +263,14 @@ def build_dynamic_context(
        companion_birthday triggers today or previews within a week).
     5. Recent-days block (inner_block is truthy) -- his own inner life, an
        optional caller-supplied section this module does not produce or
-       format; placed before the memory block so his near-past reads ahead
-       of her long-term memory.
-    6. Retrieved-memory block (memory_block is truthy) -- an optional,
+       format; placed before the facts and memory blocks so his near-past
+       reads ahead of her long-term facts and memory.
+    6. Facts block (facts_block is truthy) -- her long-term facts file, an
+       optional caller-supplied section (facts.py produces it, this module
+       does not); placed after his inner block and before the recalled memory.
+    7. Retrieved-memory block (memory_block is truthy) -- an optional,
        caller-supplied section; this module does not produce or format it.
-    7. Final-check reminder (always, always last).
+    8. Final-check reminder (always, always last).
 
     The hour is rounded down to the top of the hour for the baseline only
     -- section 1's displayed clock and daypart line are byte-stable for the
@@ -289,14 +293,22 @@ def build_dynamic_context(
         sections.append(milestones)
 
     # His own recent days (inner life) slot in here - after milestones,
-    # BEFORE the retrieved-memory block: his near-past reads ahead of her
-    # long-term memory. Like memory_block, this module neither produces nor
-    # formats it; a truthy value is appended verbatim, None/empty is a no-op.
+    # BEFORE the facts and retrieved-memory blocks: his near-past reads ahead
+    # of her long-term facts and memory. Like the others, this module neither
+    # produces nor formats it; a truthy value is appended verbatim, None/empty
+    # is a no-op.
     if inner_block:
         sections.append(inner_block)
 
-    # Retrieved-memory block (long-term memory) slots in here - after
-    # milestones, BEFORE the final check. The final check must stay the
+    # Her long-term facts block slots in here - after his inner block, BEFORE
+    # the retrieved-memory block: what he knows about her reads ahead of the
+    # passages recalled for this very message. Same verbatim/no-op contract as
+    # the other two seams; facts.py produces and formats it, not this module.
+    if facts_block:
+        sections.append(facts_block)
+
+    # Retrieved-memory block (long-term memory) slots in here - after the
+    # facts block, BEFORE the final check. The final check must stay the
     # last words the engine reads; never append anything after it.
     if memory_block:
         sections.append(memory_block)

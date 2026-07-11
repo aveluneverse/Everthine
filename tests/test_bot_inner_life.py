@@ -437,7 +437,7 @@ class TestPrepareExchangeInnerBlock(unittest.TestCase):
         _seed_unshared_entry(cfg)
         store = SessionStore(cfg.session_path)
         result = bot.prepare_exchange(cfg, store, "hi there friend", self._now())
-        self.assertEqual(len(result), 4)  # (prompt, data, memory_block, inner_block)
+        self.assertEqual(len(result), 5)  # (prompt, data, memory, inner, facts)
         inner_block = result[3]
         self.assertIsNotNone(inner_block)
         self.assertIn("# Your own recent days", inner_block)
@@ -446,7 +446,7 @@ class TestPrepareExchangeInnerBlock(unittest.TestCase):
         cfg = _folder_cfg(self.root, diary_enabled=False)
         _seed_unshared_entry(cfg)  # data present; the gate must still say None
         store = SessionStore(cfg.session_path)
-        _, _, _, inner_block = bot.prepare_exchange(cfg, store, "hi there", self._now())
+        _, _, _, inner_block, _ = bot.prepare_exchange(cfg, store, "hi there", self._now())
         self.assertIsNone(inner_block)
 
     def test_diary_block_failure_is_fail_soft(self):
@@ -455,7 +455,7 @@ class TestPrepareExchangeInnerBlock(unittest.TestCase):
         with mock.patch.object(diary, "unshared_block",
                                side_effect=RuntimeError("boom")), \
              self.assertLogs("everthine", level="WARNING") as cm:
-            _, _, _, inner_block = bot.prepare_exchange(cfg, store, "hi there", self._now())
+            _, _, _, inner_block, _ = bot.prepare_exchange(cfg, store, "hi there", self._now())
         self.assertIsNone(inner_block)  # a broken diary read never breaks the reply
         self.assertTrue(any("diary block failed" in m for m in cm.output))
 

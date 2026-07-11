@@ -377,14 +377,17 @@ class TestStreamingMemoryOffLoop(unittest.IsolatedAsyncioTestCase):
                 threading.current_thread() is threading.main_thread())
             return real_prepare_exchange(cfg_, store_, text_, now_)
 
-        def wrapped_build_system_prompt(cfg_, memory_block=None, inner_block=None):
-            # M5 T7 added build_system_prompt's inner_block param, which the
-            # streaming path now threads through; this pass-through test double
-            # tracks that arity (assertions below are unchanged -- it still only
-            # proves the call runs off the event loop).
+        def wrapped_build_system_prompt(cfg_, memory_block=None, inner_block=None,
+                                        facts_block=None):
+            # M5 T7 added inner_block and D1 T4 added facts_block to
+            # build_system_prompt, both of which the streaming path now threads
+            # through; this pass-through test double tracks that arity
+            # (assertions below are unchanged -- it still only proves the call
+            # runs off the event loop).
             thread_flags["build_system_prompt_on_main"] = (
                 threading.current_thread() is threading.main_thread())
-            return real_build_system_prompt(cfg_, memory_block, inner_block)
+            return real_build_system_prompt(cfg_, memory_block, inner_block,
+                                            facts_block)
 
         def wrapped_sync(cfg_, now_):
             sync_calls.append((cfg_, now_))
