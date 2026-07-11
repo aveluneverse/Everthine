@@ -240,6 +240,14 @@ class TestFaq(WizardDocMixin, unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
 
+    def test_facts_memory_entry_present(self):
+        # D1: the structured-facts notebook and its off-switch promise.
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("FACTS_ENABLED=false", text)
+        # Distinctive anchor -- the "he'd rather ask than fabricate"
+        # promise, unlikely to be casually reworded.
+        self.assertIn("他寧可問你，不硬編", text)
+
 
 class TestFaqEn(WizardDocMixin, unittest.TestCase):
     DOC = FAQ_EN
@@ -250,6 +258,13 @@ class TestFaqEn(WizardDocMixin, unittest.TestCase):
                        "LOG_LEVEL", "computer is off"):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
+
+    def test_facts_memory_entry_present(self):
+        # D1: the structured-facts notebook and its off-switch promise.
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("FACTS_ENABLED=false", text)
+        # Distinctive anchor -- the don't-fabricate promise.
+        self.assertIn("rather ask you than make it up", text)
 
 
 class TestReadmeZh(WizardDocMixin, unittest.TestCase):

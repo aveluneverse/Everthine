@@ -74,6 +74,29 @@ Yes. Every bot token in the logs is automatically masked to
 `bot<TOKEN>`, so you can safely paste your console output to
 anyone helping you look into the problem.
 
+## How does he remember things about me?
+
+He has two kinds of memory. One is a conversation search:
+the things the two of you have said are stored as a
+searchable record, and when the talk turns to a related
+topic, the closest fragments surface on their own. The
+other is a little notebook he keeps himself: after a
+conversation (once things have been idle for about half an
+hour), he writes down the facts worth keeping — what you
+like, recent events in your life, the things weighing on
+you — and from then on **every single reply** carries the
+few most relevant of them, no matter what you happen to be
+talking about.
+
+The notebook holds a fixed 200 entries; once it's full, new
+ones come in and the oldest quietly make room. He is told
+plainly: an impression may be out of date, and what you say
+now always comes first; for anything the notebook doesn't
+hold, he'd rather ask you than make it up.
+
+Don't want this notebook? `FACTS_ENABLED=false` switches the
+whole thing off (the files already saved are not deleted).
+
 ## Why does he know things I told Claude Code?
 
 He thinks through your Claude login, so the global preferences
