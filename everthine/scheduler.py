@@ -852,8 +852,9 @@ def nudge_once(cfg: Config, store: SessionStore, now: datetime,
     # it from the top-of-function persona.current_settings() call (guarded
     # by its own None early-return above), so a second fetch would only
     # re-read the same module-cached persona for no isolation benefit --
-    # bot.py's re-fetch exists solely because ITS facts try sits nested
-    # inside the memory block's own try scope, a constraint that does not
+    # bot.py re-fetches only because the `settings` it would reuse is
+    # fetched inside the memory block's own try (hoisting that fetch out
+    # would change memory's failure isolation), a constraint that does not
     # apply here. The message argument is deliberately "", not real text: a
     # scheduled reach-out has no incoming message to weigh relevance
     # against. extract_bigrams("") is the empty set, so relevance_score
