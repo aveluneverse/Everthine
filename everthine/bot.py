@@ -50,6 +50,7 @@ no proactive reach-out, no reflection, behavior identical to M4.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import queue
@@ -129,9 +130,65 @@ def _normalize_reaction(emoji: str) -> str:
 # make_app's _message_cache: how long a companion message stays resolvable
 # to its text after a heart on it (TTL), and how many entries the cache
 # holds at once (cap) before the oldest survivors get pruned. Both are
-# lazily enforced on insert -- see _cache_sent's docstring.
+# lazily enforced on insert -- see _cache_sent's docstring. Timestamps are
+# wall-clock (time.time()), not monotonic, ON PURPOSE: the cache persists
+# to cfg.message_cache_path and is read back at the next boot
+# (merge-acceptance fix, 2026-07-11 -- memory-only, every restart silently
+# orphaned all earlier messages, and a heart on anything sent before the
+# restart answered "out of reach"), and a monotonic reading from a dead
+# process means nothing to a live one.
 MESSAGE_CACHE_TTL_S = 24 * 3600
 MESSAGE_CACHE_MAX = 500
+
+
+def _load_message_cache(cfg: Config) -> dict:
+    """The heart-reaction message cache, read back from disk at build time.
+    Expired entries (wall-clock TTL) are dropped on load and the newest
+    MESSAGE_CACHE_MAX kept -- the JSON object preserves insertion order, so
+    oldest-first eviction works exactly as it does live. Any trouble --
+    missing file, bad JSON, wrong shape -- degrades to an empty cache with
+    a warning: the cache is a convenience, never worth a crash. Album off
+    loads nothing (its only reader, handle_reaction, is not even
+    registered) and _cache_sent's own gate keeps it that way."""
+    if not cfg.album_enabled:
+        return {}
+    path = cfg.message_cache_path
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        now = time.time()
+        fresh = {}
+        for mid, pair in raw.items():
+            text, ts = pair[0], float(pair[1])
+            if isinstance(text, str) and now - ts <= MESSAGE_CACHE_TTL_S:
+                fresh[int(mid)] = (text, ts)
+    except (OSError, ValueError, TypeError, AttributeError):
+        logger.warning("message cache file unreadable; starting empty",
+                       exc_info=True)
+        return {}
+    while len(fresh) > MESSAGE_CACHE_MAX:
+        del fresh[next(iter(fresh))]
+    return fresh
+
+
+def _save_message_cache(cfg: Config, cache: dict) -> None:
+    """Persist the cache right after an insert: a small file (at most 500
+    short entries), written atomically via a sibling tmp + os.replace. The
+    write is synchronous on the caller's thread on purpose -- once per
+    companion message, tens of kilobytes, cheaper than an executor hop.
+    Failures warn and move on; the live dict is still correct either way."""
+    try:
+        path = cfg.message_cache_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(
+            json.dumps({str(k): [text, ts] for k, (text, ts) in cache.items()},
+                       ensure_ascii=False),
+            encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        logger.warning("could not persist the message cache", exc_info=True)
 
 # make_app's pending_note slot (M4 T8): how long an armed "advance" note
 # prompt (stg_adv) stays fresh before a later text message is treated as
@@ -694,13 +751,15 @@ def make_app(cfg: Config):
     pending_note = {"active": False, "since": 0.0}
 
     # Heart-reaction pipeline (M4 T7): companion message_id -> (text,
-    # monotonic send time), so a later heart on it (handle_reaction below)
+    # wall-clock send time), so a later heart on it (handle_reaction below)
     # can recover what it was without ever reading it back off a Telegram
     # Message object (see stream_reply's sent_sink docstring for why that
     # would be wrong for anything that was edited in place). Local to this
     # make_app call, like busy/cancel_flag/store above -- never shared
-    # across app instances, e.g. between tests.
-    _message_cache: dict[int, tuple[str, float]] = {}
+    # across app instances, e.g. between tests -- but seeded from
+    # cfg.message_cache_path so his words survive a restart heartable
+    # (merge-acceptance fix, 2026-07-11).
+    _message_cache: dict[int, tuple[str, float]] = _load_message_cache(cfg)
 
     def _cache_sent(message, text: str) -> None:
         """Record one companion message actually sent this turn. Callers
@@ -726,13 +785,14 @@ def make_app(cfg: Config):
         """
         if not cfg.album_enabled or message is None or not text:
             return
-        now_mono = time.monotonic()
+        now = time.time()
         for stale_id in [mid for mid, (_, ts) in _message_cache.items()
-                         if now_mono - ts > MESSAGE_CACHE_TTL_S]:
+                         if now - ts > MESSAGE_CACHE_TTL_S]:
             del _message_cache[stale_id]
-        _message_cache[message.message_id] = (text, now_mono)
+        _message_cache[message.message_id] = (text, now)
         while len(_message_cache) > MESSAGE_CACHE_MAX:
             del _message_cache[next(iter(_message_cache))]
+        _save_message_cache(cfg, _message_cache)
 
     async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _authorized(cfg, update):

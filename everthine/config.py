@@ -125,6 +125,10 @@ class Config:
         return self.data_dir / "album.json"
 
     @property
+    def message_cache_path(self) -> Path:
+        return self.data_dir / "message_cache.json"
+
+    @property
     def diary_dir(self) -> Path:
         return self.data_dir / "diary"
 

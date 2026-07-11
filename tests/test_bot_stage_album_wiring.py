@@ -62,6 +62,7 @@ import itertools
 import json
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -870,7 +871,7 @@ class TestMessageCachePruning(_AlbumWiringTestCase):
         handle_reaction = _handler(app, MessageReactionHandler)
 
         clock = {"t": 1000.0}
-        with mock.patch("time.monotonic", side_effect=lambda: clock["t"]):
+        with mock.patch("time.time", side_effect=lambda: clock["t"]):
             first_sent = self._send_turn(on_text, "first turn")
             # Past the TTL: the next cache insert must prune this entry.
             clock["t"] += bot.MESSAGE_CACHE_TTL_S + 1
@@ -1382,6 +1383,91 @@ class TestStageAdvanceFlow(_StageAlbumUITestCase):
                                return_value=EngineReply("lovely", "sess", ok=True)):
             asyncio.run(on_text(FakeUpdate(plain), FakeContext()))
         self.assertEqual(plain.replies[0].text, "lovely")
+
+
+# --- _message_cache persistence (merge-acceptance fix, 2026-07-11): the
+#     cache used to be memory-only, so every restart silently orphaned all
+#     earlier companion messages -- a heart on anything sent before the
+#     restart answered "out of reach". It now reloads from
+#     cfg.message_cache_path at build time, wall-clock TTL honored. --------
+
+class TestMessageCachePersistence(_AlbumWiringTestCase):
+    def _send_turn(self, on_text, text):
+        message = FakeMessage(text)
+        with mock.patch.object(engine, "run_once",
+                               return_value=EngineReply(f"reply to {text}",
+                                                        "sess", ok=True)):
+            asyncio.run(on_text(FakeUpdate(message), FakeContext()))
+        return message.replies[0]
+
+    def test_heart_survives_a_restart(self):
+        cfg = self._cfg()
+        first_app = bot.make_app(cfg)
+        sent = self._send_turn(_handler(first_app, MessageHandler), "before restart")
+        self.assertTrue(cfg.message_cache_path.exists())
+
+        # A brand-new make_app over the same data dir IS the restart.
+        second_app = bot.make_app(cfg)
+        handle_reaction = _handler(second_app, MessageReactionHandler)
+        reaction = FakeReactionUpdate(
+            user_id=1, chat_id=1, message_id=sent.message_id,
+            old_emojis=[], new_emojis=["❤️"])
+        context = FakeContext()
+        asyncio.run(handle_reaction(reaction, context))
+        self.assertEqual(context.bot.sent_messages, [])   # silent keep, no expired
+        entries = album.all_entries(cfg)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["message"]["text"], "reply to before restart")
+
+    def test_expired_entries_are_dropped_on_load(self):
+        cfg = self._cfg()
+        stale_ts = time.time() - bot.MESSAGE_CACHE_TTL_S - 10
+        fresh_ts = time.time()
+        cfg.message_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg.message_cache_path.write_text(json.dumps({
+            "111": ["a line from too long ago", stale_ts],
+            "222": ["a line still within reach", fresh_ts],
+        }), encoding="utf-8")
+
+        app = bot.make_app(cfg)
+        handle_reaction = _handler(app, MessageReactionHandler)
+
+        stale = FakeReactionUpdate(user_id=1, chat_id=3, message_id=111,
+                                   old_emojis=[], new_emojis=["❤️"])
+        stale_ctx = FakeContext()
+        asyncio.run(handle_reaction(stale, stale_ctx))
+        self.assertEqual(stale_ctx.bot.sent_messages,
+                         [(3, messages.msg("album_expired"))])
+
+        fresh = FakeReactionUpdate(user_id=1, chat_id=3, message_id=222,
+                                   old_emojis=[], new_emojis=["❤️"])
+        fresh_ctx = FakeContext()
+        asyncio.run(handle_reaction(fresh, fresh_ctx))
+        self.assertEqual(fresh_ctx.bot.sent_messages, [])
+        entries = album.all_entries(cfg)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["message"]["text"],
+                         "a line still within reach")
+
+    def test_album_off_neither_loads_nor_writes_the_file(self):
+        cfg = self._cfg(album_enabled=False)
+        app = bot.make_app(cfg)
+        self._send_turn(_handler(app, MessageHandler), "never cached")
+        self.assertFalse(cfg.message_cache_path.exists())
+
+    def test_corrupt_cache_file_degrades_to_empty(self):
+        cfg = self._cfg()
+        cfg.message_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg.message_cache_path.write_text("{not json", encoding="utf-8")
+        with self.assertLogs("everthine", level="WARNING"):
+            app = bot.make_app(cfg)   # must not raise
+        handle_reaction = _handler(app, MessageReactionHandler)
+        reaction = FakeReactionUpdate(user_id=1, chat_id=7, message_id=9,
+                                      old_emojis=[], new_emojis=["❤️"])
+        ctx = FakeContext()
+        asyncio.run(handle_reaction(reaction, ctx))
+        self.assertEqual(ctx.bot.sent_messages,
+                         [(7, messages.msg("album_expired"))])
 
 
 # --- /stage: the retreat flow (confirm -> yes / no) ------------------------
