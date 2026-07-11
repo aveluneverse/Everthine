@@ -327,5 +327,49 @@ class TestSchedulerKnobs(unittest.TestCase):
                 self.assertIn(var, text)
 
 
+class TestFactsKnobs(unittest.TestCase):
+    def test_defaults(self):
+        cfg = load_config(BASE)
+        self.assertTrue(cfg.facts_enabled)
+        self.assertEqual(cfg.facts_idle_minutes, 30)
+        self.assertEqual(cfg.facts_max, 200)
+        self.assertEqual(cfg.facts_prompt_max, 15)
+
+    def test_paths_derive_from_data_dir(self):
+        cfg = load_config({**BASE, "DATA_DIR": "elsewhere"})
+        self.assertEqual(cfg.facts_path, Path("elsewhere") / "facts.json")
+        self.assertEqual(cfg.facts_state_path, Path("elsewhere") / "facts_state.json")
+
+    def test_overrides_round_trip(self):
+        cfg = load_config({**BASE,
+                            "FACTS_ENABLED": "false",
+                            "FACTS_IDLE_MINUTES": "45",
+                            "FACTS_MAX": "50",
+                            "FACTS_PROMPT_MAX": "5"})
+        self.assertFalse(cfg.facts_enabled)
+        self.assertEqual(cfg.facts_idle_minutes, 45)
+        self.assertEqual(cfg.facts_max, 50)
+        self.assertEqual(cfg.facts_prompt_max, 5)
+
+    def test_bool_garbage_raises(self):
+        with self.assertRaises(ConfigError):
+            load_config({**BASE, "FACTS_ENABLED": "maybe"})
+
+    def test_non_positive_ints_raise(self):
+        for key in ("FACTS_IDLE_MINUTES", "FACTS_MAX", "FACTS_PROMPT_MAX"):
+            for bad in ("0", "-5"):
+                with self.subTest(key=key, bad=bad):
+                    with self.assertRaises(ConfigError):
+                        load_config({**BASE, key: bad})
+
+    def test_env_example_documents_facts_vars(self):
+        # Sibling of TestSchedulerKnobs.test_env_example_documents_scheduler_vars,
+        # same shape: guards .env.example's 1:1 catalog for the facts knobs.
+        text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        for var in ("FACTS_ENABLED", "FACTS_IDLE_MINUTES", "FACTS_MAX", "FACTS_PROMPT_MAX"):
+            with self.subTest(var=var):
+                self.assertIn(var, text)
+
+
 if __name__ == "__main__":
     unittest.main()

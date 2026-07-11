@@ -86,6 +86,10 @@ class Config:
     reflection_daily_cap: int = 12
     portrait_enabled: bool = True
     portrait_interval_days: int = 7
+    facts_enabled: bool = True
+    facts_idle_minutes: int = 30
+    facts_max: int = 200
+    facts_prompt_max: int = 15
     scheduler_enabled: bool = True
     greeting_enabled: bool = True
     greeting_hour: int = 8
@@ -151,6 +155,14 @@ class Config:
     @property
     def portrait_history_dir(self) -> Path:
         return self.data_dir / "portrait_history"
+
+    @property
+    def facts_path(self) -> Path:
+        return self.data_dir / "facts.json"
+
+    @property
+    def facts_state_path(self) -> Path:
+        return self.data_dir / "facts_state.json"
 
     @property
     def scheduler_state_path(self) -> Path:
@@ -219,6 +231,10 @@ def load_config(env: Mapping | None = None) -> Config:
         reflection_daily_cap=_get_positive_int(env, "REFLECTION_DAILY_CAP", 12),
         portrait_enabled=_get_bool(env, "PORTRAIT_ENABLED", True),
         portrait_interval_days=_get_positive_int(env, "PORTRAIT_INTERVAL_DAYS", 7),
+        facts_enabled=_get_bool(env, "FACTS_ENABLED", True),
+        facts_idle_minutes=_get_positive_int(env, "FACTS_IDLE_MINUTES", 30),
+        facts_max=_get_positive_int(env, "FACTS_MAX", 200),
+        facts_prompt_max=_get_positive_int(env, "FACTS_PROMPT_MAX", 15),
         scheduler_enabled=_get_bool(env, "SCHEDULER_ENABLED", True),
         greeting_enabled=_get_bool(env, "GREETING_ENABLED", True),
         greeting_hour=_get_hour(env, "GREETING_HOUR", 8),
