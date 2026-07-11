@@ -185,28 +185,49 @@ def _atomic_write(path: Path, data: dict, *, trailing_newline: bool = False) -> 
             os.unlink(tmp)
 
 
+def window_date(now: datetime) -> str:
+    """The identity of the night `now` belongs to: the calendar date
+    tonight's window OPENED on. In the small hours -- past midnight but
+    before DIARY_WINDOW_END_HOUR -- the window opened YESTERDAY, so that
+    is the night this moment is part of; from then on it is today's.
+    The daily quota, the decline sentinel, and the entry's own `date`
+    field all key on this (merge-acceptance fix, 2026-07-11): keyed on
+    the plain calendar day, a window that wraps past midnight had its
+    quota reset under it at 00:00, and one night carried two pages.
+
+    Outside the window the value still resolves (to today's date), but
+    nothing ever consults it there: eligibility()'s window gate runs
+    before every quota read, and the write/decline stamps only happen
+    on nights the gate already let through.
+    """
+    if now.hour < DIARY_WINDOW_END_HOUR:
+        return (now.date() - timedelta(days=1)).isoformat()
+    return now.date().isoformat()
+
+
 def record_written(path: Path, now: datetime) -> None:
-    """Record that an entry was written just now, rolling the daily
-    counter over first if the last write landed on an earlier date. The
-    date is decided entirely by `now` -- this function reads no clock of
-    its own."""
+    """Record that an entry was written just now, rolling the nightly
+    counter over first if the last write belonged to an earlier night
+    (window_date, not the raw calendar day). The night is decided
+    entirely by `now` -- this function reads no clock of its own."""
     path = Path(path)
     state = load_state(path)
-    today = now.date().isoformat()
-    if state.get("count_date") != today:
+    night = window_date(now)
+    if state.get("count_date") != night:
         state["count_today"] = 0
     state["count_today"] += 1
-    state["count_date"] = today
+    state["count_date"] = night
     _atomic_write(path, state)
 
 
 def record_declined(path: Path, now: datetime) -> None:
     """Record that he considered writing tonight and chose not to. Only
-    declined_date changes -- the write counter is left exactly as it
-    was; a decline is not a write and never touches it."""
+    declined_date changes (stamped with the night's window_date) -- the
+    write counter is left exactly as it was; a decline is not a write
+    and never touches it."""
     path = Path(path)
     state = load_state(path)
-    state["declined_date"] = now.date().isoformat()
+    state["declined_date"] = window_date(now)
     _atomic_write(path, state)
 
 
@@ -246,11 +267,15 @@ def eligibility(cfg: Config, now: datetime, last_contact: datetime | None,
     if not in_window:
         return "window"
 
-    today = now.date().isoformat()
-    if state.get("count_date") == today and state.get("count_today", 0) >= cfg.diary_max_daily:
+    # Quota and decline are per NIGHT, not per calendar day: the small
+    # hours belong to the night that opened yesterday evening, so a page
+    # written at 21:30 still spends the quota an 01:30 tick would ask
+    # about (merge-acceptance fix, 2026-07-11 -- one night, one page).
+    night = window_date(now)
+    if state.get("count_date") == night and state.get("count_today", 0) >= cfg.diary_max_daily:
         return "already_written"
 
-    if state.get("declined_date") == today:
+    if state.get("declined_date") == night:
         return "declined"
 
     if hours_since_diary < DIARY_MIN_INTERVAL_HOURS:
@@ -388,7 +413,10 @@ def save_entry(cfg: Config, entry: dict, now: datetime) -> Path:
     if not isinstance(keywords, list):
         keywords = []
     record = {
-        "date": now.date().isoformat(),
+        # The night's identity, not the raw calendar day: a page written
+        # in the small hours is still last evening's page and is dated
+        # (and filed) as such.
+        "date": window_date(now),
         "mood": filter_sensitive(entry.get("mood") or ""),
         "keywords": [filter_sensitive(w) for w in keywords if isinstance(w, str)],
         "content": filter_sensitive(entry.get("content") or ""),

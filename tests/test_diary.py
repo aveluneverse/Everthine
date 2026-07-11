@@ -178,6 +178,57 @@ class TestEligibility(unittest.TestCase):
             reason = diary.eligibility(cfg, now, now - timedelta(minutes=40), state, 100.0)
         self.assertIsNone(reason)
 
+    def test_small_hours_quota_belongs_to_last_night(self):
+        # The one-night-two-pages bug, reproduced (2026-07-10 lab night):
+        # a page written at 21:27 stamped that evening's count_date; at
+        # 01:32 the calendar day had rolled over, the plain-date
+        # comparison saw a fresh quota, and a second page went out the
+        # same night. The small hours belong to the night that opened
+        # yesterday evening -- the quota must still read as spent.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td, DIARY_MAX_DAILY="1")
+            now = _aware(1, 32, day=7)  # small hours of the 7th...
+            state = {"count_date": "2026-07-06",  # ...page written the 6th's evening
+                     "count_today": 1, "declined_date": None}
+            reason = diary.eligibility(cfg, now, now - timedelta(minutes=40), state, 100.0)
+        self.assertEqual(reason, "already_written")
+
+    def test_small_hours_decline_belongs_to_last_night(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            now = _aware(2, 0, day=7)
+            state = {"count_date": None, "count_today": 0,
+                     "declined_date": "2026-07-06"}
+            reason = diary.eligibility(cfg, now, now - timedelta(minutes=40), state, 100.0)
+        self.assertEqual(reason, "declined")
+
+    def test_new_evening_window_opens_a_fresh_quota(self):
+        # The night before wrote its page (stamped with ITS window date);
+        # the next evening is a new window and may write again.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td, DIARY_MAX_DAILY="1")
+            now = _aware(21, 30, day=7)
+            state = {"count_date": "2026-07-06", "count_today": 1,
+                     "declined_date": "2026-07-06"}
+            reason = diary.eligibility(cfg, now, now - timedelta(minutes=40), state, 100.0)
+        self.assertIsNone(reason)
+
+    def test_window_date_resolves_the_night(self):
+        # Directly pin the night-identity helper across its boundaries:
+        # 21:00 and 23:59 belong to today's window, 00:00 through 07:59
+        # to the window that opened yesterday, 08:00 (closed, never
+        # consulted) resolves to today.
+        cases = (
+            (_aware(21, 0, day=6), "2026-07-06"),
+            (_aware(23, 59, day=6), "2026-07-06"),
+            (_aware(0, 0, day=7), "2026-07-06"),
+            (_aware(7, 59, day=7), "2026-07-06"),
+            (_aware(8, 0, day=7), "2026-07-07"),
+        )
+        for now, expected in cases:
+            with self.subTest(now=now.isoformat()):
+                self.assertEqual(diary.window_date(now), expected)
+
     def test_too_soon(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = _cfg(td)
