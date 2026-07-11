@@ -1609,5 +1609,47 @@ class TestDeliverLongTextChunks(unittest.TestCase):
             self.assertEqual(c.kwargs["chat_id"], cfg.authorized_user_id)
 
 
+class TestDeliverCacheSink(unittest.TestCase):
+    """The merge-acceptance fix, 2026-07-11: proactive messages never
+    entered bot.py's heart-reaction message cache, so hearting one always
+    answered "out of reach". deliver() now feeds an optional cache_sink
+    once per successfully sent chunk, with that chunk's own sent message
+    and text; None (every pre-existing call site) skips the feeding."""
+
+    def test_sink_fed_once_per_chunk_with_that_chunks_text(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            now = _aware(12)
+            store = _store(cfg, session_id="s1")
+            long_text = ("A" * 4096) + "\n" + ("B" * 4096)
+            expected_chunks = chunking.split_message(long_text)
+            self.assertGreater(len(expected_chunks), 1)     # precondition
+            result = _nudge_result(text=long_text, session_id="s2",
+                                   expected_session_id="s1")
+            app = _FakeApp()
+            fed = []
+            asyncio.run(scheduler.deliver(app, cfg, store, result, now,
+                                          cache_sink=lambda m, t: fed.append((m, t))))
+        self.assertEqual([t for _, t in fed], expected_chunks)
+        # Each call carried the send's own returned message object.
+        for sent_message, _ in fed:
+            self.assertIs(sent_message, app.bot.send_message.return_value)
+
+    def test_sink_not_fed_when_the_send_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(td)
+            now = _aware(12)
+            store = _store(cfg, session_id="s1")
+            result = _nudge_result(text="never arrives", session_id="s2",
+                                   expected_session_id="s1")
+            app = _FakeApp()
+            app.bot.send_message.side_effect = RuntimeError("net down")
+            fed = []
+            with self.assertLogs("everthine", level="WARNING"):
+                asyncio.run(scheduler.deliver(app, cfg, store, result, now,
+                                              cache_sink=lambda m, t: fed.append((m, t))))
+        self.assertEqual(fed, [])   # no send, no cache entry -- ever
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1111,7 +1111,11 @@ def make_app(cfg: Config):
         miss would arm a tick wired to nothing that no one would notice."""
         await register_commands(app_)          # keeps its own internal guard
         try:
-            scheduler.start_tick(app_, cfg, store)
+            # _cache_sent rides along so a heart on a PROACTIVE message
+            # resolves to its text exactly like a heart on a reply does;
+            # its own album_enabled gate makes this a no-op when the album
+            # is off (merge-acceptance fix, 2026-07-11).
+            scheduler.start_tick(app_, cfg, store, cache_sink=_cache_sent)
         except Exception:
             logger.warning("inner-life tick failed to start", exc_info=True)
 

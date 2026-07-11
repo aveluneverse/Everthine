@@ -169,7 +169,7 @@ class TestStageAlbumKeys(_OverrideResetTest):
         self.assertEqual(messages.msg("btn_retreat_no"), "Stay here")
         self.assertEqual(messages.msg("stage_retreated_ack"), "Back at: {stage}")
         self.assertEqual(messages.msg("album_expired"),
-                         "That message is too old for me to reach now - it was not kept.")
+                         "That one is out of my reach now - it was not kept.")
         self.assertEqual(messages.msg("album_empty"),
                          "Nothing kept yet. React with a heart to keep a moment.")
 

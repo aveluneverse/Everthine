@@ -876,10 +876,20 @@ def nudge_once(cfg: Config, store: SessionStore, now: datetime,
 # ---------------------------------------------------------------------
 
 async def deliver(app, cfg: Config, store: SessionStore, result: NudgeResult,
-                  now: datetime) -> None:
+                  now: datetime, cache_sink=None) -> None:
     """Put one generated proactive message (T4's NudgeResult) into the world,
     in the single order this task's integrity rests on: account first (stamp,
     then archive), send best-effort afterwards.
+
+    `cache_sink`, when provided, is called once per successfully sent chunk
+    with (sent_message, chunk_text) -- bot.py passes its heart-reaction
+    message cache's insert so a heart on a PROACTIVE message resolves to its
+    text exactly like a heart on a reply does (merge-acceptance fix,
+    2026-07-11: proactive lines never entered the cache, so hearting one
+    always came back "out of reach"). It arrives as an explicit argument --
+    the same rule store follows, never a bot_data side channel -- and None
+    (the default) simply skips the feeding, which is also why every
+    pre-existing caller and test stays valid unchanged.
 
     1. Optimistic stamp. Re-read the store's CURRENT session pointer -- never
        the snapshot T4 took -- and stamp the session this reach-out actually
@@ -935,8 +945,13 @@ async def deliver(app, cfg: Config, store: SessionStore, result: NudgeResult,
     for chunk in chunking.split_message(result.text):
         for attempt in range(2):  # the original send, then one retry
             try:
-                await app.bot.send_message(
+                sent = await app.bot.send_message(
                     chat_id=cfg.authorized_user_id, text=chunk)
+                if cache_sink is not None:
+                    # Per chunk, with THAT chunk's text: a heart lands on
+                    # one Telegram message, so each must resolve to what
+                    # it alone displayed (the M1.5 split convention).
+                    cache_sink(sent, chunk)
                 break
             except Exception:
                 if attempt == 1:
@@ -958,7 +973,7 @@ async def deliver(app, cfg: Config, store: SessionStore, result: NudgeResult,
 # parameter (never a bot_data side channel).
 # ---------------------------------------------------------------------
 
-def start_tick(app, cfg: Config, store: SessionStore) -> None:
+def start_tick(app, cfg: Config, store: SessionStore, cache_sink=None) -> None:
     """Arm the background inner-life tick, if this run wants any of its three
     organs: diary_enabled, portrait_enabled, and (M7 T6) scheduler_enabled all
     off means no task at all (the L1 rollback -- nothing ticking, nothing to
@@ -1013,7 +1028,7 @@ def start_tick(app, cfg: Config, store: SessionStore) -> None:
         _atomic_write(state_path, first_state)
         logger.info("scheduler: fresh ledger -- first greeting waits for tomorrow morning")
     app.bot_data["_inner_tick_task"] = asyncio.create_task(
-        tick_loop(cfg, store, app))
+        tick_loop(cfg, store, app, cache_sink))
     if cfg.diary_enabled:
         logger.info("diary: inner-life tick started")
     if cfg.portrait_enabled:
@@ -1023,7 +1038,7 @@ def start_tick(app, cfg: Config, store: SessionStore) -> None:
                     cfg.greeting_enabled, cfg.miss_you_enabled, cfg.share_enabled)
 
 
-async def tick_loop(cfg: Config, store: SessionStore, app) -> None:
+async def tick_loop(cfg: Config, store: SessionStore, app, cache_sink=None) -> None:
     """The inner-life heartbeat: sleep first (the moment of boot is never
     writing time), take one shared timestamp for the round, then run three
     segments in a fixed order -- diary, self-portrait, proactive reach-out --
@@ -1082,7 +1097,7 @@ async def tick_loop(cfg: Config, store: SessionStore, app) -> None:
                 result = await asyncio.to_thread(
                     nudge_once, cfg, store, now, random.random())
                 if result is not None:
-                    await deliver(app, cfg, store, result, now)
+                    await deliver(app, cfg, store, result, now, cache_sink)
             except asyncio.CancelledError:
                 raise
             except Exception:

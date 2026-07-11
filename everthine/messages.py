@@ -51,7 +51,7 @@ _MESSAGES = {
     "btn_retreat_no": "Stay here",
     "stage_retreated_ack": "Back at: {stage}",
     "stage_road_clipped": "...and {n} earlier steps, all kept.",
-    "album_expired": "That message is too old for me to reach now - it was not kept.",
+    "album_expired": "That one is out of my reach now - it was not kept.",
     "album_empty": "Nothing kept yet. React with a heart to keep a moment.",
 }
 

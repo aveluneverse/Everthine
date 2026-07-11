@@ -286,6 +286,23 @@ class TestConcurrencyScope(unittest.TestCase):
         self.assertEqual([c[0] for c in manager.mock_calls],
                          ["register_commands", "start_tick"])
 
+    def test_post_init_hands_start_tick_a_real_cache_sink(self):
+        # Merge-acceptance fix, 2026-07-11: a heart on a PROACTIVE message
+        # used to come back "out of reach" because deliver() never fed the
+        # heart-reaction message cache. The wiring is the fix's load-bearing
+        # half: make_app must hand start_tick a callable cache_sink (its own
+        # _cache_sent), not leave the parameter to default to None.
+        hook = self._app(False).post_init
+        tick = mock.Mock()
+        fake = FakeStartupApp(Config(bot_token="x", authorized_user_id=1,
+                                     diary_enabled=False))
+        with mock.patch.object(bot, "register_commands", mock.AsyncMock()), \
+                mock.patch.object(scheduler, "start_tick", tick):
+            asyncio.run(hook(fake))
+        sink = tick.call_args.kwargs.get("cache_sink")
+        self.assertIsNotNone(sink)
+        self.assertTrue(callable(sink))
+
 
 class FakeStartupApp(FakeCommandApp):
     """FakeCommandApp plus a bot_data dict, so the composite startup hook can
