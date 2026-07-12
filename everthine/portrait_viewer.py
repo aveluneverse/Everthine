@@ -240,7 +240,7 @@ _load_entries = load_entries  # back-compat alias; observatory.load_portraits ma
 # Rendering: every dynamic string passes through html.escape
 # ---------------------------------------------------------------------
 
-def _render_content(content: str) -> str:
+def render_content(content: str) -> str:
     """Escape the prose, then keep its shape: a blank line starts a new
     paragraph, a lone newline becomes a <br>. Escaping happens first so the
     only tags in the result are the ones this function adds."""
@@ -254,7 +254,10 @@ def _render_content(content: str) -> str:
     return "\n".join(parts)
 
 
-def _render_positions(opinions: list) -> str:
+_render_content = render_content  # back-compat alias; observatory's section renderers made this public
+
+
+def render_positions(opinions: list) -> str:
     """Render the `Positions` block, or "" when nothing well-shaped survives.
     Each opinion is expected to be {"topic": str, "opinion": str}; anything
     that isn't a dict, or carries neither a topic nor an opinion string, is
@@ -279,7 +282,10 @@ def _render_positions(opinions: list) -> str:
     return _wrap_block(SECTION_POSITIONS, items)
 
 
-def _render_notes(observations: list) -> str:
+_render_positions = render_positions  # back-compat alias; observatory's portrait section made this public
+
+
+def render_notes(observations: list) -> str:
     """Render the `Notes to self` block, or "" when nothing survives. Each
     observation is expected to be a string; anything else is dropped."""
     items = []
@@ -291,6 +297,9 @@ def _render_notes(observations: list) -> str:
             continue
         items.append(f"<li>{text}</li>")
     return _wrap_block(SECTION_NOTES, items)
+
+
+_render_notes = render_notes  # back-compat alias; observatory's portrait section made this public
 
 
 def _wrap_block(title: str, items: list) -> str:
