@@ -22,7 +22,6 @@ PERSONA_GUIDE = REPO / "docs" / "persona-guide.zh-TW.md"
 PERSONA_GUIDE_EN = REPO / "docs" / "persona-guide.md"
 FAQ = REPO / "docs" / "faq.zh-TW.md"
 FAQ_EN = REPO / "docs" / "faq.md"
-README_ZH = REPO / "README.zh-TW.md"
 README_EN = REPO / "README.en.md"
 
 # The engine-isolation guarantee CLAUDE.md must keep stating verbatim.
@@ -200,9 +199,11 @@ class TestReadmeEn(WizardDocMixin, unittest.TestCase):
         self.assertIn("If you are Claude Code", text)
         self.assertIn("git clone", text)
 
-    def test_links_chinese_readme(self):
+    def test_language_switch_line(self):
+        # M10 P2: the English translation points back to the Traditional
+        # Chinese facade right under the title.
         text = self.DOC.read_text(encoding="utf-8")
-        self.assertIn("README.zh-TW.md", text)
+        self.assertIn("[繁體中文](README.md)", text)
 
     def test_observatory_section_present(self):
         text = self.DOC.read_text(encoding="utf-8")
@@ -219,7 +220,7 @@ class TestReadmeEn(WizardDocMixin, unittest.TestCase):
         for target in re.findall(r"\]\(((?!https?://)[^)#]+)\)", text):
             with self.subTest(link=target):
                 self.assertTrue((REPO / target).exists(),
-                                f"README.zh-TW.md links to {target!r} "
+                                f"{self.DOC.name} links to {target!r} "
                                 f"which does not exist")
 
 
@@ -310,7 +311,7 @@ class TestFaqEn(WizardDocMixin, unittest.TestCase):
 
 
 class TestReadmeZh(WizardDocMixin, unittest.TestCase):
-    DOC = README_ZH
+    DOC = README
 
     def test_decree_copy_anchors(self):
         text = self.DOC.read_text(encoding="utf-8")
@@ -331,12 +332,18 @@ class TestReadmeZh(WizardDocMixin, unittest.TestCase):
         # Anchor: 「他不知道這扇窗存在」-- the reassurance the whole section turns on.
         self.assertIn("他不知道這扇窗存在", text)
 
+    def test_language_switch_line(self):
+        # M10 P2: the facade offers the English translation right under
+        # the title.
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("[English](README.en.md)", text)
+
     def test_relative_markdown_links_resolve(self):
         text = self.DOC.read_text(encoding="utf-8")
         for target in re.findall(r"\]\(((?!https?://)[^)#]+)\)", text):
             with self.subTest(link=target):
                 self.assertTrue((REPO / target).exists(),
-                                f"README.zh-TW.md links to {target!r} "
+                                f"{self.DOC.name} links to {target!r} "
                                 f"which does not exist")
 
 

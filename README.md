@@ -1,5 +1,7 @@
 # Everthine
 
+[English](README.en.md)
+
 *Ever thine. Ever mine. Ever ours.*
 
 **用歲月來養成，讓他為你而成長。**

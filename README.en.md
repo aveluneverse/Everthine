@@ -1,5 +1,7 @@
 # Everthine
 
+[繁體中文](README.md)
+
 *Ever thine. Ever mine. Ever ours.*
 
 **Raised with time, growing for you.**
@@ -17,8 +19,6 @@ of memory, he is yours and yours alone.
 
 **Status:** under construction. The first public release is being
 carefully assembled.
-
-**繁體中文版 → [README.zh-TW.md](README.zh-TW.md)**
 
 ## Start with one sentence
 
