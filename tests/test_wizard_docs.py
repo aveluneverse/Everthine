@@ -23,6 +23,7 @@ PERSONA_GUIDE_EN = REPO / "docs" / "persona-guide.md"
 FAQ = REPO / "docs" / "faq.zh-TW.md"
 FAQ_EN = REPO / "docs" / "faq.md"
 README_ZH = REPO / "README.zh-TW.md"
+README_EN = REPO / "README.en.md"
 
 # The engine-isolation guarantee CLAUDE.md must keep stating verbatim.
 ISOLATION_ANCHOR = ("The companion's engine runs in a neutral working "
@@ -186,8 +187,8 @@ class TestClaudeMd(WizardDocMixin, unittest.TestCase):
         self.assertIn("everthine-troubleshoot", text)
 
 
-class TestReadme(WizardDocMixin, unittest.TestCase):
-    DOC = README
+class TestReadmeEn(WizardDocMixin, unittest.TestCase):
+    DOC = README_EN
 
     def test_one_line_start_present(self):
         text = self.DOC.read_text(encoding="utf-8")
