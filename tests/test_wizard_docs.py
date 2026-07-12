@@ -31,7 +31,7 @@ ISOLATION_ANCHOR = ("The companion's engine runs in a neutral working "
 # Paths quoted in wizard prose that intentionally do not exist yet
 # (created for the user during setup, or created at first boot).
 EXPECTED_ABSENT = {"personas/mine", "personas/mine/", "data", "data/",
-                   "data/portrait_timeline.html"}
+                   "data/portrait_timeline.html", "data/observatory.html"}
 
 _PATH_RE = re.compile(r"`([A-Za-z0-9_.][A-Za-z0-9_./-]*)`")
 _ENV_ASSIGN_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})=")
@@ -67,6 +67,19 @@ def _load_frontmatter(path: Path) -> dict:
 def _known_env_keys() -> set[str]:
     example = (REPO / ".env.example").read_text(encoding="utf-8")
     return set(_ENV_ASSIGN_RE.findall(example))
+
+
+def _observatory_days_default() -> int:
+    """The CLI default for --days, read straight from the observatory module,
+    so the number the FAQ prints can be pinned against the code and can never
+    silently drift from it."""
+    from everthine import observatory
+    return observatory._build_parser().parse_args([]).days
+
+
+# Chinese spellings of the small integers the --days default might realistically
+# take; extend this map when the CLI default changes to a value not listed.
+_CN_NUMERALS = {14: "十四"}
 
 
 class WizardDocMixin:
@@ -190,6 +203,16 @@ class TestReadme(WizardDocMixin, unittest.TestCase):
         text = self.DOC.read_text(encoding="utf-8")
         self.assertIn("README.zh-TW.md", text)
 
+    def test_observatory_section_present(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        # Command + output filename, both pinned literally (their truth as a
+        # real module is checked in TestObservatoryDocsMatchModule).
+        self.assertIn("python -m everthine.observatory", text)
+        self.assertIn("observatory.html", text)
+        # Anchor: the promise that he cannot see this window -- the whole
+        # reason the page can be honest, unlikely to be casually reworded.
+        self.assertIn("he does not know this window exists", text)
+
     def test_relative_markdown_links_resolve(self):
         text = self.DOC.read_text(encoding="utf-8")
         for target in re.findall(r"\]\(((?!https?://)[^)#]+)\)", text):
@@ -248,6 +271,15 @@ class TestFaq(WizardDocMixin, unittest.TestCase):
         # promise, unlikely to be casually reworded.
         self.assertIn("他寧可問你，不硬編", text)
 
+    def test_observatory_entry_present(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("python -m everthine.observatory", text)
+        self.assertIn("observatory.html", text)
+        # The look-back knob, pinned in both FAQs (see the module cross-check).
+        self.assertIn("--days", text)
+        # Anchor: 「他不知道它存在」-- the reason not to quote his diary back.
+        self.assertIn("他不知道它存在", text)
+
 
 class TestFaqEn(WizardDocMixin, unittest.TestCase):
     DOC = FAQ_EN
@@ -266,6 +298,15 @@ class TestFaqEn(WizardDocMixin, unittest.TestCase):
         # Distinctive anchor -- the don't-fabricate promise.
         self.assertIn("rather ask you than make it up", text)
 
+    def test_observatory_entry_present(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("python -m everthine.observatory", text)
+        self.assertIn("observatory.html", text)
+        # The look-back knob, pinned in both FAQs (see the module cross-check).
+        self.assertIn("--days", text)
+        # Anchor: the reassurance he cannot see the page he is written into.
+        self.assertIn("he does not know it exists", text)
+
 
 class TestReadmeZh(WizardDocMixin, unittest.TestCase):
     DOC = README_ZH
@@ -282,6 +323,13 @@ class TestReadmeZh(WizardDocMixin, unittest.TestCase):
         text = self.DOC.read_text(encoding="utf-8")
         self.assertIn("## 費用，誠實說", text)
 
+    def test_observatory_section_present(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("python -m everthine.observatory", text)
+        self.assertIn("observatory.html", text)
+        # Anchor: 「他不知道這扇窗存在」-- the reassurance the whole section turns on.
+        self.assertIn("他不知道這扇窗存在", text)
+
     def test_relative_markdown_links_resolve(self):
         text = self.DOC.read_text(encoding="utf-8")
         for target in re.findall(r"\]\(((?!https?://)[^)#]+)\)", text):
@@ -289,6 +337,33 @@ class TestReadmeZh(WizardDocMixin, unittest.TestCase):
                 self.assertTrue((REPO / target).exists(),
                                 f"README.zh-TW.md links to {target!r} "
                                 f"which does not exist")
+
+
+class TestObservatoryDocsMatchModule(unittest.TestCase):
+    """The Observatory section names a real module and a real default; both
+    are pinned against the code so the four docs cannot drift from it."""
+
+    def test_module_is_real(self):
+        # `python -m everthine.observatory`, quoted in all four docs, must
+        # resolve to an importable module with a CLI entry point.
+        import importlib
+        mod = importlib.import_module("everthine.observatory")
+        self.assertTrue(hasattr(mod, "main"))
+
+    def test_faq_recent_days_matches_cli_default(self):
+        default = _observatory_days_default()
+        faq_en = FAQ_EN.read_text(encoding="utf-8")
+        faq_zh = FAQ.read_text(encoding="utf-8")
+        self.assertIn("--days", faq_en)
+        self.assertIn("--days", faq_zh)
+        # Each FAQ states the look-back in its own script; the number must be
+        # the code's real default, so a CLI change surfaces here rather than
+        # as stale prose.
+        self.assertIn(str(default), faq_en)
+        spelled = _CN_NUMERALS.get(default)
+        self.assertIsNotNone(
+            spelled, f"add the Chinese numeral for {default} to _CN_NUMERALS")
+        self.assertIn(spelled, faq_zh)
 
 
 if __name__ == "__main__":

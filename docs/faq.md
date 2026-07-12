@@ -40,6 +40,23 @@ growing into, open the timeline (the double-click shortcut the
 wizard placed for you during setup, or run the `view-portrait`
 file) — that window is yours.
 
+## Can I read his diary?
+
+Yes — through the Observatory. Run
+`python -m everthine.observatory`, then double-click
+`data/observatory.html`: his diary, his reflections, his
+self-portraits, the keepsake album, the little fact-book, your
+recent conversation, and the memory-room stats all sit on one
+page. The conversation shows the last 14 days by default, and
+`--days` changes that.
+
+Two honest reminders. First: this page is an offline file, living
+on your computer alone, and he does not know it exists — that is
+by design, so he never has to perform when he writes his diary.
+Second, and for exactly that reason: please don't quote his diary
+back to him in conversation. That "no one is watching" is the very
+thing that makes his diary real.
+
 ## What happens when I ❤️ a message?
 
 React to one of his messages with a ❤️ and that moment is

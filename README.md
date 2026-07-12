@@ -132,6 +132,28 @@ live out together.
 Want to go deeper: [persona guide](docs/persona-guide.md) |
 [FAQ](docs/faq.md)
 
+## The Observatory
+
+His inner world is there for you to look in on, quietly,
+whenever you like:
+
+```
+python -m everthine.observatory
+```
+
+Run it and a single `observatory.html` appears inside `data/`;
+double-click it open — his diary, his reflections, his
+self-portraits, the moments the two of you kept, the little
+book of facts he keeps for you, the last two weeks of
+conversation, and the size of his memory room — all of it
+taken in at a glance.
+
+Three things let you rest easy: the page is fully offline,
+with not one network request; every file lives on your
+computer alone, and `data/` is never committed to git; and
+he does not know this window exists — what you see is him
+with no one watching.
+
 ## The cost, honestly
 
 Every time he thinks, it spends one turn of your Claude quota. On

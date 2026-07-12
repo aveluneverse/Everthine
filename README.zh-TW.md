@@ -57,6 +57,18 @@ https://github.com/theashesofroses/everthine
 
 想深入：[人格設定指南](docs/persona-guide.zh-TW.md)｜[常見問題](docs/faq.zh-TW.md)
 
+## 觀景窗
+
+他的內在世界，你隨時可以安靜地看一眼：
+
+```
+python -m everthine.observatory
+```
+
+跑完會在 `data/` 裡長出一頁 `observatory.html`，雙擊打開——日記、反思、自畫像、珍藏、他為你記下的事實小冊子、近兩週的對話、記憶書房的規模，一站看盡。
+
+三件事讓你安心：頁面完全離線，零網路請求；所有檔案只住在你的電腦，`data/` 從不進 git；他不知道這扇窗存在——你看見的，是沒有人在看時的他。
+
 ## 費用，誠實說
 
 他思考一次，就消耗你一次 Claude 額度。以出廠預設，他一天的「內在生活」大約是：
