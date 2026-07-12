@@ -37,21 +37,22 @@ file is silently dropped (routine line-level noise would flood a log);
 a missing file or directory is quietly an empty source -- nothing has
 gone wrong, there is simply nothing written yet. No loader ever raises.
 
-This task shipped the module skeleton and the seven loaders; this one adds
-the rendering layer on top, in portrait_viewer.py's own mold: inline CSS
-only, a system font stack, zero CDN, zero JS, every dynamic string
-escaped, and an empty source rendered as a gentle empty state rather than
-an error. Three of portrait_viewer's own renderers (content, Positions,
-Notes to self) are reused verbatim rather than re-implemented -- publicized
-with one-line back-compat aliases, the same move load_entries got in the
-loader task -- so a self-portrait card reads identically here and on its
-own timeline page. The seven sections assemble into one page behind
-render_page(), a top anchor table of contents standing in for the
-navigation a multi-page site would otherwise need (zero JS, so it is
-native #anchor scrolling, nothing more). The CLI that calls render_page()
-with a real data/ directory is main(), below -- its own docstring names
-the privacy promise that the rendered page never leaves --data-dir, the
-same gitignored directory every source above already reads from.
+The module is built in three layers: the seven loaders above, the rendering
+layer described here, and the CLI at the bottom. This layer follows
+portrait_viewer.py's own mold: inline CSS only, a system font stack, zero
+CDN, zero JS, every dynamic string escaped, and an empty source rendered as
+a gentle empty state rather than an error. Three of portrait_viewer's own
+renderers (content, Positions, Notes to self) are reused verbatim rather
+than re-implemented -- publicized with one-line back-compat aliases, the
+same move load_entries got in the loader task -- so a self-portrait card
+reads identically here and on its own timeline page. The seven sections
+assemble into one page behind render_page(), a top anchor table of contents
+standing in for the navigation a multi-page site would otherwise need (zero
+JS, so it is native #anchor scrolling, nothing more). The CLI that calls
+render_page() with a real data/ directory is main(), below -- its own
+docstring names the privacy promise that the rendered page never leaves
+--data-dir, the same gitignored directory every source above already reads
+from.
 """
 from __future__ import annotations
 
@@ -976,8 +977,7 @@ def _render_memory_section(stats: dict | None) -> str:
 
 def render_page(sections_data: dict) -> str:
     """Assemble the full offline Observatory page from the seven loaders'
-    output, bundled by the caller (the CLI, arriving in the next task)
-    into one dict:
+    output, bundled by the caller (main(), below) into one dict:
 
         {
             "portraits": load_portraits(...),
@@ -1060,8 +1060,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-dir",
         default="data",
-        help='Directory holding data/ (diary, reflections, portraits, '
-             'album, facts, archive, memory) (default: "data").',
+        help='The companion data directory (diary/, reflections.jsonl, '
+             'portrait_history/, album.json, facts.json, archive/, '
+             'memory.db) (default: "data").',
     )
     parser.add_argument(
         "--days",
