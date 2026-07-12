@@ -186,7 +186,7 @@ body {
 # Snapshot loading: filename-ordered, fail-soft on every file
 # ---------------------------------------------------------------------
 
-def _load_entries(history_dir: Path) -> list[dict]:
+def load_entries(history_dir: Path) -> list[dict]:
     """Read every {history_dir}/*.json snapshot, oldest first (filename IS the
     date, so a lexical filename sort is the chronological order). Each file is
     parsed defensively: an unreadable or invalid-JSON file, a payload that
@@ -231,6 +231,9 @@ def _load_entries(history_dir: Path) -> list[dict]:
             "observations": observations,
         })
     return entries
+
+
+_load_entries = load_entries  # back-compat alias; observatory.load_portraits made this public
 
 
 # ---------------------------------------------------------------------
