@@ -39,16 +39,19 @@ gone wrong, there is simply nothing written yet. No loader ever raises.
 
 The module is built in three layers: the seven loaders above, the rendering
 layer described here, and the CLI at the bottom. This layer follows
-portrait_viewer.py's own mold: inline CSS only, a system font stack, zero
-CDN, zero JS, every dynamic string escaped, and an empty source rendered as
-a gentle empty state rather than an error. Three of portrait_viewer's own
-renderers (content, Positions, Notes to self) are reused verbatim rather
-than re-implemented -- publicized with one-line back-compat aliases, the
-same move load_entries got in the loader task -- so a self-portrait card
-reads identically here and on its own timeline page. The seven sections
-assemble into one page behind render_page(), a top anchor table of contents
-standing in for the navigation a multi-page site would otherwise need (zero
-JS, so it is native #anchor scrolling, nothing more). The CLI that calls
+portrait_viewer.py's own mold: inline CSS and a single small inline script,
+a system font stack, zero CDN, no external reference of any kind, every
+dynamic string escaped, and an empty source rendered as a gentle empty state
+rather than an error. Three of portrait_viewer's own renderers (content,
+Positions, Notes to self) are reused verbatim rather than re-implemented --
+publicized with one-line back-compat aliases, the same move load_entries got
+in the loader task -- so a self-portrait card reads identically here and on
+its own timeline page. The seven sections assemble into one page behind
+render_page(), a top table of contents standing in for the navigation a
+multi-page site would otherwise need: it sticks to the top of the viewport,
+and the page-end script turns it into a true tab bar (click a heading, see
+just that section); with JS off it is plain native #anchor scrolling over
+the whole visible page. The CLI that calls
 render_page() with a real data/ directory is main(), below -- its own
 docstring names the privacy promise that the rendered page never leaves
 --data-dir, the same gitignored directory every source above already reads
@@ -69,8 +72,9 @@ from . import portrait_viewer
 
 logger = logging.getLogger("everthine")
 
-# Loader-layer constants: none are needed. Render-layer chrome (page title,
-# section order/labels, empty-state copy, the CSS block) lives just above
+# Loader-layer constants: none are needed. Render-layer chrome (the English
+# canonical constants, the per-language CHROME_EN / CHROME_ZH string tables,
+# section order, the CSS block, and the inline tab script) lives just above
 # render_page(), past the seven loaders below.
 
 
@@ -516,6 +520,104 @@ SPEAKER_LABELS = {
 # first); it is never dropped and never folded into a guessed bucket.
 FACT_CATEGORY_ORDER = ("interest", "mood", "stress", "follow_up", "life_event", "conflict")
 
+# --- i18n chrome tables (T5 r1) -----------------------------------------
+# Every localizable string above, bundled per language. CHROME_EN reuses the
+# canonical English constants verbatim, so `--lang en` stays byte-identical to
+# the page every prior task pinned; CHROME_ZH carries the Traditional Chinese
+# pack the product now defaults to (see main()'s --lang, default "zh"). The
+# render layer -- render_page() and every _render_*_section() below -- takes
+# one of these dicts; they default to CHROME_EN so their unit tests keep
+# pinning the English canonical while the CLI selects the user's language.
+#
+# Line-shaped values are str.format templates with named fields. Every
+# substituted value is html-escaped by the caller BEFORE it reaches .format(),
+# so the template string is the only place a brace is ever interpreted -- a
+# substituted value carrying a stray brace is inserted literally, never
+# re-parsed. Label maps (direction/speaker/fact category) are looked up with a
+# raw-escaped fallback for any value not in the map, the same fail-soft stance
+# every loader takes toward a shape it does not know.
+CHROME_EN = {
+    "html_lang": "en",
+    "page_title": PAGE_TITLE,
+    "page_subtitle": PAGE_SUBTITLE,
+    # Section id -> localized heading; the id order still lives in
+    # SECTION_ORDER, so nav order and section order stay language-independent.
+    "section_titles": dict(SECTION_ORDER),
+    "empty_portrait": EMPTY_PORTRAIT,
+    "empty_diary": EMPTY_DIARY,
+    "empty_reflections": EMPTY_REFLECTIONS,
+    "empty_keepsakes": EMPTY_KEEPSAKES,
+    "empty_facts": EMPTY_FACTS,
+    "empty_conversation": EMPTY_CONVERSATION,
+    "memory_unavailable": MEMORY_UNAVAILABLE,
+    "direction_labels": DIRECTION_LABELS,
+    "speaker_labels": SPEAKER_LABELS,
+    # English shows the raw category value, exactly as every prior version did;
+    # an empty map sends every category through the raw-escaped fallback.
+    "fact_categories": {},
+    "positions_title": portrait_viewer.SECTION_POSITIONS,
+    "notes_title": portrait_viewer.SECTION_NOTES,
+    "version_eyebrow": "Version {n} · {updated}",
+    "history_line": "{n} earlier version(s) — run python -m everthine.portrait_viewer for the full timeline.",
+    "mood_line": "Mood: {mood}",
+    "keywords_line": "Keywords: {keywords}",
+    "last_gathered_line": "Last gathered: {cursor}",
+    "earlier_notice": "Earlier: {days} more day(s), {lines} more line(s) — not shown here.",
+    "remembered_line": "Remembered fragments: {n}",
+    "covering_line": "Covering: {a} → {b}",
+    "index_size_line": "Index size: {n:,} bytes",
+}
+
+CHROME_ZH = {
+    "html_lang": "zh-Hant",
+    "page_title": "觀景窗",
+    "page_subtitle": "一扇安靜的窗——他的內在世界，只在這台電腦上，只給你看。",
+    "section_titles": {
+        "portrait": "自畫像",
+        "diary": "日記",
+        "reflections": "反思",
+        "keepsakes": "珍藏冊",
+        "facts": "他記得你的事",
+        "conversation": "近期對話",
+        "memory": "記憶書房",
+    },
+    "empty_portrait": "還沒有自畫像——他還沒寫下第一張。",
+    "empty_diary": "還沒有日記——第一個夜晚還沒到來。",
+    "empty_reflections": "還沒有反思——他還沒對哪段對話坐得夠久。",
+    "empty_keepsakes": "還沒有珍藏——對某句話按下 ❤，它就會被收在這裡。",
+    "empty_facts": "還沒記下什麼——聊著聊著，小冊子就會滿起來。",
+    "empty_conversation": "這段時間沒有對話。",
+    "memory_unavailable": "記憶索引現在讀不到。",
+    "direction_labels": {
+        "partner_flagged": "你珍藏的",
+        "companion_flagged": "他珍藏的",
+    },
+    "speaker_labels": {
+        "user": "你",
+        "companion": "他",
+    },
+    "fact_categories": {
+        "interest": "興趣",
+        "mood": "心情",
+        "stress": "壓力",
+        "follow_up": "掛心的事",
+        "life_event": "生活大事",
+        "conflict": "摩擦",
+    },
+    "positions_title": "立場",
+    "notes_title": "自我筆記",
+    "version_eyebrow": "第 {n} 版 · {updated}",
+    "history_line": "還有 {n} 個更早的版本——跑 python -m everthine.portrait_viewer 看完整時間軸。",
+    "mood_line": "心情：{mood}",
+    "keywords_line": "關鍵詞：{keywords}",
+    "last_gathered_line": "最近一次整理：{cursor}",
+    "earlier_notice": "更早：還有 {days} 天、{lines} 句——沒有顯示在這裡。",
+    "remembered_line": "記憶片段：{n}",
+    "covering_line": "涵蓋：{a} → {b}",
+    "index_size_line": "索引大小：{n:,} 位元組",
+}
+
+
 # Warm-paper theme: the same :root tokens portrait_viewer.CSS defines, at
 # the same values, so a self-portrait card looks identical on both pages.
 # The component classes portrait_viewer's own render_content /
@@ -567,14 +669,21 @@ body {
   color: var(--ink-soft);
 }
 
-/* Top anchor table of contents (D2): the page's only navigation, and it
-   is native #anchor scrolling -- zero JS anywhere on this page. */
+/* Top table of contents (T5 r1): the page's navigation. It sticks to the
+   top of the viewport (opaque card background, so scrolled content passes
+   behind it, never through it) and, once the page-end script runs, doubles
+   as a tab bar -- clicking an item shows just that section. With JS off it
+   is plain native #anchor scrolling over the full, all-sections-visible
+   page, so nothing here depends on the script. */
 .toc {
   background: var(--card);
   border: 1px solid var(--rule);
   border-radius: 10px;
   padding: 18px 22px;
   margin-bottom: 48px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 .toc ul {
   margin: 0;
@@ -591,6 +700,12 @@ body {
   font-size: 0.92rem;
 }
 .toc a:hover, .toc a:focus { text-decoration: underline; }
+/* The active tab, marked by the page-end script; never set without JS. */
+.toc a.toc-active {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 
 section {
   margin-bottom: 56px;
@@ -729,6 +844,41 @@ section h2 {
 }"""
 
 
+# The one inline script this page carries (T5 r1): a tiny tab switcher that
+# turns the seven-section stack into true tabs once JS runs. It reads only the
+# page's own toc links and sections -- no src, no URL of any kind, no external
+# reference whatsoever, keeping the offline/self-contained promise intact. It
+# is inert without JS: nothing below runs, no section is ever marked hidden,
+# and the default CSS shows all seven sections, so a no-JS viewer gets the
+# whole page as one long readable document (the graceful-degradation
+# fallback). On load it hides every section but the first and highlights the
+# matching toc item; a click switches which section shows.
+TAB_SCRIPT = """\
+(function () {
+  var links = document.querySelectorAll('.toc a[href^="#"]');
+  var sections = document.querySelectorAll('section[id]');
+  if (!links.length || !sections.length) { return; }
+  function activate(id) {
+    var i;
+    for (i = 0; i < sections.length; i++) {
+      sections[i].hidden = sections[i].id !== id;
+    }
+    for (i = 0; i < links.length; i++) {
+      var on = links[i].getAttribute('href') === '#' + id;
+      if (on) { links[i].classList.add('toc-active'); }
+      else { links[i].classList.remove('toc-active'); }
+    }
+  }
+  for (var j = 0; j < links.length; j++) {
+    links[j].addEventListener('click', function (event) {
+      event.preventDefault();
+      activate(this.getAttribute('href').slice(1));
+    });
+  }
+  activate(sections[0].id);
+})();"""
+
+
 # ---------------------------------------------------------------------
 # Small shared markup helpers (this page's own _wrap_block-equivalent)
 # ---------------------------------------------------------------------
@@ -764,29 +914,29 @@ def _empty_state(message: str) -> str:
 # 1. Portrait section: the latest snapshot, full card + history count
 # ---------------------------------------------------------------------
 
-def _render_portrait_section(portraits: list) -> str:
+def _render_portrait_section(portraits: list, chrome: dict = CHROME_EN) -> str:
     """The latest self-portrait (the last entry -- load_portraits returns
     oldest-first, portrait_viewer.load_entries' own contract), rendered
     through portrait_viewer's own render_content / render_positions /
     render_notes so this card is identical to the one on the standalone
-    timeline page. A history line ("N earlier version(s)...") follows when
-    older snapshots exist, and is omitted outright when this is the only
-    one (n == 1, so earlier == 0)."""
+    timeline page (the Positions/Notes headings come from `chrome`, the only
+    localized part of that reuse). A history line ("N earlier version(s)...")
+    follows when older snapshots exist, and is omitted outright when this is
+    the only one (n == 1, so earlier == 0)."""
     if not portraits:
-        return _empty_state(EMPTY_PORTRAIT)
+        return _empty_state(chrome["empty_portrait"])
     n = len(portraits)
     latest = portraits[-1]
-    eyebrow = f"Version {n} · {html.escape(latest['updated'])}"
+    eyebrow = chrome["version_eyebrow"].format(n=n, updated=html.escape(latest['updated']))
     body_parts = [f'<div class="content">{portrait_viewer.render_content(latest["content"])}</div>']
-    for block in (portrait_viewer.render_positions(latest["opinions"]),
-                  portrait_viewer.render_notes(latest["observations"])):
+    for block in (portrait_viewer.render_positions(latest["opinions"], chrome["positions_title"]),
+                  portrait_viewer.render_notes(latest["observations"], chrome["notes_title"])):
         if block:
             body_parts.append(block)
     parts = [_timeline([_card(eyebrow, "\n".join(body_parts))])]
     earlier = n - 1
     if earlier > 0:
-        parts.append(
-            f'<p class="meta">{earlier} earlier version(s) — run python -m everthine.portrait_viewer for the full timeline.</p>')
+        parts.append(f'<p class="meta">{chrome["history_line"].format(n=earlier)}</p>')
     return "\n".join(parts)
 
 
@@ -794,22 +944,24 @@ def _render_portrait_section(portraits: list) -> str:
 # 2. Diary section: every page, date-ordered cards
 # ---------------------------------------------------------------------
 
-def _render_diary_section(entries: list) -> str:
+def _render_diary_section(entries: list, chrome: dict = CHROME_EN) -> str:
     """All diary pages, in the order load_diary_entries already returns
     them (filename order = chronological). Each card: a date eyebrow, an
     optional "Mood: ..." line, an optional "Keywords: a · b · c" line,
     then the page's prose through render_content -- in that order."""
     if not entries:
-        return _empty_state(EMPTY_DIARY)
+        return _empty_state(chrome["empty_diary"])
     cards = []
     for entry in entries:
         eyebrow = html.escape(entry["date"])
         body_parts = []
         if entry["mood"]:
-            body_parts.append(f'<p class="meta">Mood: {html.escape(entry["mood"])}</p>')
+            body_parts.append(
+                f'<p class="meta">{chrome["mood_line"].format(mood=html.escape(entry["mood"]))}</p>')
         if entry["keywords"]:
             joined = " · ".join(html.escape(word) for word in entry["keywords"])
-            body_parts.append(f'<p class="meta">Keywords: {joined}</p>')
+            body_parts.append(
+                f'<p class="meta">{chrome["keywords_line"].format(keywords=joined)}</p>')
         body_parts.append(f'<div class="content">{portrait_viewer.render_content(entry["content"])}</div>')
         cards.append(_card(eyebrow, "\n".join(body_parts)))
     return _timeline(cards)
@@ -819,13 +971,13 @@ def _render_diary_section(entries: list) -> str:
 # 3. Reflections section: chronological list, date-prefix eyebrow
 # ---------------------------------------------------------------------
 
-def _render_reflections_section(entries: list) -> str:
+def _render_reflections_section(entries: list, chrome: dict = CHROME_EN) -> str:
     """Every reflection, in file order (already chronological -- appends
     are chronological, per load_reflections). Each card's eyebrow is the
     first 10 characters of created_at (its date part; a short or blank
     timestamp is kept as-is, never padded or guessed at)."""
     if not entries:
-        return _empty_state(EMPTY_REFLECTIONS)
+        return _empty_state(chrome["empty_reflections"])
     cards = []
     for entry in entries:
         eyebrow = html.escape(entry["created_at"][:10])
@@ -838,19 +990,19 @@ def _render_reflections_section(entries: list) -> str:
 # 4. Keepsakes section: the kept album, direction-labeled cards
 # ---------------------------------------------------------------------
 
-def _render_keepsakes_section(entries: list) -> str:
+def _render_keepsakes_section(entries: list, chrome: dict = CHROME_EN) -> str:
     """Every kept moment, in storage order. The eyebrow is the direction
-    label (DIRECTION_LABELS, or the raw escaped string for anything this
-    module doesn't recognize -- fail-soft, never guessed); the body is the
-    kept message through render_content, followed by an optional
-    "— speaker, timestamp" byline that is dropped whole when speaker
-    is blank (a hand-edited or otherwise incomplete entry)."""
+    label (chrome["direction_labels"], or the raw escaped string for
+    anything this module doesn't recognize -- fail-soft, never guessed);
+    the body is the kept message through render_content, followed by an
+    optional "— speaker, timestamp" byline that is dropped whole when
+    speaker is blank (a hand-edited or otherwise incomplete entry)."""
     if not entries:
-        return _empty_state(EMPTY_KEEPSAKES)
+        return _empty_state(chrome["empty_keepsakes"])
     cards = []
     for entry in entries:
         direction = entry["direction"]
-        label = DIRECTION_LABELS.get(direction, html.escape(direction))
+        label = chrome["direction_labels"].get(direction, html.escape(direction))
         body_parts = [f'<div class="content">{portrait_viewer.render_content(entry["message"])}</div>']
         if entry["speaker"]:
             body_parts.append(
@@ -863,21 +1015,25 @@ def _render_keepsakes_section(entries: list) -> str:
 # 5. Facts section: grouped by category, fixed order then first-seen
 # ---------------------------------------------------------------------
 
-def _render_facts_section(facts: list, cursor: str | None) -> str:
+def _render_facts_section(facts: list, cursor: str | None,
+                          chrome: dict = CHROME_EN) -> str:
     """Facts grouped by category: the FACT_CATEGORY_ORDER groups first
     (only the ones actually present, in that fixed order), then any other
-    category value in first-seen order, its own group heading shown raw
-    and escaped rather than folded into a guessed bucket. Each group keeps
-    its facts in storage order. A "Last gathered: ..." footer follows
-    whenever cursor is truthy -- excluding both None (a read failure) and
-    the never-extracted sentinel (an empty string; the controller's
-    2026-07-12 refinement) -- independent of whether any facts exist: the
-    cursor describes the extractor's own state, separate from whether it
-    has found anything worth keeping yet, so it is not folded into the
-    empty-state branch below."""
+    category value in first-seen order. Grouping and ordering are by the
+    raw category value; only the heading TEXT localizes, via
+    chrome["fact_categories"] (the six known categories get a localized
+    label, any other value is shown raw and escaped rather than folded into
+    a guessed bucket -- the same fail-soft stance in either language). Each
+    group keeps its facts in storage order. A "Last gathered: ..." footer
+    follows whenever cursor is truthy -- excluding both None (a read
+    failure) and the never-extracted sentinel (an empty string; the
+    controller's 2026-07-12 refinement) -- independent of whether any facts
+    exist: the cursor describes the extractor's own state, separate from
+    whether it has found anything worth keeping yet, so it is not folded
+    into the empty-state branch below."""
     parts = []
     if not facts:
-        parts.append(_empty_state(EMPTY_FACTS))
+        parts.append(_empty_state(chrome["empty_facts"]))
     else:
         groups: dict = {}
         for fact in facts:
@@ -886,6 +1042,7 @@ def _render_facts_section(facts: list, cursor: str | None) -> str:
         ordered += [c for c in groups if c not in FACT_CATEGORY_ORDER]
         group_html = []
         for category in ordered:
+            heading = chrome["fact_categories"].get(category, html.escape(category))
             items = []
             for fact in groups[category]:
                 text = html.escape(fact["text"])
@@ -896,13 +1053,14 @@ def _render_facts_section(facts: list, cursor: str | None) -> str:
                     items.append(f"<li>{text}</li>")
             group_html.append(
                 '<div class="fact-group">\n'
-                f"<h3>{html.escape(category)}</h3>\n"
+                f"<h3>{heading}</h3>\n"
                 "<ul>\n" + "\n".join(items) + "\n</ul>\n"
                 "</div>"
             )
         parts.append("\n".join(group_html))
     if cursor:
-        parts.append(f'<p class="meta">Last gathered: {html.escape(cursor)}</p>')
+        parts.append(
+            f'<p class="meta">{chrome["last_gathered_line"].format(cursor=html.escape(cursor))}</p>')
     return "\n".join(parts)
 
 
@@ -910,7 +1068,8 @@ def _render_facts_section(facts: list, cursor: str | None) -> str:
 # 6. Conversation section: the recent window, grouped by day
 # ---------------------------------------------------------------------
 
-def _render_conversation_section(window: list, elder_days: int, elder_msgs: int) -> str:
+def _render_conversation_section(window: list, elder_days: int, elder_msgs: int,
+                                 chrome: dict = CHROME_EN) -> str:
     """The conversation window, split into per-day sub-sections in the
     order the entries already arrive (filename+line order = chronological).
     An "Earlier: ..." notice sits above the transcript whenever
@@ -924,9 +1083,9 @@ def _render_conversation_section(window: list, elder_days: int, elder_msgs: int)
     parts = []
     if elder_days > 0:
         parts.append(
-            f'<p class="meta">Earlier: {elder_days} more day(s), {elder_msgs} more line(s) — not shown here.</p>')
+            f'<p class="meta">{chrome["earlier_notice"].format(days=elder_days, lines=elder_msgs)}</p>')
     if not window:
-        parts.append(_empty_state(EMPTY_CONVERSATION))
+        parts.append(_empty_state(chrome["empty_conversation"]))
         return "\n".join(parts)
     days: list = []
     current_date = None
@@ -936,7 +1095,7 @@ def _render_conversation_section(window: list, elder_days: int, elder_msgs: int)
             current_date = msg["date"]
             current_lines = []
             days.append((current_date, current_lines))
-        speaker = SPEAKER_LABELS.get(msg["speaker"], msg["speaker"])
+        speaker = chrome["speaker_labels"].get(msg["speaker"], msg["speaker"])
         current_lines.append(
             f'<p class="line"><span class="who">{html.escape(speaker)}</span> {html.escape(msg["text"])}</p>')
     day_html = []
@@ -953,7 +1112,7 @@ def _render_conversation_section(window: list, elder_days: int, elder_msgs: int)
 # 7. Memory room section: the memory store's vital signs
 # ---------------------------------------------------------------------
 
-def _render_memory_section(stats: dict | None) -> str:
+def _render_memory_section(stats: dict | None, chrome: dict = CHROME_EN) -> str:
     """None means the index itself could not be read (load_memory_stats'
     own contract); anything else -- including the honest all-zero dict an
     empty-but-valid chunks table returns -- is real data. The "Covering"
@@ -962,12 +1121,12 @@ def _render_memory_section(stats: dict | None) -> str:
     each is checked independently per the brief); the other two lines
     always render, including "Remembered fragments: 0"."""
     if stats is None:
-        return _empty_state(MEMORY_UNAVAILABLE)
-    lines = [f'<dt>Remembered fragments: {stats["chunk_count"]}</dt>']
+        return _empty_state(chrome["memory_unavailable"])
+    lines = [f'<dt>{chrome["remembered_line"].format(n=stats["chunk_count"])}</dt>']
     if stats["earliest_ts"] is not None and stats["latest_ts"] is not None:
         lines.append(
-            f'<dt>Covering: {html.escape(stats["earliest_ts"])} → {html.escape(stats["latest_ts"])}</dt>')
-    lines.append(f'<dt>Index size: {stats["db_size_bytes"]:,} bytes</dt>')
+            f'<dt>{chrome["covering_line"].format(a=html.escape(stats["earliest_ts"]), b=html.escape(stats["latest_ts"]))}</dt>')
+    lines.append(f'<dt>{chrome["index_size_line"].format(n=stats["db_size_bytes"])}</dt>')
     return '<div class="stats-wrap">\n<dl class="stats">\n' + "\n".join(lines) + "\n</dl>\n</div>"
 
 
@@ -975,7 +1134,7 @@ def _render_memory_section(stats: dict | None) -> str:
 # Page assembly: the seven sections + a top anchor table of contents
 # ---------------------------------------------------------------------
 
-def render_page(sections_data: dict) -> str:
+def render_page(sections_data: dict, chrome: dict = CHROME_EN) -> str:
     """Assemble the full offline Observatory page from the seven loaders'
     output, bundled by the caller (main(), below) into one dict:
 
@@ -999,50 +1158,63 @@ def render_page(sections_data: dict) -> str:
     caller, not a data read, so it is allowed to fail loud -- a missing
     key is a bug in the caller, not a gap in the companion's saved life.)
 
-    Returns one self-contained HTML document: inline CSS, zero JS, zero
-    external references, every dynamic string escaped, a top <nav> of
-    seven #anchors leading to seven <section id="...">, in the D2-decided
-    reading order (Portrait, Diary, Reflections, Keepsakes, What they know
-    about you, Recent conversation, Memory room).
+    `chrome` selects the language pack (CHROME_EN / CHROME_ZH); it defaults
+    to the English canonical so a direct caller and every render unit test
+    keep pinning that page unchanged, while the CLI passes the user's choice
+    (main(), --lang, default zh). SECTION_ORDER still fixes the id order and
+    reading order in both languages; only the labels come from chrome.
+
+    Returns one self-contained HTML document: inline CSS, one tiny inline
+    tab script and no external reference of any kind, every dynamic string
+    escaped, a top <nav> of seven #anchors leading to seven
+    <section id="...">, in the D2-decided reading order (Portrait, Diary,
+    Reflections, Keepsakes, What they know about you, Recent conversation,
+    Memory room). The nav doubles as a sticky tab bar once the script runs;
+    with JS off it is a plain anchor list over the whole visible page.
     """
     section_html = {
-        "portrait": _render_portrait_section(sections_data["portraits"]),
-        "diary": _render_diary_section(sections_data["diary"]),
-        "reflections": _render_reflections_section(sections_data["reflections"]),
-        "keepsakes": _render_keepsakes_section(sections_data["album"]),
-        "facts": _render_facts_section(sections_data["facts"], sections_data["facts_cursor"]),
+        "portrait": _render_portrait_section(sections_data["portraits"], chrome),
+        "diary": _render_diary_section(sections_data["diary"], chrome),
+        "reflections": _render_reflections_section(sections_data["reflections"], chrome),
+        "keepsakes": _render_keepsakes_section(sections_data["album"], chrome),
+        "facts": _render_facts_section(
+            sections_data["facts"], sections_data["facts_cursor"], chrome),
         "conversation": _render_conversation_section(
-            sections_data["conversation"], sections_data["elder_days"], sections_data["elder_msgs"]),
-        "memory": _render_memory_section(sections_data["memory_stats"]),
+            sections_data["conversation"], sections_data["elder_days"],
+            sections_data["elder_msgs"], chrome),
+        "memory": _render_memory_section(sections_data["memory_stats"], chrome),
     }
+    titles = chrome["section_titles"]
     toc_items = "\n".join(
-        f'<li><a href="#{section_id}">{title}</a></li>' for section_id, title in SECTION_ORDER)
+        f'<li><a href="#{section_id}">{titles[section_id]}</a></li>'
+        for section_id, _label in SECTION_ORDER)
     toc = f'<nav class="toc">\n<ul>\n{toc_items}\n</ul>\n</nav>'
     sections = "\n".join(
-        f'<section id="{section_id}">\n<h2>{title}</h2>\n{section_html[section_id]}\n</section>'
-        for section_id, title in SECTION_ORDER)
-    return _wrap_page(toc, sections)
+        f'<section id="{section_id}">\n<h2>{titles[section_id]}</h2>\n{section_html[section_id]}\n</section>'
+        for section_id, _label in SECTION_ORDER)
+    return _wrap_page(toc, sections, chrome)
 
 
-def _wrap_page(toc_html: str, sections_html: str) -> str:
+def _wrap_page(toc_html: str, sections_html: str, chrome: dict = CHROME_EN) -> str:
     return (
         "<!DOCTYPE html>\n"
-        '<html lang="">\n'
+        f'<html lang="{chrome["html_lang"]}">\n'
         "<head>\n"
         '<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        f"<title>{PAGE_TITLE}</title>\n"
+        f'<title>{chrome["page_title"]}</title>\n'
         f"<style>\n{CSS}\n</style>\n"
         "</head>\n"
         "<body>\n"
         '<div class="page">\n'
         '<header class="masthead">\n'
-        f"<h1>{PAGE_TITLE}</h1>\n"
-        f'<p class="subtitle">{PAGE_SUBTITLE}</p>\n'
+        f'<h1>{chrome["page_title"]}</h1>\n'
+        f'<p class="subtitle">{chrome["page_subtitle"]}</p>\n'
         "</header>\n"
         f"{toc_html}\n"
         f"{sections_html}\n"
         "</div>\n"
+        f"<script>\n{TAB_SCRIPT}\n</script>\n"
         "</body>\n"
         "</html>\n"
     )
@@ -1070,6 +1242,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=14,
         help="How many days of recent conversation the Recent conversation "
              "section looks back over (default: 14).",
+    )
+    parser.add_argument(
+        "--lang",
+        choices=("zh", "en"),
+        default="zh",
+        help="Interface language for the rendered page: zh (Traditional "
+             "Chinese, the default) or en (English). Only the page's own "
+             "chrome is translated; the companion's saved words are never "
+             'touched (default: "zh").',
     )
     return parser
 
@@ -1101,6 +1282,7 @@ def main(argv=None) -> int:
 
     data_dir = Path(args.data_dir)
     today = date.today()
+    chrome = CHROME_ZH if args.lang == "zh" else CHROME_EN
 
     conversation, elder_days, elder_msgs = load_conversation_window(
         data_dir / "archive", args.days, today)
@@ -1117,7 +1299,7 @@ def main(argv=None) -> int:
         "elder_msgs": elder_msgs,
         "memory_stats": load_memory_stats(data_dir / "memory.db"),
     }
-    page = render_page(sections_data)
+    page = render_page(sections_data, chrome)
 
     out_path = data_dir / "observatory.html"
     out_path.parent.mkdir(parents=True, exist_ok=True)

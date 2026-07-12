@@ -736,6 +736,11 @@ class MainDefaultArgsTest(unittest.TestCase):
         self.assertEqual(args.data_dir, "data")
         self.assertEqual(args.days, 14)
 
+    def test_lang_defaults_to_zh(self):
+        # T5 r1: Traditional Chinese is the product default interface language.
+        args = observatory._build_parser().parse_args([])
+        self.assertEqual(args.lang, "zh")
+
 
 class MainThreeStateTest(_CliTest):
     """Brief item 1: all seven sources full, all seven empty, and a mixed
@@ -770,7 +775,9 @@ class MainThreeStateTest(_CliTest):
              "text": "the lighthouse walk, first line of the day"}])
         self._seed_memory_db([("c1", "2026-07-01T09:00:00+08:00")])
 
-        rc = self._run()
+        # English is the pinned canonical here (memory template etc.); zh is
+        # the CLI default now (T5 r1), so this end-to-end run asks for en.
+        rc = self._run(["--lang", "en"])
         self.assertEqual(rc, 0)
         self.assertTrue(self.out.exists())
         html = self._html()
@@ -795,8 +802,9 @@ class MainThreeStateTest(_CliTest):
     def test_all_seven_sources_empty(self):
         # data-dir exists (tempfile.TemporaryDirectory always creates it)
         # but none of the seven sources have ever been written -- a brand
-        # new install's very first run.
-        rc = self._run()
+        # new install's very first run. Pins the English empty-state
+        # canonical, so it runs in explicit en mode (zh is the CLI default).
+        rc = self._run(["--lang", "en"])
         self.assertEqual(rc, 0)
         self.assertTrue(self.out.exists())
         html = self._html()
@@ -815,7 +823,9 @@ class MainThreeStateTest(_CliTest):
                          {"date": "2026-07-01", "content": "a quiet page, alone for now"})
         self._seed_facts([{"text": "prefers tea before the harbor walk",
                            "category": "interest", "date": "2026-07-01"}])
-        rc = self._run()
+        # Pins the English empty-state canonical for the five absent sources;
+        # runs in explicit en mode (zh is the CLI default, T5 r1).
+        rc = self._run(["--lang", "en"])
         self.assertEqual(rc, 0)
         html = self._html()
         self._assert_in_section(html, "diary", "a quiet page, alone for now")
@@ -825,6 +835,38 @@ class MainThreeStateTest(_CliTest):
         self.assertIn(observatory.EMPTY_KEEPSAKES, html)
         self.assertIn(observatory.EMPTY_CONVERSATION, html)
         self.assertIn(observatory.MEMORY_UNAVAILABLE, html)
+
+
+class MainLanguageTest(_CliTest):
+    """T5 r1: zh is the product default (main() with no --lang); --lang en
+    restores the English canonical. The zh strings themselves are transcribed
+    verbatim in tests/test_observatory_render.py -- here we only pin which
+    language the CLI reaches for, referencing the module's own tables so this
+    file stays ASCII."""
+
+    def test_default_language_is_zh(self):
+        rc = self._run()  # no --lang
+        self.assertEqual(rc, 0)
+        html = self._html()
+        title = observatory.CHROME_ZH["page_title"]
+        self.assertIn(f"<title>{title}</title>", html)
+        self.assertIn(f"<h1>{title}</h1>", html)
+        self.assertIn('<html lang="zh-Hant">', html)
+        # The English canonical is absent from the default page.
+        self.assertNotIn("<title>Observatory</title>", html)
+
+    def test_lang_en_restores_english_chrome(self):
+        rc = self._run(["--lang", "en"])
+        self.assertEqual(rc, 0)
+        html = self._html()
+        self.assertIn("<title>Observatory</title>", html)
+        self.assertIn('<html lang="en">', html)
+        self.assertIn(observatory.EMPTY_PORTRAIT, html)
+
+    def test_invalid_lang_is_a_parser_error(self):
+        with self.assertRaises(SystemExit):
+            self._run(["--lang", "fr"])
+        self.assertFalse(self.out.exists())
 
 
 class MainXssTest(_CliTest):
@@ -839,7 +881,9 @@ class MainXssTest(_CliTest):
         rc = self._run()
         self.assertEqual(rc, 0)
         html = self._html()
-        self.assertNotIn("<script", html)
+        # The only <script on the page is the page-end tab switcher (T5 r1);
+        # the injected payload is escaped, never a second raw script tag.
+        self.assertEqual(html.count("<script"), 1)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
 
 
@@ -886,7 +930,8 @@ class MainDaysWindowTest(_CliTest):
             {"timestamp": f"{outside}T09:00:00+08:00", "speaker": "user",
              "text": "ten days back, out of the window"}])
 
-        rc = self._run(["--days", "7"])
+        # English "Earlier:" template is the pinned canonical here; en mode.
+        rc = self._run(["--days", "7", "--lang", "en"])
         self.assertEqual(rc, 0)
         html = self._html()
         self._assert_in_section(html, "conversation", "within the seven-day window")

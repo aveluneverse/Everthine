@@ -485,9 +485,13 @@ class RenderPageTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             observatory.render_page(incomplete)
 
-    def test_no_script_tag_anywhere(self):
+    def test_exactly_one_inline_script_no_external(self):
+        # T5 r1: the page carries exactly one inline <script> (the tab
+        # switcher) and still references nothing external -- no src, no URL.
         html = observatory.render_page(_empty_sections())
-        self.assertNotIn("<script", html)
+        self.assertEqual(html.count("<script"), 1)
+        self.assertNotIn("<script src", html)
+        self.assertNotIn("src=", html)
 
     def test_no_external_references_on_empty_page(self):
         html = observatory.render_page(_empty_sections())
@@ -522,7 +526,7 @@ class RenderPageTest(unittest.TestCase):
         self.assertNotIn("url(", html)
         self.assertNotIn("<link", html)
         self.assertNotIn("<script src", html)
-        self.assertNotIn("<script", html)
+        self.assertEqual(html.count("<script"), 1)  # only the inline tab switcher
         self.assertNotIn("src=", html)
 
     def test_full_page_smoke_all_populated_sections_render_their_content(self):
@@ -559,6 +563,143 @@ class RenderPageTest(unittest.TestCase):
         self.assertIn("<!DOCTYPE html>", html)
         self.assertIn('<meta charset="utf-8">', html)
         self.assertIn('<meta name="viewport" content="width=device-width, initial-scale=1">', html)
+
+
+# ---------------------------------------------------------------------
+# Sticky nav + true-tab behavior (T5 r1)
+# ---------------------------------------------------------------------
+
+class StickyTocTest(unittest.TestCase):
+    def test_toc_is_sticky(self):
+        # Brief item 2: the nav pins to the top of the viewport. Literal-
+        # string pin, as the brief allows.
+        html = observatory.render_page(_empty_sections(), observatory.CHROME_EN)
+        self.assertIn("position: sticky", html)
+        self.assertIn("top: 0", html)
+
+
+class TabBehaviorTest(unittest.TestCase):
+    def test_exactly_one_inline_script(self):
+        html = observatory.render_page(_empty_sections(), observatory.CHROME_EN)
+        self.assertEqual(html.count("<script"), 1)
+        self.assertNotIn("<script src", html)
+        self.assertNotIn("src=", html)
+
+    def test_script_carries_the_tab_switch_anchor(self):
+        # The switcher toggles the .toc-active highlight and binds click
+        # handlers -- distinctive anchors a tab pin can recognize.
+        html = observatory.render_page(_empty_sections(), observatory.CHROME_EN)
+        self.assertIn("toc-active", html)
+        self.assertIn("addEventListener", html)
+
+    def test_no_js_fallback_shows_all_seven_sections(self):
+        # Graceful degradation: no section carries a static hidden attribute
+        # (the '>' sits right after the id) and no CSS rule hides a section,
+        # so a viewer with JS off sees all seven. The script sets
+        # element.hidden only at runtime.
+        html = observatory.render_page(_empty_sections(), observatory.CHROME_EN)
+        for sid in ("portrait", "diary", "reflections", "keepsakes",
+                    "facts", "conversation", "memory"):
+            self.assertIn(f'<section id="{sid}">', html)
+        self.assertNotIn("display: none", html)
+        self.assertNotIn("display:none", html)
+
+
+# ---------------------------------------------------------------------
+# Traditional Chinese chrome (T5 r1): the product default. Every zh string
+# below is transcribed verbatim from the acceptance table; a single drifted
+# character fails these pins. Fixtures stay ASCII, so the only Chinese here
+# is the chrome under test.
+# ---------------------------------------------------------------------
+
+class ChineseChromeTest(unittest.TestCase):
+    def _zh(self, sections=None):
+        return observatory.render_page(sections or _empty_sections(), observatory.CHROME_ZH)
+
+    def test_title_and_subtitle(self):
+        html = self._zh()
+        self.assertIn("<title>觀景窗</title>", html)
+        self.assertIn("<h1>觀景窗</h1>", html)
+        self.assertIn(
+            '<p class="subtitle">一扇安靜的窗——他的內在世界，只在這台電腦上，只給你看。</p>', html)
+        self.assertIn('<html lang="zh-Hant">', html)
+
+    def test_seven_section_titles_in_nav_and_headings(self):
+        html = self._zh()
+        for sid, title in (("portrait", "自畫像"), ("diary", "日記"),
+                           ("reflections", "反思"), ("keepsakes", "珍藏冊"),
+                           ("facts", "他記得你的事"), ("conversation", "近期對話"),
+                           ("memory", "記憶書房")):
+            self.assertIn(f'<a href="#{sid}">{title}</a>', html)
+            self.assertIn(f"<h2>{title}</h2>", html)
+
+    def test_seven_empty_states(self):
+        html = self._zh()
+        for message in ("還沒有自畫像——他還沒寫下第一張。",
+                        "還沒有日記——第一個夜晚還沒到來。",
+                        "還沒有反思——他還沒對哪段對話坐得夠久。",
+                        "還沒有珍藏——對某句話按下 ❤，它就會被收在這裡。",
+                        "還沒記下什麼——聊著聊著，小冊子就會滿起來。",
+                        "這段時間沒有對話。",
+                        "記憶索引現在讀不到。"):
+            self.assertIn(message, html)
+
+    def test_direction_and_speaker_labels(self):
+        sections = _empty_sections()
+        sections["album"] = [_kept("partner_flagged", "companion", "kept a"),
+                             _kept("companion_flagged", "user", "kept b")]
+        sections["conversation"] = [_msg("2026-07-01", "user", "hi there"),
+                                    _msg("2026-07-01", "companion", "hey back")]
+        html = self._zh(sections)
+        self.assertIn("你珍藏的", html)
+        self.assertIn("他珍藏的", html)
+        self.assertIn('<span class="who">你</span> hi there', html)
+        self.assertIn('<span class="who">他</span> hey back', html)
+
+    def test_six_fact_category_labels(self):
+        sections = _empty_sections()
+        sections["facts"] = [_fact("interest", "a"), _fact("mood", "b"),
+                             _fact("stress", "c"), _fact("follow_up", "d"),
+                             _fact("life_event", "e"), _fact("conflict", "f")]
+        html = self._zh(sections)
+        for label in ("興趣", "心情", "壓力", "掛心的事", "生活大事", "摩擦"):
+            self.assertIn(f"<h3>{label}</h3>", html)
+
+    def test_unknown_fact_category_still_shown_raw_in_zh(self):
+        # Fail-soft in both languages: a category outside the six known ones
+        # is shown raw and escaped, never folded into a guessed bucket.
+        sections = _empty_sections()
+        sections["facts"] = [_fact("gift_idea", "wants an umbrella")]
+        html = self._zh(sections)
+        self.assertIn("<h3>gift_idea</h3>", html)
+
+    def test_localized_dynamic_lines(self):
+        sections = _empty_sections()
+        sections["portraits"] = [
+            _portrait("2026-07-01", "older"),
+            _portrait("2026-07-02", "newest",
+                      opinions=[{"topic": "lanterns", "opinion": "worth it"}],
+                      observations=["counts umbrellas"]),
+        ]
+        sections["diary"] = [_diary("2026-07-01", "x", mood="calm",
+                                    keywords=["lantern", "sea"])]
+        sections["facts_cursor"] = "2026-07-08T21:00:00+08:00"
+        sections["elder_days"] = 3
+        sections["elder_msgs"] = 12
+        sections["memory_stats"] = _stats(128, "2026-06-01", "2026-07-08", 2048000)
+        html = self._zh(sections)
+        self.assertIn("第 2 版 · 2026-07-02", html)
+        self.assertIn("立場", html)          # positions heading (zh)
+        self.assertIn("自我筆記", html)        # notes heading (zh)
+        self.assertIn(
+            "還有 1 個更早的版本——跑 python -m everthine.portrait_viewer 看完整時間軸。", html)
+        self.assertIn("心情：calm", html)
+        self.assertIn("關鍵詞：lantern · sea", html)
+        self.assertIn("最近一次整理：2026-07-08T21:00:00+08:00", html)
+        self.assertIn("更早：還有 3 天、12 句——沒有顯示在這裡。", html)
+        self.assertIn("記憶片段：128", html)
+        self.assertIn("涵蓋：2026-06-01 → 2026-07-08", html)
+        self.assertIn("索引大小：2,048,000 位元組", html)
 
 
 if __name__ == "__main__":

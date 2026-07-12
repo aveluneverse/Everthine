@@ -257,11 +257,14 @@ def render_content(content: str) -> str:
 _render_content = render_content  # back-compat alias; observatory's section renderers made this public
 
 
-def render_positions(opinions: list) -> str:
+def render_positions(opinions: list, title: str = SECTION_POSITIONS) -> str:
     """Render the `Positions` block, or "" when nothing well-shaped survives.
     Each opinion is expected to be {"topic": str, "opinion": str}; anything
     that isn't a dict, or carries neither a topic nor an opinion string, is
-    dropped."""
+    dropped. `title` is the block heading; it defaults to this module's own
+    canonical English label, so this page and every existing caller are
+    unchanged, and a localized caller (observatory's zh chrome) can pass its
+    own heading without this island learning about languages."""
     items = []
     for op in opinions:
         if not isinstance(op, dict):
@@ -279,15 +282,18 @@ def render_positions(opinions: list) -> str:
             items.append(f'<li><span class="topic">{topic}</span></li>')
         else:
             items.append(f"<li>{opinion}</li>")
-    return _wrap_block(SECTION_POSITIONS, items)
+    return _wrap_block(title, items)
 
 
 _render_positions = render_positions  # back-compat alias; observatory's portrait section made this public
 
 
-def render_notes(observations: list) -> str:
+def render_notes(observations: list, title: str = SECTION_NOTES) -> str:
     """Render the `Notes to self` block, or "" when nothing survives. Each
-    observation is expected to be a string; anything else is dropped."""
+    observation is expected to be a string; anything else is dropped. `title`
+    is the block heading; it defaults to this module's canonical English
+    label so every existing caller is unchanged, and a localized caller can
+    pass its own heading."""
     items = []
     for obs in observations:
         if not isinstance(obs, str):
@@ -296,7 +302,7 @@ def render_notes(observations: list) -> str:
         if not text.strip():
             continue
         items.append(f"<li>{text}</li>")
-    return _wrap_block(SECTION_NOTES, items)
+    return _wrap_block(title, items)
 
 
 _render_notes = render_notes  # back-compat alias; observatory's portrait section made this public
