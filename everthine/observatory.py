@@ -49,14 +49,18 @@ own timeline page. The seven sections assemble into one page behind
 render_page(), a top anchor table of contents standing in for the
 navigation a multi-page site would otherwise need (zero JS, so it is
 native #anchor scrolling, nothing more). The CLI that calls render_page()
-with a real data/ directory arrives in the next task.
+with a real data/ directory is main(), below -- its own docstring names
+the privacy promise that the rendered page never leaves --data-dir, the
+same gitignored directory every source above already reads from.
 """
 from __future__ import annotations
 
+import argparse
 import html
 import json
 import logging
 import sqlite3
+import sys
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -337,11 +341,13 @@ def load_conversation_window(archive_dir: Path, days: int,
     stem does not parse as a date, or that cannot be read at all, is
     logged and contributes nothing anywhere. Within a file, silently: a
     line that is not valid JSON, not an object, missing a string
-    `speaker`, or missing a usable `text` is skipped (the same tolerance
-    archive.iter_entries shows the same file); a missing/wrong-typed
-    `timestamp` on a surviving line degrades to "". Bytes that do not
-    decode as UTF-8 are dropped by errors="ignore", mirroring the owner's
-    own reader.
+    `speaker`, or missing a usable `text` is skipped; a missing/wrong-typed
+    `timestamp` on a surviving line degrades to "" instead of dropping the
+    line -- the mirror image of archive.iter_entries's own tolerance,
+    which is stricter about `timestamp` (missing or unparseable drops the
+    whole line) and looser about `speaker` (a missing one degrades to "?"
+    rather than dropping the line). Bytes that do not decode as UTF-8 are
+    dropped by errors="ignore", mirroring the owner's own reader.
     """
     archive_dir = Path(archive_dir)
     window: list[dict] = []
@@ -710,7 +716,6 @@ section h2 {
   color: var(--ink-soft);
 }
 .stats dt:first-child { margin-top: 0; }
-.stats dd { margin: 2px 0 0; }
 
 .empty { padding: 6px 0 2px; }
 .empty-lead { margin: 0; font-size: 1rem; color: var(--ink-soft); }
@@ -1041,3 +1046,85 @@ def _wrap_page(toc_html: str, sections_html: str) -> str:
         "</body>\n"
         "</html>\n"
     )
+
+
+# ---------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m everthine.observatory",
+        description="Render the companion's whole inner life into one offline HTML page.",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default="data",
+        help='Directory holding data/ (diary, reflections, portraits, '
+             'album, facts, archive, memory) (default: "data").',
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=14,
+        help="How many days of recent conversation the Recent conversation "
+             "section looks back over (default: 14).",
+    )
+    return parser
+
+
+def main(argv=None) -> int:
+    """Render one data/ directory into observatory.html and write the page
+    back into that same directory, never anywhere else -- `--data-dir` is
+    the only place a real filesystem path enters this module, and
+    `out_path = data_dir / "observatory.html"` below is the whole of that
+    guarantee: the privacy promise data/ already keeps (gitignored, never
+    committed) extends automatically to the page this writes, because it
+    can only ever land inside the directory it was pointed at. `today =
+    date.today()` is the only clock read anywhere in this module -- every
+    loader above stays a pure function of the plain Paths (and, for
+    load_conversation_window, the caller-supplied date) this function
+    composes for it.
+    """
+    # Windows consoles often default to a legacy codepage (e.g. cp950); the
+    # path we print can carry non-ASCII, so force UTF-8 with replacement
+    # rather than crash. Guard hasattr for streams that lack reconfigure
+    # (test capture, pipes) -- the same guard portrait_viewer.main uses.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.days < 1:
+        parser.error("--days must be >= 1")
+
+    data_dir = Path(args.data_dir)
+    today = date.today()
+
+    conversation, elder_days, elder_msgs = load_conversation_window(
+        data_dir / "archive", args.days, today)
+
+    sections_data = {
+        "portraits": load_portraits(data_dir / "portrait_history"),
+        "diary": load_diary_entries(data_dir / "diary"),
+        "reflections": load_reflections(data_dir / "reflections.jsonl"),
+        "album": load_album(data_dir / "album.json"),
+        "facts": load_facts(data_dir / "facts.json"),
+        "facts_cursor": load_facts_cursor(data_dir / "facts_state.json"),
+        "conversation": conversation,
+        "elder_days": elder_days,
+        "elder_msgs": elder_msgs,
+        "memory_stats": load_memory_stats(data_dir / "memory.db"),
+    }
+    page = render_page(sections_data)
+
+    out_path = data_dir / "observatory.html"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(page, encoding="utf-8")
+
+    print(out_path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

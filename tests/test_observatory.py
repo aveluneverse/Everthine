@@ -1,8 +1,10 @@
 """observatory.py loaders: the seven fail-soft readers that turn data/'s
-inner-life files into plain lists/dicts for the observatory page (rendering
-and CLI arrive in later tasks). The module is a deliberate island -- no
-config, bot, engine, persona, or facts import, pinned mechanically below --
-so every loader is driven with plain Paths against seeded files in tempdirs.
+inner-life files into plain lists/dicts for the observatory page (the
+rendering layer has its own file, tests/test_observatory_render.py; the
+CLI's own end-to-end tests are below, in this file). The module is a
+deliberate island -- no config, bot, engine, persona, or facts import,
+pinned mechanically below -- so every loader is driven with plain Paths
+against seeded files in tempdirs.
 
 Every fixture in this file is FICTIONAL, written for these tests alone: an
 invented couple -- "Wren" (the companion) and "Ivy" (the person) -- whose
@@ -15,11 +17,13 @@ cleanup (LIFO runs them first): an open sqlite handle blocks tmp-dir
 deletion on Windows, the same trap tests/test_memory_store.py documents.
 """
 import ast
+import contextlib
+import io
 import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from everthine import observatory, portrait_viewer
@@ -628,6 +632,314 @@ class IslandContractTest(unittest.TestCase):
                 self.assertFalse(
                     banned_hits,
                     f"observatory imports a banned module: {sorted(banned_hits)}")
+
+
+# ---------------------------------------------------------------------
+# CLI: main() end-to-end (obs T3) -- everything above is exercised again
+# here, but through the real entry point against a seeded tmp data-dir
+# standing in for a real installation, the way
+# tests/test_portrait_viewer.py already drives its own sibling CLI.
+# ---------------------------------------------------------------------
+
+class _CliTest(_TmpDirTest):
+    """Shared seeding + running helpers for main()-level tests. self.root
+    IS the --data-dir main() is pointed at: with seven sources instead of
+    portrait_viewer's one, building each directly under self.root keeps
+    every path matching the loader docstrings the brief pins (data/diary,
+    data/reflections.jsonl, data/portrait_history, data/album.json,
+    data/facts.json + data/facts_state.json, data/archive, data/memory.db).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.out = self.root / "observatory.html"
+
+    def _run(self, extra_args=()):
+        # main() prints the output path on success; a parser.error() call
+        # (the --days boundary tests below) prints its usage text to
+        # stderr. Redirecting both keeps a full-suite run print-clean --
+        # the same reason test_portrait_viewer.py's own _run redirects
+        # stdout for its one-knob sibling CLI.
+        with contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            return observatory.main(["--data-dir", str(self.root), *extra_args])
+
+    def _html(self):
+        return self.out.read_text(encoding="utf-8")
+
+    def _assert_in_section(self, html, section_id, snippet):
+        """Assert `snippet` falls inside <section id="section_id"> specifically,
+        not just somewhere on the page -- proving main() routed that
+        loader's output into the matching render_page() key, not merely
+        that the two happen to coexist on the same document."""
+        order = [sid for sid, _ in observatory.SECTION_ORDER]
+        start = html.index(f'<section id="{section_id}">')
+        i = order.index(section_id)
+        end = (html.index(f'<section id="{order[i + 1]}">', start)
+               if i + 1 < len(order) else len(html))
+        self.assertIn(snippet, html[start:end])
+
+    # -- one seeding helper per source, mkdir-as-needed -------------------
+    def _seed_diary(self, name, data):
+        d = self.root / "diary"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def _seed_reflections(self, lines):
+        text = "\n".join(json.dumps(line, ensure_ascii=False) for line in lines) + "\n"
+        (self.root / "reflections.jsonl").write_text(text, encoding="utf-8")
+
+    def _seed_portrait(self, name, data):
+        d = self.root / "portrait_history"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def _seed_album(self, entries):
+        payload = {"version": 1, "entries": entries}
+        (self.root / "album.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    def _seed_facts(self, facts):
+        (self.root / "facts.json").write_text(
+            json.dumps({"facts": facts}, ensure_ascii=False), encoding="utf-8")
+
+    def _seed_facts_state(self, last_extracted_ts):
+        (self.root / "facts_state.json").write_text(
+            json.dumps({"last_extracted_ts": last_extracted_ts}), encoding="utf-8")
+
+    def _seed_archive_day(self, day_iso, messages):
+        d = self.root / "archive"
+        d.mkdir(parents=True, exist_ok=True)
+        raw = "\n".join(json.dumps(m, ensure_ascii=False) for m in messages) + "\n"
+        (d / f"{day_iso}.jsonl").write_text(raw, encoding="utf-8")
+
+    def _seed_memory_db(self, rows=()):
+        # Closed immediately in a finally, matching LoadMemoryStatsTest's
+        # own _create_db above: an open sqlite handle blocks the tmp
+        # dir's deletion on Windows, and this helper never needs to keep
+        # its write handle open past the seed itself (unlike
+        # test_read_only_uri_rejects_writes above, which needs addCleanup
+        # because it keeps a handle open across assertions).
+        conn = sqlite3.connect(str(self.root / "memory.db"))
+        try:
+            conn.execute(
+                "CREATE TABLE chunks (chunk_id TEXT PRIMARY KEY, ts TEXT NOT NULL)")
+            conn.executemany("INSERT INTO chunks VALUES (?, ?)", list(rows))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+class MainDefaultArgsTest(unittest.TestCase):
+    def test_data_dir_and_days_defaults(self):
+        args = observatory._build_parser().parse_args([])
+        self.assertEqual(args.data_dir, "data")
+        self.assertEqual(args.days, 14)
+
+
+class MainThreeStateTest(_CliTest):
+    """Brief item 1: all seven sources full, all seven empty, and a mixed
+    data-dir where each section lands on its own correct state
+    independent of its neighbors."""
+
+    def test_all_seven_sources_populated(self):
+        self._seed_portrait("2026-07-01.json",
+                            {"updated": "2026-07-01",
+                             "content": "I notice I save the last biscuit for Ivy.",
+                             "opinions": [], "observations": []})
+        self._seed_diary("2026-07-01_213000.json",
+                         {"date": "2026-07-01",
+                          "content": "We watched the lighthouse beam sweep past twice.",
+                          "mood": "content", "keywords": ["lighthouse"]})
+        self._seed_reflections([
+            {"created_at": "2026-07-01T21:30:00+08:00",
+             "text": "Ivy laughed at the cold sea glass in her coat pocket."}])
+        self._seed_album([
+            {"id": "keep_20260701_200000_000000",
+             "timestamp": "2026-07-01T20:00:00+08:00",
+             "direction": "partner_flagged",
+             "message": {"speaker": "companion", "text": "the candlelit dinner, kept whole"},
+             "message_id": 1}])
+        self._seed_facts([
+            {"text": "Ivy keeps sea glass in her coat pocket.",
+             "category": "interest", "date": "2026-07-01"}])
+        self._seed_facts_state("2026-07-01T21:00:00+08:00")
+        today_iso = date.today().isoformat()
+        self._seed_archive_day(today_iso, [
+            {"timestamp": "2026-07-01T09:00:00+08:00", "speaker": "user",
+             "text": "the lighthouse walk, first line of the day"}])
+        self._seed_memory_db([("c1", "2026-07-01T09:00:00+08:00")])
+
+        rc = self._run()
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.out.exists())
+        html = self._html()
+        for section_id, _title in observatory.SECTION_ORDER:
+            self.assertIn(f'<section id="{section_id}">', html)
+        self._assert_in_section(html, "portrait", "I notice I save the last biscuit for Ivy.")
+        self._assert_in_section(html, "diary", "We watched the lighthouse beam sweep past twice.")
+        self._assert_in_section(html, "reflections",
+                                "Ivy laughed at the cold sea glass in her coat pocket.")
+        self._assert_in_section(html, "keepsakes", "the candlelit dinner, kept whole")
+        self._assert_in_section(html, "facts", "Ivy keeps sea glass in her coat pocket.")
+        self._assert_in_section(html, "conversation", "the lighthouse walk, first line of the day")
+        self._assert_in_section(html, "memory", "Remembered fragments: 1")
+
+    def test_prints_output_path(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = observatory.main(["--data-dir", str(self.root)])
+        self.assertEqual(rc, 0)
+        self.assertIn("observatory.html", buf.getvalue())
+
+    def test_all_seven_sources_empty(self):
+        # data-dir exists (tempfile.TemporaryDirectory always creates it)
+        # but none of the seven sources have ever been written -- a brand
+        # new install's very first run.
+        rc = self._run()
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.out.exists())
+        html = self._html()
+        for message in (observatory.EMPTY_PORTRAIT, observatory.EMPTY_DIARY,
+                        observatory.EMPTY_REFLECTIONS, observatory.EMPTY_KEEPSAKES,
+                        observatory.EMPTY_FACTS, observatory.EMPTY_CONVERSATION,
+                        observatory.MEMORY_UNAVAILABLE):
+            self.assertIn(message, html)
+
+    def test_mixed_sources_each_section_independent(self):
+        # Only diary and facts ever get written; the other five sources
+        # never exist on disk at all. Each section must still land on its
+        # own correct state -- populated where data exists, empty where it
+        # doesn't -- with no cross-talk between them.
+        self._seed_diary("2026-07-01_213000.json",
+                         {"date": "2026-07-01", "content": "a quiet page, alone for now"})
+        self._seed_facts([{"text": "prefers tea before the harbor walk",
+                           "category": "interest", "date": "2026-07-01"}])
+        rc = self._run()
+        self.assertEqual(rc, 0)
+        html = self._html()
+        self._assert_in_section(html, "diary", "a quiet page, alone for now")
+        self._assert_in_section(html, "facts", "prefers tea before the harbor walk")
+        self.assertIn(observatory.EMPTY_PORTRAIT, html)
+        self.assertIn(observatory.EMPTY_REFLECTIONS, html)
+        self.assertIn(observatory.EMPTY_KEEPSAKES, html)
+        self.assertIn(observatory.EMPTY_CONVERSATION, html)
+        self.assertIn(observatory.MEMORY_UNAVAILABLE, html)
+
+
+class MainXssTest(_CliTest):
+    def test_script_tag_never_reaches_the_page(self):
+        # Brief item 2: injected through one source (diary content) is
+        # enough to prove the CLI-to-render_page() path never bypasses
+        # html.escape -- per-seam escaping for all seven sources is
+        # tests/test_observatory_render.py's job, not this integration
+        # suite's.
+        self._seed_diary("2026-07-01_213000.json",
+                         {"date": "2026-07-01", "content": "<script>alert(1)</script>"})
+        rc = self._run()
+        self.assertEqual(rc, 0)
+        html = self._html()
+        self.assertNotIn("<script", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+
+
+class MainOutputLocationTest(_CliTest):
+    def test_output_path_is_exactly_data_dir_slash_observatory_html(self):
+        rc = self._run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.out, self.root / "observatory.html")
+        self.assertTrue(self.out.exists())
+        self.assertEqual(self.out.parent, self.root)
+        # Never lands one level up, alongside the data dir rather than
+        # inside it -- the concrete failure mode the brief's "must land
+        # inside --data-dir" rule guards against.
+        self.assertFalse((self.root.parent / "observatory.html").exists())
+
+    def test_output_dir_created_when_data_dir_does_not_exist_yet(self):
+        # portrait_viewer's own precedent: --data-dir need not already
+        # exist (mkdir(parents=True, exist_ok=True) on the output's
+        # parent). self.root already exists (tempfile made it); point at
+        # a not-yet-created child instead.
+        fresh = self.root / "brand-new-install"
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = observatory.main(["--data-dir", str(fresh)])
+        self.assertEqual(rc, 0)
+        out = fresh / "observatory.html"
+        self.assertTrue(out.exists())
+        self.assertEqual(out.parent, fresh)
+
+
+class MainDaysWindowTest(_CliTest):
+    def test_days_restricts_the_conversation_window(self):
+        # Brief item 4: --days 7 with fixtures three days back (inside)
+        # and ten days back (outside). main() reads the real clock
+        # (date.today(), per the "clock only in the CLI layer" hard
+        # rule), so the fixture dates are computed relative to it rather
+        # than hardcoded, the way any test of clock-driven code must be.
+        today = date.today()
+        inside = (today - timedelta(days=3)).isoformat()
+        outside = (today - timedelta(days=10)).isoformat()
+        self._seed_archive_day(inside, [
+            {"timestamp": f"{inside}T09:00:00+08:00", "speaker": "user",
+             "text": "within the seven-day window"}])
+        self._seed_archive_day(outside, [
+            {"timestamp": f"{outside}T09:00:00+08:00", "speaker": "user",
+             "text": "ten days back, out of the window"}])
+
+        rc = self._run(["--days", "7"])
+        self.assertEqual(rc, 0)
+        html = self._html()
+        self._assert_in_section(html, "conversation", "within the seven-day window")
+        self.assertNotIn("ten days back, out of the window", html)
+        self.assertIn("Earlier: 1 more day(s), 1 more line(s)", html)
+
+
+class MainDaysBoundaryTest(_CliTest):
+    """Brief item 5: 0 and -3 are syntactically valid ints (argparse's
+    type=int accepts both -- verified separately that "--days -3" is
+    parsed as the value -3, not misread as a stray option), so
+    parser.error()'s manual `days < 1` check, not argparse's own type
+    coercion, is what turns them into a SystemExit; 1 is the smallest
+    value that must NOT raise."""
+
+    def test_zero_days_is_a_parser_error(self):
+        with self.assertRaises(SystemExit):
+            self._run(["--days", "0"])
+        self.assertFalse(self.out.exists())
+
+    def test_negative_days_is_a_parser_error(self):
+        with self.assertRaises(SystemExit):
+            self._run(["--days", "-3"])
+        self.assertFalse(self.out.exists())
+
+    def test_one_day_is_accepted(self):
+        rc = self._run(["--days", "1"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.out.exists())
+
+
+class MainRerunTest(_CliTest):
+    def test_rerunning_main_overwrites_the_file(self):
+        # Brief item 6: two consecutive runs, both exit 0, and the second
+        # file is provably fresh output (content comparison) rather than
+        # a stale leftover from the first -- a second diary page is added
+        # between runs so the two renders can only be equal if main()
+        # failed to pick up the change.
+        self._seed_diary("2026-07-01_213000.json",
+                         {"date": "2026-07-01", "content": "first run content"})
+        rc1 = self._run()
+        self.assertEqual(rc1, 0)
+        first_html = self._html()
+        self.assertIn("first run content", first_html)
+
+        self._seed_diary("2026-07-02_213000.json",
+                         {"date": "2026-07-02", "content": "second run content"})
+        rc2 = self._run()
+        self.assertEqual(rc2, 0)
+        second_html = self._html()
+        self.assertIn("first run content", second_html)
+        self.assertIn("second run content", second_html)
+        self.assertNotEqual(first_html, second_html)
 
 
 if __name__ == "__main__":
