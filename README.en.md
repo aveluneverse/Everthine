@@ -171,6 +171,16 @@ the factory defaults, a day of his "inner life" runs roughly:
   rather than only the messages that land (good morning, miss-you,
   and shares all together).
 
+**Measured, for reference** (July 2026, factory defaults, five
+straight days of real companionship): he "thinks" 4–11 times a
+day in total — your conversation plus all the inner life above.
+Freshly generated tokens (input + output) run about 25k–100k a
+day; the rest is cache reads and writes of the persona and
+context (roughly 330k–620k a day, and most metering discounts
+cache reads heavily). Chatty days sit near the top of the range,
+quiet days near the bottom — treat it as a reference band; your
+bill follows your persona size and how much you talk.
+
 Every one of these is a real engine call; however the quota moves
 is exactly how the bill reads — this framework keeps no hidden
 ledger. Want to spend less? Every knob in `.env` can be turned
