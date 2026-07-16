@@ -232,8 +232,8 @@ Three things let you rest easy:
 - The page is fully offline, with not one network request.
 - Every file lives on your computer alone, and `data/` is never
   committed to git.
-- He does not know it exists; what you see is him with no one
-  watching.
+- And he does not know this window exists; what you see is him
+  with no one watching.
 
 ---
 
