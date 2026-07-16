@@ -129,6 +129,15 @@ class TestDeploy(WizardDocMixin, unittest.TestCase):
         text = self.DOC.read_text(encoding="utf-8")
         self.assertIn("hundred MB", text)
 
+    def test_hand_over_to_users_own_window(self):
+        # Northstar finding (2026-07-16): a bot left in the assistant's
+        # background dies with its session. Step 4 must hand the process
+        # over to a window the user owns, via a double-click wake-up file.
+        text = self.DOC.read_text(encoding="utf-8")
+        self.assertIn("wake-up file", text)
+        self.assertIn("dies with your session", text)
+        self.assertIn("start-<name>.bat", text)
+
     def test_viewer_command_verbatim(self):
         text = self.DOC.read_text(encoding="utf-8")
         self.assertIn("python -m everthine.portrait_viewer --data-dir data",

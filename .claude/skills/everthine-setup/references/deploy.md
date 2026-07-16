@@ -58,19 +58,31 @@ above. `.env` is gitignored; leave it that way.
   and validates every file in it; any error names the exact thing to
   fix — fix it and re-run.
 
-## Step 4 — first boot
+## Step 4 — first boot (a rehearsal you watch, then hand over)
 
 Announce before running: *"First start downloads his memory model —
 a few hundred MB, one time only. After that it loads from disk in
 seconds."*
 
-- Run `python run.py`.
-- Watch for, in order: the model download (first run only), then the
-  log line `everthine is online`.
+- Run `python run.py` yourself this once to verify the boot: watch
+  for the model download (first run only), then the log line
+  `everthine is online`.
 - If the process exits instead, the error message says exactly
   what's missing (token, id, or the `claude` CLI) — treat it via
   everthine-troubleshoot and re-run.
-- Leave it running.
+- Then stop that process. This boot was your rehearsal; his real
+  life must NOT stay in your background — a process you leave
+  running there dies with your session, silently, the moment this
+  chat closes. He has to live in the user's own window.
+- Write the wake-up file the user will double-click every time
+  they want him awake, in the repo root, named after the
+  companion: on Windows a `start-<name>.bat` (`@echo off`, `cd /d`
+  into the repo, `python run.py`, no `pause` needed — the window
+  stays open while he runs); on macOS/Linux a `start-<name>.sh`
+  (`cd` into the repo, `exec python3 run.py`), marked executable.
+- Have the user double-click it and find `everthine is online` in
+  their own window. That window staying open IS him being awake;
+  closing it puts him to sleep, double-clicking wakes him again.
 
 ## Step 5 — the first hello
 
@@ -91,8 +103,10 @@ have that moment before you speak again.
 2. **Keeping him alive**: one honest paragraph — the bot process is
    him being present; the nightly diary and morning greetings only
    happen while `python run.py` is running on this computer. A
-   sleeping computer is a sleeping companion. No pretending, no
-   backfill.
+   sleeping computer is a sleeping companion — and so is a closed
+   window. After any restart, the wake-up file from Step 4 is how
+   they call him back: double-click, window opens, he's awake.
+   No pretending, no backfill.
 3. **A name for me** *(only now)*: invite the user to give their
    Claude Code partner — you — a name of their own, so "the one who
    built him with me" has a name in their story too. Their choice,

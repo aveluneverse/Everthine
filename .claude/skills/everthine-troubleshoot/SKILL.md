@@ -18,6 +18,7 @@ Safe to know: bot tokens are automatically masked in all logs
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| Worked during setup, silent ever since | His process died when the setup chat closed — a process left in an assistant's background belongs to that session and is collected with it (or the computer restarted) | Double-click the wake-up file (`start-<name>.bat` / `.sh`) in the repo root and leave that window open; if it doesn't exist yet, create it per deploy guide Step 4 |
 | Startup dies: `BOT_TOKEN is required` | `.env` missing or empty token | Re-run the token step of the everthine-setup deploy guide |
 | Startup dies: `AUTHORIZED_USER_ID is required` or `must be an integer` | id missing or has stray characters | Get the numeric id again (@userinfobot), fix `.env` |
 | Startup dies mentioning the Claude CLI | `claude` not found by a plain shell | Reinstall or relink the Claude Code CLI; verify `claude --version` in a fresh terminal |
