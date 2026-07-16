@@ -323,16 +323,19 @@ class TestReadmeZh(WizardDocMixin, unittest.TestCase):
     DOC = README
 
     def test_decree_copy_anchors(self):
+        # 2026-07-17 author revision: the founding decree copy was rewritten
+        # by its author; the surviving 7/2 anchor plus two signature lines of
+        # the new text are pinned in its place.
         text = self.DOC.read_text(encoding="utf-8")
         for anchor in ("自訂是出廠設定；養成是歲月",
-                       "這個迴圈就是養成引擎",
-                       "快不了，也假不了"):
+                       "他會帶著過去繼續往前走",
+                       "因為他最後成為的樣子，不只來自設定，也來自你"):
             with self.subTest(anchor=anchor):
                 self.assertIn(anchor, text)
 
     def test_cost_section_present(self):
         text = self.DOC.read_text(encoding="utf-8")
-        self.assertIn("## 費用，誠實說", text)
+        self.assertIn("## 成本透明：每一次內在活動，都是真實的模型呼叫", text)
 
     def test_observatory_section_present(self):
         text = self.DOC.read_text(encoding="utf-8")
