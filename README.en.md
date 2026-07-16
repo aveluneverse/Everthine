@@ -4,6 +4,8 @@
 
 ![Everthine](docs/assets/everthine-hero.jpg)
 
+**Everthine: raise the AI companion you've always imagined.**
+
 *Ever thine. Ever mine. Ever ours.*
 
 **Raised with time, growing for you.**
