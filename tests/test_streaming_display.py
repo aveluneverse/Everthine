@@ -5,6 +5,7 @@ import warnings
 from telegram.error import BadRequest, RetryAfter
 from telegram.warnings import PTBDeprecationWarning
 
+from everthine.messages import msg
 from everthine.streaming_display import (StreamingDisplay, cancel_markup,
                                          find_split_point,
                                          has_sentence_boundary,
@@ -139,8 +140,10 @@ class TestTagOnlyFinalize(unittest.IsolatedAsyncioTestCase):
     """N4: a tag-only reply (the gesture IS the whole response) must delete
     the placeholder instead of leaving it stuck on the waiting line, and
     return an empty message list so no cache/archive entry is fabricated.
-    A genuinely empty reply with NO captured tag keeps the old behavior
-    (the placeholder survives for the caller's own fallback)."""
+    A genuinely empty reply with NO captured tag (the engine finished ok but
+    said nothing) is edited to the generic glitch line instead of being left
+    on the waiting line -- mirroring the non-streaming twin -- and still
+    returns [] so the system line never enters the cache."""
 
     async def test_tag_only_finalize_deletes_placeholder_and_returns_empty(self):
         d, msg0, _ = make_display()
@@ -167,14 +170,23 @@ class TestTagOnlyFinalize(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(d.message_texts, [])
         self.assertEqual(d.reaction_emoji, "❤️")
 
-    async def test_empty_reply_no_tag_keeps_placeholder(self):
-        # No text, no tag: the tag-only branch must NOT fire -- the
-        # placeholder survives (the caller shows its own glitch fallback),
-        # exactly as before this task.
+    async def test_empty_reply_no_tag_edits_placeholder_to_glitch(self):
+        # ok-but-empty: the engine finished cleanly with no text and no tag.
+        # The placeholder must NOT stay stuck on the waiting line -- it is
+        # edited to the generic glitch line (Stop button dropped) and
+        # finalize returns [] so this system line never enters _messages/
+        # _message_texts (and so can never be zipped into the cache, T7a).
+        # Mirrors the non-streaming twin (produce_reply returns
+        # [msg("generic_glitch")] in the same case) and completes N4's
+        # deferral -- the "caller's own fallback" that branch waited on never
+        # actually fired on the ok path.
         d, msg0, _ = make_display()
         messages = await d.finalize()
+        self.assertEqual(messages, [])
         self.assertFalse(msg0.deleted)
-        self.assertEqual(messages, [msg0])
+        self.assertEqual(msg0.edits[-1]["text"], msg("generic_glitch"))
+        self.assertFalse(msg0.edits[-1]["has_markup"])
+        self.assertEqual(d.message_texts, [])
         self.assertIsNone(d.reaction_emoji)
 
 

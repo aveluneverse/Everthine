@@ -189,6 +189,18 @@ class StreamingDisplay:
             except Exception:
                 logger.warning("tag-only placeholder delete failed", exc_info=True)
             return []
+        if not self._full_text and self._reaction_emoji is None:
+            # ok-but-empty: the engine finished cleanly but produced no text
+            # and no reaction. Without this the placeholder would stay stuck
+            # on the thinking line with its Stop button forever -- she sees
+            # him start, then fall silent. Mirror the non-streaming twin
+            # (produce_reply returns [msg("generic_glitch")] in the same
+            # case): edit the placeholder to that same line and drop the Stop
+            # button. return [] keeps this system line out of _messages/
+            # _message_texts, so it is never zipped into the sent cache and
+            # can never be hearted into the album (T7a).
+            await self._edit_current(msg("generic_glitch"), with_markup=False)
+            return []
         if len(self._current_buffer) > self._displayed_len:
             await self._do_edit()
         if self._current_buffer:

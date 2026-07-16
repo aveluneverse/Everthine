@@ -849,6 +849,43 @@ class TestTagOnlyReplyWiring(_AlbumWiringTestCase):
         self.assertEqual(companion, [])
 
 
+# --- ok-but-empty streamed reply: the engine finished cleanly but produced
+#     NO text and NO reaction tag. The placeholder must not stay stuck on the
+#     thinking line -- it's edited to the generic glitch line, mirroring the
+#     non-streaming twin (produce_reply returns [msg("generic_glitch")] in the
+#     same case). That system line is never cached: a heart on it misses the
+#     cache (album_expired) and never enters the album (T7a). ---------------
+
+class TestEmptyStreamGlitchWiring(_AlbumWiringTestCase):
+    def test_empty_stream_edits_placeholder_to_glitch_and_never_caches_it(self):
+        cfg = self._cfg(streaming_enabled=True)
+        # ok_script([]) is a single ok=True 'done' event with empty text, no
+        # chunks and no tag -- the ok-but-empty case exactly.
+        app, her_message = self._drive_stream(cfg, ok_script([]),
+                                              text="say something?")
+        handle_reaction = _handler(app, MessageReactionHandler)
+
+        # Only the placeholder was ever sent, and it now shows the glitch
+        # line with its Stop button dropped -- never left on the thinking
+        # line, never a fresh extra message.
+        self.assertEqual(len(her_message.replies), 1)
+        placeholder = her_message.replies[0]
+        self.assertFalse(placeholder.deleted)
+        self.assertEqual(placeholder.edits[-1], messages.msg("generic_glitch"))
+        self.assertIsNone(placeholder.markup_edits[-1])
+
+        # The glitch is a SYSTEM line: a heart on the placeholder misses the
+        # cache (album_expired) and nothing enters the album.
+        heart = FakeReactionUpdate(
+            user_id=1, chat_id=1, message_id=placeholder.message_id,
+            old_emojis=[], new_emojis=["❤️"])
+        context = FakeContext()
+        asyncio.run(handle_reaction(heart, context))
+        self.assertEqual(context.bot.sent_messages,
+                         [(1, messages.msg("album_expired"))])
+        self.assertEqual(album.all_entries(cfg), [])
+
+
 # --- _message_cache's own lazy pruning: MESSAGE_CACHE_TTL_S and
 #     MESSAGE_CACHE_MAX are named exactly in the spec, so both get a direct
 #     test rather than resting on the cache-miss coverage above (which

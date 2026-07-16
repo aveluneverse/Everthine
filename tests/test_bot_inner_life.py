@@ -275,6 +275,27 @@ class TestReflectionHookStreaming(unittest.TestCase):
         # The placeholder was deleted, not left on the waiting line.
         self.assertTrue(her.replies[0].deleted)
 
+    def test_empty_ok_reply_fires_no_reflection_and_glitches_placeholder(self):
+        # ok-but-empty: a SUCCESSFUL turn with no text and no tag. Like the
+        # tag-only case its display.full_text is empty, so the empty-text
+        # gate skips reflection even though the turn succeeded -- and the
+        # placeholder is edited to the generic glitch line (not deleted,
+        # never left on the waiting line).
+        cfg = _folder_cfg(self.root, streaming_enabled=True)
+        app = bot.make_app(cfg)
+        on_text = _handler(app, MessageHandler)
+        her = FakeMessage("are you still there?")
+        context = FakeContext()
+        with mock.patch.object(reflection, "reflect_once") as reflect, \
+             mock.patch.object(engine, "stream_once",
+                               ScriptedEngine(ok_script([])).stream_once):
+            asyncio.run(on_text(FakeUpdate(her), context))
+        self.assertEqual(context.application.created, [])
+        reflect.assert_not_called()
+        placeholder = her.replies[0]
+        self.assertFalse(placeholder.deleted)
+        self.assertEqual(placeholder.edits[-1], messages.msg("generic_glitch"))
+
     def test_cancelled_turn_fires_no_reflection(self):
         cfg = _folder_cfg(self.root, streaming_enabled=True)
         app = bot.make_app(cfg)
