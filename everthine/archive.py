@@ -7,9 +7,12 @@ milestone) - it exists so the warmth injection can quote recent turns.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
+
+logger = logging.getLogger("everthine")
 
 
 def write_entry(archive_dir: Path, speaker: str, text: str,
@@ -23,7 +26,14 @@ def write_entry(archive_dir: Path, speaker: str, text: str,
         with (archive_dir / f"{ts.date().isoformat()}.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
         return True
-    except OSError:
+    except OSError as exc:
+        # The bool return is widely ignored (archiving is fire-and-forget), so
+        # a bare `return False` would swallow a real disk problem in silence.
+        # Surface it -- but log the path, speaker, and exception ONLY. The
+        # conversation text never enters a log; two people's words are not a
+        # place for a warning line (same spirit as the token mask).
+        logger.warning("archive write failed for %s (speaker=%s): %s",
+                       archive_dir, speaker, exc)
         return False
 
 

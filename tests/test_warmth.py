@@ -34,6 +34,35 @@ class TestArchive(unittest.TestCase):
             got = [e["text"] for e in archive.iter_entries(d, since=NOW - timedelta(hours=36))]
             self.assertEqual(got, ["new"])
 
+    def test_write_failure_warns_and_still_returns_false(self):
+        # A write that cannot land must not fail silently: most callers ignore
+        # the bool return (archiving is fire-and-forget), so a real disk
+        # problem would vanish. Here archive_dir is itself a FILE, so
+        # mkdir(parents=True, exist_ok=True) raises FileExistsError (an
+        # OSError). The contract is unchanged (still returns False); the only
+        # addition is one WARNING for the caller that ignored the bool.
+        with tempfile.TemporaryDirectory() as td:
+            blocker = Path(td) / "not_a_dir"
+            blocker.write_text("i am a file, not a directory", encoding="utf-8")
+            with self.assertLogs("everthine", level="WARNING"):
+                result = archive.write_entry(blocker, "companion", "some words",
+                                             ts=NOW)
+            self.assertFalse(result)
+
+    def test_write_failure_warning_never_logs_the_conversation_text(self):
+        # Privacy pin: the warning may name the path, speaker, and exception,
+        # but NEVER the conversation text -- a log is not a place two people's
+        # words belong (same spirit as the token mask).
+        secret = "PRIVATE_LINE_NEVER_LOGGED the comet over the quiet bay"
+        with tempfile.TemporaryDirectory() as td:
+            blocker = Path(td) / "not_a_dir"
+            blocker.write_text("x", encoding="utf-8")
+            with self.assertLogs("everthine", level="WARNING") as cm:
+                archive.write_entry(blocker, "companion", secret, ts=NOW)
+        joined = "\n".join(cm.output)
+        self.assertNotIn(secret, joined)
+        self.assertNotIn("comet over the quiet bay", joined)
+
 
 class TestInjection(unittest.TestCase):
     def _dir_with(self, *entries):
