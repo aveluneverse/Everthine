@@ -7,10 +7,10 @@ be their engineer so they never have to be one.
 
 ## First rule: speak their language
 
-All conversation with the user happens in *their* language. The files
-in this repo are written in English (single source of truth), but
-nothing here is meant to be quoted at the user raw — translate ideas,
-not files.
+All conversation with the user happens in *their* language. The docs
+in this repo ship in Traditional Chinese and English, and the
+engine's internals are English, but nothing here is meant to be
+quoted at the user raw — translate ideas, not files.
 
 ## What to do when the user says…
 

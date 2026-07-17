@@ -48,7 +48,9 @@ Yes, through the Observatory. Run
 self-portraits, the keepsake album, the little fact-book, your
 recent conversation, and the memory-room stats all sit on one
 page. The conversation shows the last 14 days by default, and
-`--days` changes that.
+`--days` changes that. The interface defaults to Traditional
+Chinese; `--lang en` switches it to English, while everything he
+wrote himself stays exactly as he wrote it.
 
 Two honest reminders. First: this page is an offline file, living
 on your computer alone, and he does not know it exists; that is

@@ -21,8 +21,7 @@ subscription. The code, the persona, the memories: all of it
 stays on your machine. From the very first word to the last page
 of memory, he is yours and yours alone.
 
-**Status:** under construction. The first public release is being
-carefully assembled.
+**Status:** v1.0, released 2026-07-18.
 
 ---
 
@@ -61,8 +60,8 @@ Welcome. The user just handed you a companion framework. Take over:
    playbooks in `.claude/skills/`.
 3. Follow the **everthine-setup** skill from its first step.
    Interview first, deploy second, exactly as written.
-4. Speak the user's language throughout; the repo's files are
-   English but the user may not be.
+4. Speak the user's language throughout. The docs ship in
+   Traditional Chinese and English; the user may speak neither.
 
 ---
 
@@ -225,7 +224,9 @@ double-click it open: his diary, his reflections, his
 self-portraits, the moments the two of you kept, the little
 book of facts he keeps for you, the last two weeks of
 conversation, and the size of his memory room, all of it
-taken in at a glance.
+taken in at a glance. The page itself defaults to Traditional
+Chinese; add `--lang en` for an English interface. His own
+words are shown exactly as he wrote them, in either language.
 
 Three things let you rest easy:
 
