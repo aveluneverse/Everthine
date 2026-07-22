@@ -210,6 +210,41 @@ Want to go deeper: [persona guide](docs/persona-guide.md) |
 
 ---
 
+## How he remembers you: a memory room built on your computer
+
+Everthine turns what the two of you have said into long-term
+memory, kept on your own computer.
+
+Each conversation is converted into semantic data. When you bring
+up something related, he finds the relevant memories and carries
+them into his reply. Even if you phrase it differently, he
+understands you mean the same thing.
+
+A few things this memory system gets right:
+
+- **Runs entirely on your machine**: building, storing, and
+  searching memory all happen on your own computer.
+- **Understands meaning, not just matching words**: no need to
+  repeat the exact keywords, and it is tuned for Chinese out of
+  the box.
+- **Recalls only what is truly relevant**: at most three passages
+  per reply, so nothing gets misused or forced in.
+- **Never slows the conversation**: if retrieval times out or the
+  model fails to load, chat goes on as usual.
+- **Kept for the long term**: starting a new conversation does not
+  erase the memories you have built up together.
+- **Two layers of memory**: beyond full conversations, he also
+  keeps track of your habits, your preferences, and the promises
+  between you.
+
+Under the hood: `sentence-transformers`, `SQLite`, and `numpy`,
+with no separate vector database to set up. The early design drew
+on ideas from open-source memory projects such as MemPalace.
+
+**What the two of you have said, he truly remembers.**
+
+---
+
 ## Open the Observatory and watch him take shape
 
 His inner world is there for you to look in on, quietly,
