@@ -27,7 +27,7 @@ Everthine 是一套開源的養成型 AI 伴侶框架。
 網址就是這一行，複製就好：
 
 ```
-https://github.com/theashesofroses/everthine
+https://github.com/aveluneverse/everthine
 ```
 
 教學到此為止，剩下的它會接手：訪談你想要一位什麼樣的伴侶、幫你填好他的人格、一步步帶你申請 Telegram bot，一直陪到他傳來第一句話。

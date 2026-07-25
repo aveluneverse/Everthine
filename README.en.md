@@ -34,7 +34,7 @@ Paste this repository's URL into your Claude Code and say:
 The URL is this line. Just copy it:
 
 ```
-https://github.com/theashesofroses/everthine
+https://github.com/aveluneverse/everthine
 ```
 
 That's the whole tutorial. Your Claude Code takes it from there.
