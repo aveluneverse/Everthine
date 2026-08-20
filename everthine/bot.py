@@ -305,6 +305,20 @@ def _reaction_emoji_set(reactions) -> set[str]:
     return {r.emoji for r in reactions if isinstance(r, ReactionTypeEmoji)}
 
 
+def failure_line(reply) -> str:
+    """The line she sees for a failed EngineReply: the persona's line for its
+    error kind, with the rate-limit line's {detail} filled from the CLI's own
+    words (e.g. "You've hit your session limit · resets 3:45pm"), so the reset
+    time reaches her instead of dying in the log. Every other kind is a plain
+    lookup; an unknown/None kind is the generic glitch, as before."""
+    kind = reply.error_kind or "generic_glitch"
+    line = msg(kind)
+    if kind == "rate_limited":
+        detail = (reply.error_detail or "").strip() or "usage limit reached"
+        return line.format(detail=detail[:120])
+    return line
+
+
 def produce_reply(cfg: Config, store: SessionStore, text: str,
                   now: datetime | None = None, engine_mod=engine,
                   on_react=None, on_extra=None) -> list:
@@ -327,7 +341,7 @@ def produce_reply(cfg: Config, store: SessionStore, text: str,
             cfg, memory_block=memory_block, inner_block=inner_block,
             facts_block=facts_block))
     if not reply.ok:
-        return [msg(reply.error_kind or "generic_glitch")]
+        return [failure_line(reply)]
 
     emoji, cleaned = _extract_react(reply.text)
     # T7: on_text (which owns update.message, needed to set the Telegram
@@ -440,7 +454,7 @@ async def stream_reply(cfg: Config, store: SessionStore, text: str,
         reply = EngineReply("", data.get("session_id"), ok=False,
                             error_kind="nonzero")
     if not reply.ok and not display.full_text:
-        await display.append(msg(reply.error_kind or "generic_glitch"))
+        await display.append(failure_line(reply))
     sent = await display.finalize()
     if sent_sink is not None:
         sent_sink.extend(sent)
@@ -1106,8 +1120,7 @@ def make_app(cfg: Config):
             # injected fallback apology on text-less failures; reply.text is
             # the engine's ground truth of real partial output.
             if not reply.ok and reply.text:
-                await update.message.reply_text(
-                    msg(reply.error_kind or "generic_glitch"))
+                await update.message.reply_text(failure_line(reply))
             if reply.ok and store.detect_bloat(cfg, reply.session_id):
                 await update.message.reply_text(msg("notebook_full"))
             if reply.ok:

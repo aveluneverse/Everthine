@@ -19,11 +19,14 @@ relationship:
 # 換成了中文——中文使用者從這個資料夾起步，按鈕、選單、系統訊息
 # 就全是中文。
 # thinking＝等待句：他還沒回話時，畫面上先出現的句子（會輪流換）。
+# auth_expiring 裡的 {days} 與 rate_limited 裡的 {detail} 是佔位符，重新配音時請保留（也可以整個不用）。
 lines:
   busy: "等我一下——腦子裡有句話還沒寫完。"
   generic_glitch: "我這邊卡了一下。再說一次好嗎？"
   timeout: "剛剛那句想著想著就斷了線。再說一次？"
-  auth: "我跟 Claude 的連線需要重新登入。等一下再試。"
+  auth: "我現在連不上 Claude：這台電腦上的 Claude 登入過期了。開個終端機，輸入 claude auth login（或打開 claude 後輸入 /login）重新登入。妳一登入好，我就回來了。"
+  auth_expiring: "先說一聲：這台電腦上的 Claude 登入再 {days} 天就到期了。在那之前找個時間開終端機輸入 claude auth login 重新登入，我就不會突然安靜下來。"
+  rate_limited: "我這邊的 Claude 額度暫時用完了（{detail}）。等它重置，我就回來。"
   nonzero: "剛剛想岔了。再跟我說一次？"
   notebook_full: "我們的筆記本快寫滿了。用 /start 換一本新的——溫度我會帶過去。"
   cmd_start_desc: "新對話——或接著上次聊"

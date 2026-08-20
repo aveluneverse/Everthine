@@ -462,6 +462,37 @@ class TestRoadClippedFormatValidation(unittest.TestCase):
                              "older steps, all kept")
 
 
+class TestLoginLineProbes(unittest.TestCase):
+    """auth_expiring fills {days}; rate_limited fills {detail}. A persona may
+    drop the placeholder, but a misspelled one must fail loud at load."""
+
+    def _load_with_lines(self, lines_yaml: str):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            settings = "companion:\n  name: Alex\npartner:\n  name: Sam\n" + lines_yaml
+            _write_folder(root, settings=settings)
+            return load_persona(_cfg(root))
+
+    def test_auth_expiring_accepts_days_or_nothing(self):
+        for line in ("expires in {days} days", "expires soon"):
+            p = self._load_with_lines(f'lines:\n  auth_expiring: "{line}"\n')
+            self.assertEqual(p.settings.lines["auth_expiring"], line)
+
+    def test_auth_expiring_rejects_wrong_placeholder(self):
+        with self.assertRaises(ConfigError) as cm:
+            self._load_with_lines('lines:\n  auth_expiring: "expires in {day} days"\n')
+        self.assertIn("auth_expiring", str(cm.exception))
+
+    def test_rate_limited_accepts_detail_or_nothing(self):
+        for line in ("out of quota ({detail})", "out of quota"):
+            p = self._load_with_lines(f'lines:\n  rate_limited: "{line}"\n')
+            self.assertEqual(p.settings.lines["rate_limited"], line)
+
+    def test_rate_limited_rejects_wrong_placeholder(self):
+        with self.assertRaises(ConfigError):
+            self._load_with_lines('lines:\n  rate_limited: "out ({reason})"\n')
+
+
 class TestVoiceAndBoundaries(unittest.TestCase):
     def test_absent_default_to_empty_string(self):
         with tempfile.TemporaryDirectory() as td:

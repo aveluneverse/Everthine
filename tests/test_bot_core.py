@@ -168,5 +168,35 @@ class TestHelpers(unittest.TestCase):
                          ["btn_resume", "btn_warm", "btn_clean"])
 
 
+class TestFailureLine(unittest.TestCase):
+    def setUp(self):
+        messages.reset_overrides()
+        self.addCleanup(messages.reset_overrides)
+
+    def test_auth_uses_auth_line(self):
+        r = EngineReply("", None, ok=False, error_kind="auth", error_detail="Failed to authenticate")
+        self.assertEqual(bot.failure_line(r), messages.msg("auth"))
+
+    def test_rate_limited_fills_detail(self):
+        r = EngineReply("", None, ok=False, error_kind="rate_limited",
+                        error_detail="You've hit your session limit · resets 3:45pm")
+        line = bot.failure_line(r)
+        self.assertIn("resets 3:45pm", line)
+        self.assertNotIn("{detail}", line)
+
+    def test_rate_limited_without_detail_still_renders(self):
+        r = EngineReply("", None, ok=False, error_kind="rate_limited")
+        self.assertNotIn("{detail}", bot.failure_line(r))
+
+    def test_unknown_kind_falls_back_to_generic(self):
+        r = EngineReply("", None, ok=False, error_kind=None)
+        self.assertEqual(bot.failure_line(r), messages.msg("generic_glitch"))
+
+    def test_persona_override_without_placeholder_is_fine(self):
+        messages.load_overrides({"rate_limited": "later, love."})
+        r = EngineReply("", None, ok=False, error_kind="rate_limited", error_detail="x")
+        self.assertEqual(bot.failure_line(r), "later, love.")
+
+
 if __name__ == "__main__":
     unittest.main()
