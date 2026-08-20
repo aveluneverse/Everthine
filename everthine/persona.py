@@ -249,9 +249,8 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset({"companion", "partner", "relationship", "line
 # A value with no placeholder at all is legal: str.format ignores an absent
 # field, so a persona may write a line that never interpolates anything.
 # rate_limited (fills {detail}) is rendered by bot.failure_line(). auth_expiring
-# (fills {days}) is rendered by the login watch (everthine/login_watch.py, a
-# separate module added next, which calls msg("auth_expiring").format(days=...)
-# itself) -- not by failure_line, and never via an EngineReply.
+# (fills {days}) is rendered by everthine/login_watch.py, which formats
+# {days} itself -- not by failure_line, and never via an EngineReply.
 _FORMAT_PROBE_KEYS = {
     "stage_intro": {"stage": "probe"},
     "stage_advanced_ack": {"stage": "probe"},

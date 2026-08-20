@@ -4,8 +4,6 @@ is ever touched (every reader points at a temp path); no real sleep
 (WATCH_INTERVAL_S patched to 0); sends go through a FakeApp AsyncMock."""
 import asyncio
 import json
-import logging
-import os
 import tempfile
 import threading
 import unittest

@@ -1,4 +1,5 @@
 import dataclasses
+import logging
 import os
 import queue
 import sys
@@ -164,6 +165,36 @@ class TestStreamOnce(StreamTestBase):
         self.assertFalse(worker.is_alive())
         self.assertLess(time.monotonic() - start, 20)
 
+    def test_cancel_has_cancelled_detail_and_logs_at_debug_not_warning(self):
+        # Companion of test_cancel_event_kills_promptly: a user-initiated
+        # cancel is not a CLI failure, so it must carry its own named detail
+        # and stay quiet at DEBUG instead of joining every real failure at
+        # WARNING.
+        os.environ["FAKE_CLAUDE_MODE"] = "stream_stall"
+        cancel = threading.Event()
+        events = queue.Queue()
+        worker = threading.Thread(
+            target=engine.stream_once,
+            kwargs=dict(cfg=self.cfg(stream_stall_timeout_s=60),
+                        prompt="hi", events=events, cancel=cancel),
+            daemon=True)
+        with self.assertLogs("everthine", level="DEBUG") as cm:
+            worker.start()
+            first = events.get(timeout=10)
+            self.assertEqual(first["type"], "text")
+            cancel.set()
+            while True:
+                e = events.get(timeout=10)
+                if e["type"] == "done":
+                    break
+            worker.join(timeout=10)
+        self.assertFalse(worker.is_alive())
+        reply = e["reply"]
+        self.assertFalse(reply.ok)
+        self.assertEqual(reply.error_detail, engine._CANCELLED_DETAIL)
+        self.assertTrue(any("cancel" in rec.getMessage().lower() for rec in cm.records))
+        self.assertFalse(any(rec.levelno >= logging.WARNING for rec in cm.records))
+
     def test_stream_login_expired_is_auth_with_detail_and_no_text(self):
         os.environ["FAKE_CLAUDE_MODE"] = "stream_login_expired"
         engine.reset_auth_state()
@@ -196,6 +227,33 @@ class TestStreamOnce(StreamTestBase):
         reply = out[-1]["reply"]
         self.assertEqual(reply.error_kind, "nonzero")
         self.assertEqual(reply.error_detail, "boom")
+
+    def test_stream_emitted_text_never_decides_the_kind(self):
+        # The reply text itself can plausibly say "my login expired" or
+        # "you've hit your limit" as ordinary conversation, then the run
+        # fails for a THIRD, unrelated reason (a real 500 in the result
+        # event). Her own words must never be mistaken for the CLI's.
+        os.environ["FAKE_CLAUDE_MODE"] = "stream_text_then_server_error"
+        engine.reset_auth_state()
+        self.addCleanup(engine.reset_auth_state)
+        out = self.run_stream(self.cfg(), "hi")
+        done = out[-1]["reply"]
+        self.assertEqual(done.error_kind, "nonzero")
+        self.assertEqual(done.error_detail, "API Error: 500 internal")
+        self.assertTrue(done.text.startswith("My login expired"))
+        self.assertFalse(engine.auth_broken())
+
+    def test_stream_emitted_text_is_fallback_when_cli_says_nothing(self):
+        # No result event, no stderr: the emitted text is all there is, so
+        # it must still be read as the fallback (older CLI builds surfaced
+        # "API Error: 401 ..." exactly this way, as a text delta instead of
+        # a result event).
+        os.environ["FAKE_CLAUDE_MODE"] = "stream_text_then_silent_exit"
+        with mock.patch.object(engine.time, "sleep"):
+            out = self.run_stream(self.cfg(), "hi")
+        done = out[-1]["reply"]
+        self.assertEqual(done.error_kind, "auth")
+        self.assertIn("401", done.error_detail)
 
     def test_note_outcome_runs_while_reply_lock_is_still_held(self):
         # Pins the ordering fix: _note_outcome must stamp _auth_state before

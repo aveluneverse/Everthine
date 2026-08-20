@@ -41,6 +41,9 @@ portrait_enabled / scheduler_enabled is on; each organ's own INFO line at
 start ("diary: inner-life tick started" / "portrait: armed (interval {n}d)"
 / "scheduler: proactive armed (...)") only prints when that organ's own flag
 is actually on, so a single-organ run never claims a line that isn't true.
+Last in that composite hook is login_watch.start (2026-08-20), armed in its
+own try/except right after the tick's so a tick failure can never silently
+leave the login watch unarmed.
 And both of on_text's reply paths fire reflection.reflect_once after a
 SUCCESSFUL reply, fire-and-forget through _schedule_reflection. With every
 flag off (diary_enabled / portrait_enabled / scheduler_enabled /
@@ -1198,15 +1201,20 @@ def make_app(cfg: Config):
     # concurrently, so scope concurrency to streaming mode. PTB maps False to
     # one-update-at-a-time, byte-identical to M1 (which never enabled it).
     async def _post_init(app_) -> None:
-        """The composite startup hook (M7 T6): publish the command menu first,
-        then arm the inner-life tick. Each half self-guards -- PTB 22.6 awaits
-        post_init via run_until_complete OUTSIDE any exception guard, so an
-        escaping exception here crashes the whole process at startup; a cosmetic
-        menu blip or a background-tick failure must never be that. The tick now
-        lives in scheduler.py; store reaches it as an explicit argument from
-        this closure's scope, never a bot_data side channel -- a parameter that
-        cannot be supplied fails loudly at once, where a silent side-channel
-        miss would arm a tick wired to nothing that no one would notice."""
+        """The composite startup hook (M7 T6, login watch folded in
+        2026-08-20): publish the command menu, then arm the inner-life tick,
+        then arm the login watch. Each of the three self-guards -- PTB 22.6
+        awaits post_init via run_until_complete OUTSIDE any exception guard,
+        so an escaping exception here crashes the whole process at startup;
+        a cosmetic menu blip or a background failure must never be that. The
+        tick lives in scheduler.py; store reaches it as an explicit argument
+        from this closure's scope, never a bot_data side channel -- a
+        parameter that cannot be supplied fails loudly at once, where a
+        silent side-channel miss would arm a tick wired to nothing that no
+        one would notice. The login watch has its OWN try/except, separate
+        from the tick's: sharing one used to mean a tick failure silently
+        skipped the line that arms the watch too, and the watch's own
+        failure was misnamed as a tick failure in the log."""
         await register_commands(app_)          # keeps its own internal guard
         try:
             # _cache_sent rides along so a heart on a PROACTIVE message
@@ -1214,9 +1222,12 @@ def make_app(cfg: Config):
             # its own album_enabled gate makes this a no-op when the album
             # is off (merge-acceptance fix, 2026-07-11).
             scheduler.start_tick(app_, cfg, store, cache_sink=_cache_sent)
-            login_watch.start(app_, cfg)
         except Exception:
             logger.warning("inner-life tick failed to start", exc_info=True)
+        try:
+            login_watch.start(app_, cfg)
+        except Exception:
+            logger.warning("login-watch failed to start", exc_info=True)
 
     app = (ApplicationBuilder().token(cfg.bot_token)
            .concurrent_updates(cfg.streaming_enabled)

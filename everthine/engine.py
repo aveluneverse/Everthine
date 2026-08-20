@@ -85,6 +85,9 @@ _RATE_LIMIT_FINGERPRINTS = (
     "request rejected (429)", "api error: 429", "usage_cap_reached",
 )
 _DETAIL_MAX = 300
+# _stream_attempt's cancelled-by-user reply carries this exact error_detail;
+# _note_outcome checks for it to log a cancel at DEBUG instead of WARNING.
+_CANCELLED_DETAIL = "cancelled by the user"
 
 
 def classify_failure(text: str) -> str:
@@ -100,17 +103,14 @@ def classify_failure(text: str) -> str:
     return "nonzero"
 
 
-def _looks_like_auth_error(text: str) -> bool:
-    return classify_failure(text) == "auth"
-
-
-def _error_detail(result_text: str, stderr: str, stdout: str = "") -> str:
+def _error_detail(result_text: str, stderr: str, fallback_text: str = "") -> str:
     """One log-line's worth of what the CLI said: its own result message when
-    it gave one (head), else the stderr tail, else the stdout tail."""
+    it gave one (head), else the stderr tail, else the tail of fallback_text:
+    stdout on the blocking path, emitted reply text on the streaming path."""
     if result_text and result_text.strip():
         text = " ".join(result_text.split())
         return text[:_DETAIL_MAX]
-    text = " ".join(((stderr or "").strip() or (stdout or "").strip()).split())
+    text = " ".join(((stderr or "").strip() or (fallback_text or "").strip()).split())
     return text[-_DETAIL_MAX:] if len(text) > _DETAIL_MAX else text
 
 
@@ -127,10 +127,13 @@ def _result_text(stdout: str) -> str:
 
 
 # --- auth state: is the login broken right now? ------------------------
-# Two wall-clock stamps, written after every FINAL engine outcome (after the
-# one auth retry): the last auth failure and the last success. login_watch
-# reads auth_broken() to tell her, once per episode, that a human login is
-# needed even when she is not chatting (a diary or reach-out hit the wall).
+# Two monotonic stamps, written after every FINAL engine outcome (after the
+# one auth retry): the last auth failure and the last success. Only ever
+# compared to each other, never displayed or persisted, so a monotonic clock
+# (immune to wall-clock jumps: NTP sync, DST, a user setting the clock back)
+# is the right one. login_watch reads auth_broken() to tell her, once per
+# episode, that a human login is needed even when she is not chatting (a
+# diary or reach-out hit the wall).
 _auth_state = {"failed_at": None, "ok_at": None}
 
 
@@ -147,17 +150,22 @@ def reset_auth_state() -> None:
 def _note_outcome(reply: "EngineReply") -> None:
     """Record the final outcome of one run (the retry loop's verdict, never a
     single attempt) and log every failure with the CLI's own words, so the
-    console finally shows WHY a reply died instead of just that it did.
-    Always called while the caller holds _reply_lock, so stamps are ordered
-    like the outcomes themselves; calling this after releasing the lock would
-    let a concurrent caller's later outcome be overwritten by a stale,
-    out-of-order timestamp from this one."""
-    now = time.time()
+    console finally shows WHY a reply died instead of just that it did -- a
+    user-cancelled reply is the one exception, logged at DEBUG instead since
+    she caused it on purpose, not the CLI. Always called while the caller
+    holds _reply_lock, so stamps are ordered like the outcomes themselves;
+    calling this after releasing the lock would let a concurrent caller's
+    later outcome be overwritten by a stale, out-of-order timestamp from
+    this one."""
+    now = time.monotonic()
     if reply.ok:
         _auth_state["ok_at"] = now
         return
     if reply.error_kind == "auth":
         _auth_state["failed_at"] = now
+    if reply.error_detail == _CANCELLED_DETAIL:
+        logger.debug("engine: reply cancelled by the user")
+        return
     logger.warning("engine: reply failed (%s): %s", reply.error_kind,
                    reply.error_detail or "no detail from the CLI")
 
@@ -340,16 +348,21 @@ def _stream_attempt(cfg: Config, prompt: str, session_id: str | None,
         full = "".join(text_parts)
 
         if state["cancelled"]:
-            return EngineReply(full, session_id, ok=False, error_kind="nonzero"), emitted, False
+            return EngineReply(full, session_id, ok=False, error_kind="nonzero",
+                               error_detail=_CANCELLED_DETAIL), emitted, False
         if state["timed_out"]:
             return EngineReply(full, session_id, ok=False, error_kind="timeout",
                                error_detail="no output within the time limit"), emitted, False
         if proc.returncode != 0 or result_error:
-            # The CLI puts its reason in the result event (2.1.206, -p mode),
-            # older builds wrote to stderr, and some API errors arrive as text
-            # deltas -- read all three, result text first.
-            kind = classify_failure("\n".join((result_text, stderr_tail or "", full)))
-            detail = _error_detail(result_text, stderr_tail or "", full)
+            # Classify from result text and stderr first; the emitted reply
+            # text only when the CLI said nothing else (some older builds
+            # surfaced "API Error: 401 ..." as a text delta instead of a
+            # result event) -- her own words in a reply that then fails for
+            # an unrelated reason must never be mistaken for the CLI's.
+            primary = "\n".join(part for part in (result_text, stderr_tail or "") if part)
+            source = primary if primary.strip() else full
+            kind = classify_failure(source)
+            detail = _error_detail(result_text, stderr_tail or "", "" if primary.strip() else full)
             return (EngineReply(full, session_id, ok=False, error_kind=kind,
                                 error_detail=detail), emitted, kind == "auth")
         if not emitted:

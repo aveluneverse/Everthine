@@ -4,7 +4,8 @@ Modes: ok | malformed | nonobject | result_error | auth_once | slow | exit1
     | login_expired | not_logged_in | rate_limited
     | stream_ok | stream_slow_ok | stream_die_mid | stream_result_error
     | stream_auth_once | stream_stall | stream_login_expired
-    | stream_not_logged_in | stream_rate_limited
+    | stream_not_logged_in | stream_rate_limited | stream_text_then_server_error
+    | stream_text_then_silent_exit
 auth_once uses FAKE_CLAUDE_STATE (a file path) to fail with a 401 fingerprint
 on the first call and succeed on the second - exercising the retry loop.
 stream_slow_ok mirrors stream_ok but sits silent (no text delta, like a long
@@ -70,6 +71,23 @@ def main() -> None:
             _emit({"type": "result", "result": "API Error: 500 internal",
                    "session_id": session, "is_error": True})
             return
+
+        if mode == "stream_text_then_server_error":
+            # The reply text itself happens to talk about logins/limits for
+            # unrelated (conversational) reasons, then the run fails for a
+            # THIRD, unrelated reason -- the emitted text must never be
+            # mistaken for the CLI's own words when result_text says plenty.
+            _delta("My login expired yesterday, remember? ")
+            _emit({"type": "result", "subtype": "success", "is_error": True,
+                   "result": "API Error: 500 internal", "session_id": session})
+            sys.exit(1)
+
+        if mode == "stream_text_then_silent_exit":
+            # No result event, no stderr -- the emitted text is ALL there is,
+            # so it must still be read as the fallback (older CLI builds
+            # surfaced "API Error: 401 ..." exactly this way, as a delta).
+            _delta("API Error: 401 Invalid authentication credentials")
+            sys.exit(1)
 
         if mode == "stream_stall":
             _delta("before the silence ")
