@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from everthine.config import Config
 from everthine import engine
@@ -162,6 +163,39 @@ class TestStreamOnce(StreamTestBase):
         worker.join(timeout=10)
         self.assertFalse(worker.is_alive())
         self.assertLess(time.monotonic() - start, 20)
+
+    def test_stream_login_expired_is_auth_with_detail_and_no_text(self):
+        os.environ["FAKE_CLAUDE_MODE"] = "stream_login_expired"
+        engine.reset_auth_state()
+        self.addCleanup(engine.reset_auth_state)
+        with mock.patch.object(engine.time, "sleep"):
+            out = self.run_stream(self.cfg(), "hi")
+        self.assertEqual([e["type"] for e in out], ["done"])
+        reply = out[-1]["reply"]
+        self.assertFalse(reply.ok)
+        self.assertEqual(reply.error_kind, "auth")
+        self.assertIn("OAuth session expired", reply.error_detail)
+        self.assertTrue(engine.auth_broken())
+
+    def test_stream_not_logged_in_is_auth(self):
+        os.environ["FAKE_CLAUDE_MODE"] = "stream_not_logged_in"
+        with mock.patch.object(engine.time, "sleep"):
+            out = self.run_stream(self.cfg(), "hi")
+        self.assertEqual(out[-1]["reply"].error_kind, "auth")
+
+    def test_stream_rate_limited_kind(self):
+        os.environ["FAKE_CLAUDE_MODE"] = "stream_rate_limited"
+        out = self.run_stream(self.cfg(), "hi")
+        reply = out[-1]["reply"]
+        self.assertEqual(reply.error_kind, "rate_limited")
+        self.assertIn("session limit", reply.error_detail)
+
+    def test_stream_die_mid_keeps_stderr_as_detail(self):
+        os.environ["FAKE_CLAUDE_MODE"] = "stream_die_mid"
+        out = self.run_stream(self.cfg(), "hi")
+        reply = out[-1]["reply"]
+        self.assertEqual(reply.error_kind, "nonzero")
+        self.assertEqual(reply.error_detail, "boom")
 
 
 if __name__ == "__main__":

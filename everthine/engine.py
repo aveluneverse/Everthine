@@ -2,7 +2,9 @@
 
 One blocking call per user message: prompt goes in via stdin (avoids OS
 argv length limits), the reply comes back as a single JSON document.
-A reply lock serializes calls; an auth-race is retried once.
+A reply lock serializes calls; an auth-race is retried once. Failures are
+classified (auth / rate_limited / timeout / cli_missing / nonzero), carry
+the CLI's own words in error_detail, and are logged at WARNING.
 try_run_once() is the non-blocking twin background inner activities use:
 it gives up immediately when the lock is busy, so an inner write always
 yields to live conversation instead of queueing ahead of it.
@@ -27,9 +29,6 @@ _reply_lock = threading.Lock()
 _STRIP_ENV = ("CLAUDECODE", "CLAUDE_CODE_EFFORT_LEVEL",
               "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
-_AUTH_FINGERPRINTS = ("API Error: 401", '"type":"authentication_error"',
-                      "Invalid authentication credentials")
-
 
 @dataclass
 class EngineReply:
@@ -37,6 +36,7 @@ class EngineReply:
     session_id: str | None
     ok: bool
     error_kind: str | None = None
+    error_detail: str = ""
 
 
 def make_env() -> dict:
@@ -63,8 +63,99 @@ def build_cmd(cfg: Config, session_id: str | None, system_prompt: str | None,
     return cmd
 
 
+# Phrases the Claude CLI emits (stdout JSON "result", stream "result" event,
+# or stderr, depending on version and path) when the saved login is the
+# problem. Lower-case; matching is case-insensitive. Sources: observed on CLI
+# 2.1.206 in -p mode, plus the official error reference
+# (code.claude.com/docs/en/errors, "Not logged in" / "Login expired" /
+# "OAuth token revoked" / "Invalid API key" / "API Error: 401").
+_AUTH_FINGERPRINTS = (
+    "api error: 401", '"type":"authentication_error"',
+    "invalid authentication credentials",
+    "not logged in", "please run /login", "run /login", "login expired",
+    "failed to authenticate", "oauth session expired",
+    "could not be refreshed", "oauth token revoked", "oauth token has expired",
+    "oauth token expired", "re-authenticate", "invalid api key",
+)
+# The subscription's rolling allowance is used up (or the API throttled):
+# a condition that lasts hours, not a glitch worth "say that again".
+_RATE_LIMIT_FINGERPRINTS = (
+    "hit your session limit", "hit your weekly limit", "hit your opus limit",
+    "hit your limit", "usage limit reached", "rate_limit_error",
+    "request rejected (429)", "api error: 429", "usage_cap_reached",
+)
+_DETAIL_MAX = 300
+
+
+def classify_failure(text: str) -> str:
+    """Name the failure a failed CLI run represents, from whatever it said:
+    "auth" (the login is gone: only a human can fix it, by logging in again),
+    "rate_limited" (the allowance is spent: waiting fixes it), else "nonzero"
+    (a one-off worth retrying). Order matters only in that auth wins ties."""
+    low = (text or "").lower()
+    if any(fp in low for fp in _AUTH_FINGERPRINTS):
+        return "auth"
+    if any(fp in low for fp in _RATE_LIMIT_FINGERPRINTS):
+        return "rate_limited"
+    return "nonzero"
+
+
 def _looks_like_auth_error(text: str) -> bool:
-    return any(fp in text for fp in _AUTH_FINGERPRINTS)
+    return classify_failure(text) == "auth"
+
+
+def _error_detail(result_text: str, stderr: str, stdout: str = "") -> str:
+    """One log-line's worth of what the CLI said: its own result message when
+    it gave one (head), else the stderr tail, else the stdout tail."""
+    if result_text and result_text.strip():
+        text = " ".join(result_text.split())
+        return text[:_DETAIL_MAX]
+    text = " ".join(((stderr or "").strip() or (stdout or "").strip()).split())
+    return text[-_DETAIL_MAX:] if len(text) > _DETAIL_MAX else text
+
+
+def _result_text(stdout: str) -> str:
+    """The "result" field of a JSON result document, or "" when stdout is
+    not one (then the raw text is the detail, handled by _error_detail)."""
+    try:
+        data = json.loads(stdout or "")
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if isinstance(data, dict) and data.get("result"):
+        return str(data.get("result"))
+    return ""
+
+
+# --- auth state: is the login broken right now? ------------------------
+# Two wall-clock stamps, written after every FINAL engine outcome (after the
+# one auth retry): the last auth failure and the last success. login_watch
+# reads auth_broken() to tell her, once per episode, that a human login is
+# needed even when she is not chatting (a diary or reach-out hit the wall).
+_auth_state = {"failed_at": None, "ok_at": None}
+
+
+def auth_broken() -> bool:
+    failed, ok = _auth_state["failed_at"], _auth_state["ok_at"]
+    return failed is not None and (ok is None or failed > ok)
+
+
+def reset_auth_state() -> None:
+    _auth_state["failed_at"] = None
+    _auth_state["ok_at"] = None
+
+
+def _note_outcome(reply: "EngineReply") -> None:
+    """Record the final outcome of one run (the retry loop's verdict, never a
+    single attempt) and log every failure with the CLI's own words, so the
+    console finally shows WHY a reply died instead of just that it did."""
+    now = time.time()
+    if reply.ok:
+        _auth_state["ok_at"] = now
+        return
+    if reply.error_kind == "auth":
+        _auth_state["failed_at"] = now
+    logger.warning("engine: reply failed (%s): %s", reply.error_kind,
+                   reply.error_detail or "no detail from the CLI")
 
 
 def check_claude_available(cfg: Config) -> bool:
@@ -97,12 +188,15 @@ def _run_attempt(cfg: Config, prompt: str, session_id: str | None,
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.communicate()
-        return EngineReply("", session_id, ok=False, error_kind="timeout")
+        return EngineReply("", session_id, ok=False, error_kind="timeout",
+                           error_detail="no output within the time limit")
 
     combined = (stdout or "") + (stderr or "")
+    result_text = _result_text(stdout)
     if proc.returncode != 0:
-        kind = "auth" if _looks_like_auth_error(combined) else "nonzero"
-        return EngineReply("", session_id, ok=False, error_kind=kind)
+        return EngineReply("", session_id, ok=False,
+                           error_kind=classify_failure(combined),
+                           error_detail=_error_detail(result_text, stderr, stdout))
 
     try:
         data = json.loads(stdout)
@@ -110,26 +204,31 @@ def _run_attempt(cfg: Config, prompt: str, session_id: str | None,
             raise TypeError("engine output is not a JSON object")
         if data.get("is_error"):
             blob = str(data.get("result", ""))
-            kind = "auth" if _looks_like_auth_error(blob) else "nonzero"
-            return EngineReply("", session_id, ok=False, error_kind=kind)
+            return EngineReply("", session_id, ok=False,
+                               error_kind=classify_failure(blob),
+                               error_detail=_error_detail(blob, stderr, stdout))
         return EngineReply(str(data.get("result", "")).strip() or stdout.strip(),
                            data.get("session_id", session_id), ok=True)
     except (json.JSONDecodeError, TypeError):
         text = (stdout or stderr or "").strip()
         return EngineReply(text, session_id, ok=bool(text),
-                           error_kind=None if text else "nonzero")
+                           error_kind=None if text else "nonzero",
+                           error_detail="" if text else _error_detail("", stderr, stdout))
 
 
 def _locked_run(cfg: Config, prompt: str, session_id: str | None,
                 system_prompt: str | None,
                 timeout_s: int | None) -> EngineReply:
     """Auth-retry loop shared by run_once/try_run_once. Caller holds _reply_lock."""
+    reply = None
     for attempt in range(2):
         reply = _run_attempt(cfg, prompt, session_id, system_prompt, timeout_s)
         if reply.error_kind == "auth" and attempt == 0:
             time.sleep(1.5)
             continue
-        return reply
+        break
+    _note_outcome(reply)
+    return reply
 
 
 def run_once(cfg: Config, prompt: str, session_id: str | None = None,
@@ -206,6 +305,7 @@ def _stream_attempt(cfg: Config, prompt: str, session_id: str | None,
         text_parts = []
         final_session = session_id
         result_error = False
+        result_text = ""
         for line in proc.stdout:
             state["last_activity"] = time.monotonic()
             line = line.strip()
@@ -228,6 +328,7 @@ def _stream_attempt(cfg: Config, prompt: str, session_id: str | None,
                 final_session = event.get("session_id", final_session)
                 if event.get("is_error"):
                     result_error = True
+                    result_text = str(event.get("result") or "")
 
         stderr_tail = proc.stderr.read() if proc.stderr else ""
         proc.wait()
@@ -237,13 +338,19 @@ def _stream_attempt(cfg: Config, prompt: str, session_id: str | None,
         if state["cancelled"]:
             return EngineReply(full, session_id, ok=False, error_kind="nonzero"), emitted, False
         if state["timed_out"]:
-            return EngineReply(full, session_id, ok=False, error_kind="timeout"), emitted, False
+            return EngineReply(full, session_id, ok=False, error_kind="timeout",
+                               error_detail="no output within the time limit"), emitted, False
         if proc.returncode != 0 or result_error:
-            auth = _looks_like_auth_error(full + (stderr_tail or ""))
-            kind = "auth" if auth else "nonzero"
-            return EngineReply(full, session_id, ok=False, error_kind=kind), emitted, auth
+            # The CLI puts its reason in the result event (2.1.206, -p mode),
+            # older builds wrote to stderr, and some API errors arrive as text
+            # deltas -- read all three, result text first.
+            kind = classify_failure("\n".join((result_text, stderr_tail or "", full)))
+            detail = _error_detail(result_text, stderr_tail or "", full)
+            return (EngineReply(full, session_id, ok=False, error_kind=kind,
+                                error_detail=detail), emitted, kind == "auth")
         if not emitted:
-            return EngineReply("", session_id, ok=False, error_kind="nonzero"), False, False
+            return EngineReply("", session_id, ok=False, error_kind="nonzero",
+                               error_detail=_error_detail("", stderr_tail or "", "")), False, False
         return EngineReply(full, final_session, ok=True), True, False
     finally:
         # Close the pipes deterministically on every exit path: a long-running
@@ -280,4 +387,5 @@ def stream_once(cfg: Config, prompt: str, session_id: str | None = None,
         # still deliver the terminal event (same style as the bot's handler).
         logger.error("streaming attempt crashed unexpectedly", exc_info=True)
         reply = EngineReply("", session_id, ok=False, error_kind="nonzero")
+    _note_outcome(reply)
     events.put({"type": "done", "reply": reply})

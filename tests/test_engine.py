@@ -204,5 +204,102 @@ class TestRunAttemptTimeoutResolution(EngineTestBase):
         self.assertEqual(self._communicate_timeout_for(cfg, 90), 90)
 
 
+class TestLoginFailures(EngineTestBase):
+    def setUp(self):
+        super().setUp()
+        engine.reset_auth_state()
+        self.addCleanup(engine.reset_auth_state)
+
+    def _run(self, mode):
+        self.set_mode(mode)
+        with mock.patch.object(engine.time, "sleep"):
+            return engine.run_once(self.cfg(), "hi")
+
+    def test_login_expired_is_auth_with_detail(self):
+        r = self._run("login_expired")
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "auth")
+        self.assertIn("OAuth session expired", r.error_detail)
+
+    def test_not_logged_in_is_auth(self):
+        r = self._run("not_logged_in")
+        self.assertEqual(r.error_kind, "auth")
+        self.assertIn("Not logged in", r.error_detail)
+
+    def test_usage_limit_is_rate_limited(self):
+        r = self._run("rate_limited")
+        self.assertEqual(r.error_kind, "rate_limited")
+        self.assertIn("session limit", r.error_detail)
+
+    def test_plain_exit1_still_nonzero_with_stderr_detail(self):
+        r = self._run("exit1")
+        self.assertEqual(r.error_kind, "nonzero")
+        self.assertEqual(r.error_detail, "boom")
+
+    def test_success_has_empty_detail(self):
+        r = self._run("ok")
+        self.assertTrue(r.ok)
+        self.assertEqual(r.error_detail, "")
+
+    def test_failure_is_logged_with_kind_and_detail(self):
+        with self.assertLogs("everthine", level="WARNING") as cm:
+            self._run("login_expired")
+        joined = "\n".join(cm.output)
+        self.assertIn("auth", joined)
+        self.assertIn("OAuth session expired", joined)
+
+    def test_auth_state_breaks_then_recovers(self):
+        self.assertFalse(engine.auth_broken())
+        self._run("login_expired")
+        self.assertTrue(engine.auth_broken())
+        self._run("ok")
+        self.assertFalse(engine.auth_broken())
+
+    def test_non_auth_failure_does_not_break_auth_state(self):
+        self._run("exit1")
+        self.assertFalse(engine.auth_broken())
+
+
+class TestClassifyFailure(unittest.TestCase):
+    AUTH = [
+        "Not logged in \u00b7 Please run /login",
+        "Login expired \u00b7 Please run /login",
+        "Failed to authenticate: OAuth session expired and could not be refreshed",
+        "OAuth token revoked \u00b7 Please run /login",
+        "OAuth token has expired",
+        "API Error: 401 Invalid authentication credentials",
+        'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"x"}}',
+        "Invalid API key \u00b7 Fix external API key",
+        "OAuth refresh token is no longer valid; run /login to re-authenticate",
+    ]
+    RATE = [
+        "You've hit your session limit \u00b7 resets 3:45pm",
+        "You've hit your weekly limit \u00b7 resets Mon 12:00am",
+        "You've hit your Opus limit \u00b7 resets 3:45pm",
+        "API Error: Request rejected (429) \u00b7 this may be a temporary capacity issue.",
+        'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"x"}}',
+        "Claude AI usage limit reached|1756700000",
+    ]
+    OTHER = ["API Error: 500 internal", "boom", "", "Server is temporarily limiting requests (not your usage limit)"]
+
+    def test_auth_phrases(self):
+        for text in self.AUTH:
+            with self.subTest(text=text):
+                self.assertEqual(engine.classify_failure(text), "auth")
+
+    def test_rate_limit_phrases(self):
+        for text in self.RATE:
+            with self.subTest(text=text):
+                self.assertEqual(engine.classify_failure(text), "rate_limited")
+
+    def test_everything_else_is_nonzero(self):
+        for text in self.OTHER:
+            with self.subTest(text=text):
+                self.assertEqual(engine.classify_failure(text), "nonzero")
+
+    def test_case_insensitive(self):
+        self.assertEqual(engine.classify_failure("NOT LOGGED IN"), "auth")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,8 +1,10 @@
 """A stand-in for the Claude Code CLI, driven by FAKE_CLAUDE_MODE.
 
 Modes: ok | malformed | nonobject | result_error | auth_once | slow | exit1
+    | login_expired | not_logged_in | rate_limited
     | stream_ok | stream_slow_ok | stream_die_mid | stream_result_error
-    | stream_auth_once | stream_stall
+    | stream_auth_once | stream_stall | stream_login_expired
+    | stream_not_logged_in | stream_rate_limited
 auth_once uses FAKE_CLAUDE_STATE (a file path) to fail with a 401 fingerprint
 on the first call and succeed on the second - exercising the retry loop.
 stream_slow_ok mirrors stream_ok but sits silent (no text delta, like a long
@@ -74,6 +76,16 @@ def main() -> None:
             time.sleep(60)
             return
 
+        if mode in ("stream_login_expired", "stream_not_logged_in", "stream_rate_limited"):
+            text = {
+                "stream_login_expired": "Failed to authenticate: OAuth session expired and could not be refreshed",
+                "stream_not_logged_in": "Not logged in \u00b7 Please run /login",
+                "stream_rate_limited": "You've hit your session limit \u00b7 resets 3:45pm",
+            }[mode]
+            _emit({"type": "result", "subtype": "success", "is_error": True,
+                   "result": text, "session_id": session})
+            sys.exit(1)
+
     if mode == "auth_once":
         state = os.environ["FAKE_CLAUDE_STATE"]
         if not os.path.exists(state):
@@ -89,6 +101,17 @@ def main() -> None:
 
     if mode == "exit1":
         sys.stderr.write("boom\n")
+        sys.exit(1)
+
+    if mode in ("login_expired", "not_logged_in", "rate_limited"):
+        text = {
+            "login_expired": "Failed to authenticate: OAuth session expired and could not be refreshed",
+            "not_logged_in": "Not logged in \u00b7 Please run /login",
+            "rate_limited": "You've hit your session limit \u00b7 resets 3:45pm",
+        }[mode]
+        sys.stdout.write(json.dumps({"type": "result", "subtype": "success",
+                                     "is_error": True, "result": text,
+                                     "session_id": "fake-session-err"}))
         sys.exit(1)
 
     if mode == "malformed":
