@@ -11,13 +11,51 @@ things we'd like to tell you honestly up front.
   `.env` is wrong. He answers one person and only one, his whole
   life long; a stranger who messages him is met with silence.
   This is by design, and it is the shape of his loyalty.
-- **He replied with a "needs to log in again" line**: your Claude
-  CLI login has expired. Open a terminal, run `claude` once to
-  finish logging in, and that's it; no need to restart the bot.
+- **He replied with a "can't reach Claude, the login has expired"
+  line**: your Claude Code login has lapsed. That login has to be
+  renewed by you, in person, about once a month (not a bot problem:
+  it is a Claude Code security rule, and nothing can renew it
+  automatically). Open a terminal and run `claude auth login` (on an
+  older CLI: run `claude`, then type `/login` inside it); he is back
+  the moment you are signed in, no restart needed. He warns you 3
+  days ahead (see the next question).
+- **He answers every message with the same glitch line** ("something
+  glitched", "lost my train of thought"): on copies downloaded before
+  2026-08-20 this was almost always the expired login above; the old
+  engine simply could not recognise it and called it a glitch. Log in
+  again as above, then update the framework: from now on he says
+  plainly what happened. If it still repeats after updating, paste
+  the lines starting with `engine: reply failed` from his terminal
+  window to your Claude Code; every failure now logs the CLI's own
+  words.
+- **He replied with an "allowance used up" line**: your Claude plan's
+  rolling usage allowance is spent; the bracket carries the CLI's own
+  words, reset time included. Wait for the reset; to spend less, see
+  the last question.
 - **A long wait with only the waiting line showing**: the
   deep-thought phase of a long reply can legitimately run for
   minutes. Only start to wonder if it drags well past that (the
   default ceiling is 20 minutes).
+
+## How often does the Claude login need renewing?
+
+Claude Code signs you in through the browser, and that login has a
+fixed lifetime of about a month (we have seen 27 to 30 days; the
+exact figure is whatever you are given at login). Once it runs out,
+every call fails, and only a person at a terminal can renew it: no
+setting makes it automatic.
+
+So he learned two things: from `LOGIN_WARN_DAYS` days ahead (default
+3) he reminds you once a day, and once the login has actually lapsed
+he tells you what to run. Both notices respect quiet hours;
+`LOGIN_WATCH_ENABLED=false` turns the whole thing off. He judges this
+by reading one number from the Claude Code credential file, the
+expiry timestamp, and nothing else.
+
+Two honest caveats. One: on macOS the login lives in the Keychain,
+there is no file to read, so there he can only tell you after the
+fact. Two: the notices only go out while `run.py` is running; a
+sleeping computer cannot wake you.
 
 ## First start is slow
 

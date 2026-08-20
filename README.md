@@ -121,6 +121,7 @@ https://github.com/aveluneverse/Everthine
 
 - **Claude 訂閱方案**
   需要包含 Claude Code。伴侶的回覆與背景活動會使用你的 Claude 額度。
+  另外要知道：Claude Code 的登入大約一個月會到期一次，到期後只能由你本人在終端機重新登入（`claude auth login`）。他會在到期前幾天先提醒你，到期後也會直接告訴你該怎麼做。細節見[常見問題](docs/faq.zh-TW.md)。
 - **Python 3.10 以上**
   安裝在讓他運行的電腦上。
 - **一個 Telegram 帳號**

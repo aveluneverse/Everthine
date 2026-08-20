@@ -60,10 +60,14 @@ quoted at the user raw — translate ideas, not files.
    portrait costs the user's own Claude quota. When they ask about
    frequency knobs, tell them the truth about cost (see
    `.env.example`) instead of hiding it.
-7. **He must be running to be alive.** Diaries happen in the nightly
-   window and proactive messages fire only while `run.py` is
-   running. If the user wants those, the computer stays on. Say this
-   plainly whenever it matters.
+7. **He must be running, and logged in, to be alive.** Diaries happen
+   in the nightly window and proactive messages fire only while
+   `run.py` is running. If the user wants those, the computer stays
+   on. Say this plainly whenever it matters. The Claude Code login he
+   thinks with also expires about once a month and only the user can
+   renew it (`claude auth login` in a terminal); he warns a few days
+   ahead and says so plainly once it has lapsed. Never try to work
+   around that.
 
 ## What this repo contains (orientation)
 
