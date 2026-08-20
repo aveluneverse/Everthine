@@ -246,6 +246,13 @@ class TestConcurrencyScope(unittest.TestCase):
         memory_embed.set_embed_fn(lambda text: [1.0, 0.0])
         self.addCleanup(memory_embed.set_embed_fn, None)
         self._root = Path(self._td.name)
+        # Two tests below drive the real _post_init hook with only
+        # scheduler.start_tick patched; the real login_watch.start() would
+        # otherwise read ~/.claude/.credentials.json (log_boot_status ->
+        # read_login_expiry) -- no test may touch that file.
+        patcher = mock.patch.object(bot.login_watch, "start")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _app(self, streaming):
         cfg = Config(bot_token="x", authorized_user_id=1,
@@ -336,11 +343,19 @@ class TestPostInitComposite(unittest.IsolatedAsyncioTestCase):
         memory_embed.set_embed_fn(lambda text: [1.0, 0.0])
         self.addCleanup(memory_embed.set_embed_fn, None)
         self._root = Path(self._td.name)
+        # Every test below drives the real _post_init hook; the real
+        # login_watch.start() would otherwise read
+        # ~/.claude/.credentials.json (log_boot_status -> read_login_expiry)
+        # -- no test may touch that file, so it is mocked for all of them.
+        patcher = mock.patch.object(bot.login_watch, "start")
+        self.login_watch_start = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _hook(self):
         """The _post_init closure the builder actually received."""
         cfg = Config(bot_token="x", authorized_user_id=1,
                      data_dir=self._root / "data", streaming_enabled=False)
+        self.cfg = cfg
         return bot.make_app(cfg).post_init
 
     def _fake(self):
@@ -377,6 +392,12 @@ class TestPostInitComposite(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("tick failed to start" in m for m in cm.output))
         # The menu was still published before the tick attempt blew up.
         self.assertEqual(len(app.bot.set_my_commands_calls), 1)
+        # Item 2's own point: the tick's own try/except no longer shares a
+        # block with the watch's, so a tick failure must not silently skip
+        # the line that arms it -- login_watch.start still runs, with this
+        # same cfg.
+        self.login_watch_start.assert_called_once()
+        self.assertIs(self.login_watch_start.call_args.args[1], self.cfg)
 
 
 if __name__ == "__main__":
