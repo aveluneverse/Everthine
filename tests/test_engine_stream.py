@@ -197,6 +197,29 @@ class TestStreamOnce(StreamTestBase):
         self.assertEqual(reply.error_kind, "nonzero")
         self.assertEqual(reply.error_detail, "boom")
 
+    def test_note_outcome_runs_while_reply_lock_is_still_held(self):
+        # Pins the ordering fix: _note_outcome must stamp _auth_state before
+        # _reply_lock is released (matching _locked_run), so a concurrent
+        # run_once/try_run_once can never note a fresher outcome that this
+        # thread's _note_outcome would then overwrite with a stale,
+        # out-of-order timestamp. Recording _reply_lock.locked() at the
+        # moment _note_outcome actually runs pins the ordering without
+        # needing real thread interleaving.
+        os.environ["FAKE_CLAUDE_MODE"] = "stream_ok"
+        engine.reset_auth_state()
+        self.addCleanup(engine.reset_auth_state)
+        seen_locked = []
+        real_note_outcome = engine._note_outcome
+
+        def _spy(reply):
+            seen_locked.append(engine._reply_lock.locked())
+            real_note_outcome(reply)
+
+        with mock.patch.object(engine, "_note_outcome", side_effect=_spy):
+            self.run_stream(self.cfg(), "hi")
+
+        self.assertEqual(seen_locked, [True])
+
 
 if __name__ == "__main__":
     unittest.main()

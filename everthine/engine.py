@@ -147,7 +147,11 @@ def reset_auth_state() -> None:
 def _note_outcome(reply: "EngineReply") -> None:
     """Record the final outcome of one run (the retry loop's verdict, never a
     single attempt) and log every failure with the CLI's own words, so the
-    console finally shows WHY a reply died instead of just that it did."""
+    console finally shows WHY a reply died instead of just that it did.
+    Always called while the caller holds _reply_lock, so stamps are ordered
+    like the outcomes themselves; calling this after releasing the lock would
+    let a concurrent caller's later outcome be overwritten by a stale,
+    out-of-order timestamp from this one."""
     now = time.time()
     if reply.ok:
         _auth_state["ok_at"] = now
@@ -373,19 +377,23 @@ def stream_once(cfg: Config, prompt: str, session_id: str | None = None,
     but only while no text has been emitted - the user never sees a rerun.
     The done event is guaranteed even if an attempt crashes unexpectedly.
     """
+    reply = None
     try:
         with _reply_lock:
-            for attempt in range(2):
-                reply, emitted, saw_auth = _stream_attempt(
-                    cfg, prompt, session_id, system_prompt, events, cancel)
-                if saw_auth and not emitted and attempt == 0:
-                    time.sleep(1.5)
-                    continue
-                break
-    except Exception:
-        # Never strand the consumer waiting on the queue: log the crash and
-        # still deliver the terminal event (same style as the bot's handler).
-        logger.error("streaming attempt crashed unexpectedly", exc_info=True)
-        reply = EngineReply("", session_id, ok=False, error_kind="nonzero")
-    _note_outcome(reply)
-    events.put({"type": "done", "reply": reply})
+            try:
+                for attempt in range(2):
+                    reply, emitted, saw_auth = _stream_attempt(
+                        cfg, prompt, session_id, system_prompt, events, cancel)
+                    if saw_auth and not emitted and attempt == 0:
+                        time.sleep(1.5)
+                        continue
+                    break
+            except Exception:
+                # Never strand the consumer waiting on the queue: log the
+                # crash and still deliver the terminal event (same style as
+                # the bot's handler).
+                logger.error("streaming attempt crashed unexpectedly", exc_info=True)
+                reply = EngineReply("", session_id, ok=False, error_kind="nonzero")
+            _note_outcome(reply)  # stamped under the same lock _locked_run uses
+    finally:
+        events.put({"type": "done", "reply": reply})
