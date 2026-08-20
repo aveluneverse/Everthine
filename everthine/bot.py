@@ -41,6 +41,9 @@ portrait_enabled / scheduler_enabled is on; each organ's own INFO line at
 start ("diary: inner-life tick started" / "portrait: armed (interval {n}d)"
 / "scheduler: proactive armed (...)") only prints when that organ's own flag
 is actually on, so a single-organ run never claims a line that isn't true.
+Last in that composite hook is login_watch.start (2026-08-20), armed in its
+own try/except right after the tick's so a tick failure can never silently
+leave the login watch unarmed.
 And both of on_text's reply paths fire reflection.reflect_once after a
 SUCCESSFUL reply, fire-and-forget through _schedule_reflection. With every
 flag off (diary_enabled / portrait_enabled / scheduler_enabled /
@@ -67,9 +70,9 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, ContextTypes, MessageHandler,
                           MessageReactionHandler, filters)
 
-from . import (album, archive, chunking, diary, engine, facts, memory_recall,
-              messages, persona, recent_context, reflection, scheduler,
-              stages)
+from . import (album, archive, chunking, diary, engine, facts, login_watch,
+              memory_recall, messages, persona, recent_context, reflection,
+              scheduler, stages)
 from .config import Config, load_config
 from .engine import EngineReply
 from .messages import msg
@@ -305,6 +308,20 @@ def _reaction_emoji_set(reactions) -> set[str]:
     return {r.emoji for r in reactions if isinstance(r, ReactionTypeEmoji)}
 
 
+def failure_line(reply) -> str:
+    """The line she sees for a failed EngineReply: the persona's line for its
+    error kind, with the rate-limit line's {detail} filled from the CLI's own
+    words (e.g. "You've hit your session limit · resets 3:45pm"), so the reset
+    time reaches her instead of dying in the log. Every other kind is a plain
+    lookup; an unknown/None kind is the generic glitch, as before."""
+    kind = reply.error_kind or "generic_glitch"
+    line = msg(kind)
+    if kind == "rate_limited":
+        detail = (reply.error_detail or "").strip() or "usage limit reached"
+        return line.format(detail=detail[:120])
+    return line
+
+
 def produce_reply(cfg: Config, store: SessionStore, text: str,
                   now: datetime | None = None, engine_mod=engine,
                   on_react=None, on_extra=None) -> list:
@@ -327,7 +344,7 @@ def produce_reply(cfg: Config, store: SessionStore, text: str,
             cfg, memory_block=memory_block, inner_block=inner_block,
             facts_block=facts_block))
     if not reply.ok:
-        return [msg(reply.error_kind or "generic_glitch")]
+        return [failure_line(reply)]
 
     emoji, cleaned = _extract_react(reply.text)
     # T7: on_text (which owns update.message, needed to set the Telegram
@@ -440,7 +457,7 @@ async def stream_reply(cfg: Config, store: SessionStore, text: str,
         reply = EngineReply("", data.get("session_id"), ok=False,
                             error_kind="nonzero")
     if not reply.ok and not display.full_text:
-        await display.append(msg(reply.error_kind or "generic_glitch"))
+        await display.append(failure_line(reply))
     sent = await display.finalize()
     if sent_sink is not None:
         sent_sink.extend(sent)
@@ -1106,8 +1123,7 @@ def make_app(cfg: Config):
             # injected fallback apology on text-less failures; reply.text is
             # the engine's ground truth of real partial output.
             if not reply.ok and reply.text:
-                await update.message.reply_text(
-                    msg(reply.error_kind or "generic_glitch"))
+                await update.message.reply_text(failure_line(reply))
             if reply.ok and store.detect_bloat(cfg, reply.session_id):
                 await update.message.reply_text(msg("notebook_full"))
             if reply.ok:
@@ -1185,15 +1201,20 @@ def make_app(cfg: Config):
     # concurrently, so scope concurrency to streaming mode. PTB maps False to
     # one-update-at-a-time, byte-identical to M1 (which never enabled it).
     async def _post_init(app_) -> None:
-        """The composite startup hook (M7 T6): publish the command menu first,
-        then arm the inner-life tick. Each half self-guards -- PTB 22.6 awaits
-        post_init via run_until_complete OUTSIDE any exception guard, so an
-        escaping exception here crashes the whole process at startup; a cosmetic
-        menu blip or a background-tick failure must never be that. The tick now
-        lives in scheduler.py; store reaches it as an explicit argument from
-        this closure's scope, never a bot_data side channel -- a parameter that
-        cannot be supplied fails loudly at once, where a silent side-channel
-        miss would arm a tick wired to nothing that no one would notice."""
+        """The composite startup hook (M7 T6, login watch folded in
+        2026-08-20): publish the command menu, then arm the inner-life tick,
+        then arm the login watch. Each of the three self-guards -- PTB 22.6
+        awaits post_init via run_until_complete OUTSIDE any exception guard,
+        so an escaping exception here crashes the whole process at startup;
+        a cosmetic menu blip or a background failure must never be that. The
+        tick lives in scheduler.py; store reaches it as an explicit argument
+        from this closure's scope, never a bot_data side channel -- a
+        parameter that cannot be supplied fails loudly at once, where a
+        silent side-channel miss would arm a tick wired to nothing that no
+        one would notice. The login watch has its OWN try/except, separate
+        from the tick's: sharing one used to mean a tick failure silently
+        skipped the line that arms the watch too, and the watch's own
+        failure was misnamed as a tick failure in the log."""
         await register_commands(app_)          # keeps its own internal guard
         try:
             # _cache_sent rides along so a heart on a PROACTIVE message
@@ -1203,6 +1224,10 @@ def make_app(cfg: Config):
             scheduler.start_tick(app_, cfg, store, cache_sink=_cache_sent)
         except Exception:
             logger.warning("inner-life tick failed to start", exc_info=True)
+        try:
+            login_watch.start(app_, cfg)
+        except Exception:
+            logger.warning("login-watch failed to start", exc_info=True)
 
     app = (ApplicationBuilder().token(cfg.bot_token)
            .concurrent_updates(cfg.streaming_enabled)

@@ -14,6 +14,13 @@ fails, switch to the everthine-troubleshoot skill, fix, come back.
 - `claude --version` succeeds in a plain shell — the engine will
   spawn the `claude` command itself, so it must resolve outside this
   session too.
+- The Claude login is alive: `claude auth status` prints
+  `"loggedIn": true` (an older CLI without that subcommand: run
+  `claude` once, confirm it is signed in, quit). Tell the user now,
+  in one sentence, that this login lasts about a month and they will
+  renew it themselves in a terminal with `claude auth login`; the
+  companion reminds them a few days ahead and says so plainly if it
+  lapses.
 - `python --version` reports 3.10 or newer.
 - `pip install -r requirements.txt` (announce: "installing the
   bot's libraries — Telegram wiring and the local memory model").
@@ -106,7 +113,10 @@ have that moment before you speak again.
    sleeping computer is a sleeping companion — and so is a closed
    window. After any restart, the wake-up file from Step 4 is how
    they call him back: double-click, window opens, he's awake.
-   No pretending, no backfill.
+   No pretending, no backfill. And about once a month the Claude
+   login he thinks with expires: he warns a few days ahead, and if it
+   lapses he says exactly what to run (`claude auth login`); nothing
+   is lost, he simply waits for the login.
 3. **A name for me** *(only now)*: invite the user to give their
    Claude Code partner — you — a name of their own, so "the one who
    built him with me" has a name in their story too. Their choice,

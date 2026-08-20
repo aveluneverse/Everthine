@@ -248,12 +248,19 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset({"companion", "partner", "relationship", "line
 # fail-loud boot error naming the key, like every other settings.yaml mistake.
 # A value with no placeholder at all is legal: str.format ignores an absent
 # field, so a persona may write a line that never interpolates anything.
+# rate_limited (fills {detail}) is rendered by bot.failure_line(). auth_expiring
+# (fills {days}) is rendered by everthine/login_watch.py, which formats
+# {days} itself -- not by failure_line, and never via an EngineReply.
 _FORMAT_PROBE_KEYS = {
     "stage_intro": {"stage": "probe"},
     "stage_advanced_ack": {"stage": "probe"},
     "stage_retreat_confirm": {"stage": "probe"},
     "stage_retreated_ack": {"stage": "probe"},
     "stage_road_clipped": {"n": 0},
+    # Login-watch and allowance lines (2026-08-20): {days} until the Claude
+    # login expires; {detail} = the CLI's own words about the spent allowance.
+    "auth_expiring": {"days": 3},
+    "rate_limited": {"detail": "probe"},
 }
 _LIVING_VALUES = frozenset({"together", "long_distance"})
 _REUNION_VALUES = frozenset({"expressive", "gentle", "neutral"})

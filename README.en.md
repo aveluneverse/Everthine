@@ -189,6 +189,10 @@ but from you.
 - **A Claude subscription**
   It needs to include Claude Code. His replies and his background
   activity spend your Claude quota.
+  One more thing to know: the Claude Code login expires about once a
+  month, and only you can renew it, in a terminal (`claude auth login`).
+  He warns you a few days ahead, and once it has lapsed he tells you
+  exactly what to do. Details in the [FAQ](docs/faq.md).
 - **Python 3.10 or newer**
   Installed on the machine that runs him.
 - **A Telegram account**
