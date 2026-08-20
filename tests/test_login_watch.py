@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -236,15 +237,50 @@ class TestBootStatusAndStart(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_parks_a_task_and_logs_armed(self):
         app = FakeApp()
-        with mock.patch.object(login_watch, "read_login_expiry", lambda: None), \
+        # A Mock, not a lambda: proves (via assert_called()) that start()'s
+        # boot-status read actually goes through this patched name rather
+        # than silently falling through to the real credential file -- the
+        # late-bound read_expiry in log_boot_status is what makes that true.
+        reader = mock.Mock(return_value=None)
+        with mock.patch.object(login_watch, "read_login_expiry", reader), \
                 self.assertLogs("everthine", level="INFO") as cm:
             login_watch.start(app, _cfg())
+        reader.assert_called()
         task = app.bot_data.get("_login_watch_task")
         self.assertIsNotNone(task)
         self.assertTrue(any("armed" in line for line in cm.output))
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
+
+    async def test_watch_loop_honors_patched_reader(self):
+        # Sibling of test_start_parks_a_task_and_logs_armed, for the loop
+        # path instead of the boot path: watch_loop calls the real
+        # watch_once(app, cfg, now, state) with no read_expiry override, so
+        # this pins that watch_once's own late-bound default reaches a
+        # module-level mock.patch.object(login_watch, "read_login_expiry",
+        # ...) too -- not just an explicit read_expiry= passed by a caller.
+        # read_expiry runs off the event loop thread (watch_once awaits it
+        # via asyncio.to_thread), so a threading.Event -- not an
+        # asyncio.Event -- is the safe way to signal back across that
+        # thread boundary.
+        app = FakeApp()
+        called = threading.Event()
+
+        def fake_reader():
+            called.set()
+            return None
+
+        reader = mock.Mock(side_effect=fake_reader)
+        with mock.patch.object(login_watch, "WATCH_INTERVAL_S", 0), \
+                mock.patch.object(login_watch, "read_login_expiry", reader):
+            task = asyncio.create_task(login_watch.watch_loop(app, _cfg()))
+            await asyncio.to_thread(called.wait, 5)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertTrue(called.is_set())
+        reader.assert_called()
 
     async def test_loop_survives_a_failing_iteration(self):
         app = FakeApp()

@@ -120,9 +120,20 @@ def decide(cfg: Config, now: datetime, expiry: datetime | None, broken: bool,
 
 
 async def watch_once(app, cfg: Config, now: datetime, state: dict,
-                     read_expiry=read_login_expiry, broken=engine.auth_broken) -> str | None:
+                     read_expiry=None, broken=None) -> str | None:
     """One round: read, decide, send at most one plain notice, update state
-    only after the send succeeded. Returns the action sent, or None."""
+    only after the send succeeded. Returns the action sent, or None.
+
+    read_expiry/broken default to None and are resolved to
+    read_login_expiry/engine.auth_broken below, inside the body, rather
+    than as early-bound default values -- a plain `=read_login_expiry`
+    default captures that function object once, at import time, so a
+    later mock.patch.object(login_watch, "read_login_expiry", ...) could
+    never reach a call that relies on the default (watch_loop's does).
+    Resolving the bare names here instead means each call looks them up
+    fresh from this module's namespace, so a patch is always honored."""
+    read_expiry = read_login_expiry if read_expiry is None else read_expiry
+    broken = engine.auth_broken if broken is None else broken
     expiry = await asyncio.to_thread(read_expiry)
     broken_now = bool(broken())
     if not is_expired(now, expiry, broken_now):
@@ -147,9 +158,16 @@ async def watch_once(app, cfg: Config, now: datetime, state: dict,
 
 
 def log_boot_status(cfg: Config, now: datetime | None = None,
-                    read_expiry=read_login_expiry) -> None:
-    """One honest line at boot about the login's horizon."""
+                    read_expiry=None) -> None:
+    """One honest line at boot about the login's horizon.
+
+    read_expiry defaults to None and is resolved to read_login_expiry
+    below, inside the body, not as an early-bound default value -- see
+    watch_once's docstring for why: it is what lets start()'s unparameterized
+    log_boot_status(cfg) call still honor a test's
+    mock.patch.object(login_watch, "read_login_expiry", ...)."""
     now = now or datetime.now().astimezone()
+    read_expiry = read_login_expiry if read_expiry is None else read_expiry
     expiry = read_expiry()
     if expiry is None:
         logger.info("login-watch: cannot read when the Claude login expires (no credential "
