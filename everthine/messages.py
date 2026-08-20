@@ -18,12 +18,12 @@ _MESSAGES = {
     "timeout": "That took me too long and I stopped myself. Please try again.",
     "cli_missing": "I can't find the Claude Code CLI on this machine.",
     "auth": ("I can't reach Claude right now: the Claude login on this computer "
-             "has expired. Open a terminal and run: claude auth login  "
+             "has expired. Open a terminal and run: claude auth login "
              "(or start claude and type /login). The moment you're signed in "
              "again, I'm back."),
     "auth_expiring": ("A small heads-up: the Claude login on this computer expires "
                       "in {days} day(s). Sometime before then, open a terminal and "
-                      "run: claude auth login  -- then I won't go quiet on you."),
+                      "run: claude auth login, then I won't go quiet on you."),
     "rate_limited": ("I've used up my Claude allowance for now ({detail}). "
                      "I'll be back once it resets."),
     "nonzero": "I lost my train of thought there. Please send that once more.",
