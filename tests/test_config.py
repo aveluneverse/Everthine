@@ -371,5 +371,23 @@ class TestFactsKnobs(unittest.TestCase):
                 self.assertIn(var, text)
 
 
+class TestLoginWatchKnobs(unittest.TestCase):
+    def test_login_watch_defaults(self):
+        cfg = load_config({"BOT_TOKEN": "t", "AUTHORIZED_USER_ID": "1"})
+        self.assertTrue(cfg.login_watch_enabled)
+        self.assertEqual(cfg.login_warn_days, 3)
+
+    def test_login_watch_overrides(self):
+        cfg = load_config({"BOT_TOKEN": "t", "AUTHORIZED_USER_ID": "1",
+                           "LOGIN_WATCH_ENABLED": "false", "LOGIN_WARN_DAYS": "0"})
+        self.assertFalse(cfg.login_watch_enabled)
+        self.assertEqual(cfg.login_warn_days, 0)
+
+    def test_login_warn_days_negative_or_garbage_raises(self):
+        for bad in ("-1", "abc"):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError):
+                load_config({"BOT_TOKEN": "t", "AUTHORIZED_USER_ID": "1", "LOGIN_WARN_DAYS": bad})
+
+
 if __name__ == "__main__":
     unittest.main()

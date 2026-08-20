@@ -67,9 +67,9 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, ContextTypes, MessageHandler,
                           MessageReactionHandler, filters)
 
-from . import (album, archive, chunking, diary, engine, facts, memory_recall,
-              messages, persona, recent_context, reflection, scheduler,
-              stages)
+from . import (album, archive, chunking, diary, engine, facts, login_watch,
+              memory_recall, messages, persona, recent_context, reflection,
+              scheduler, stages)
 from .config import Config, load_config
 from .engine import EngineReply
 from .messages import msg
@@ -1214,6 +1214,7 @@ def make_app(cfg: Config):
             # its own album_enabled gate makes this a no-op when the album
             # is off (merge-acceptance fix, 2026-07-11).
             scheduler.start_tick(app_, cfg, store, cache_sink=_cache_sent)
+            login_watch.start(app_, cfg)
         except Exception:
             logger.warning("inner-life tick failed to start", exc_info=True)
 

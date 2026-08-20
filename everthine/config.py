@@ -51,6 +51,13 @@ def _get_hour(env: Mapping, key: str, default: int) -> int:
     return value
 
 
+def _get_non_negative_int(env: Mapping, key: str, default: int) -> int:
+    value = _get_int(env, key, default)
+    if value < 0:
+        raise ConfigError(f"{key} must be zero or a positive integer, got: {value}")
+    return value
+
+
 @dataclass(frozen=True)
 class Config:
     bot_token: str
@@ -100,6 +107,13 @@ class Config:
     quiet_start_hour: int = 23
     quiet_end_hour: int = 8
     proactive_daily_max: int = 4
+    # Login watch (2026-08-20): the Claude CLI login lasts about a month and
+    # only a human can renew it. When on, the bot reads the login's expiry
+    # timestamp (one number, nothing else) from the CLI's credential file,
+    # warns her login_warn_days ahead, and says so plainly once it has
+    # lapsed. login_warn_days=0 keeps only the "it has lapsed" notice.
+    login_watch_enabled: bool = True
+    login_warn_days: int = 3
     # The engine's working directory. Deliberately OUTSIDE the repo:
     # the Claude CLI loads CLAUDE.md memory files from the working
     # directory and every ancestor directory, so a cwd inside the
@@ -245,4 +259,6 @@ def load_config(env: Mapping | None = None) -> Config:
         quiet_start_hour=_get_hour(env, "QUIET_START_HOUR", 23),
         quiet_end_hour=_get_hour(env, "QUIET_END_HOUR", 8),
         proactive_daily_max=_get_positive_int(env, "PROACTIVE_DAILY_MAX", 4),
+        login_watch_enabled=_get_bool(env, "LOGIN_WATCH_ENABLED", True),
+        login_warn_days=_get_non_negative_int(env, "LOGIN_WARN_DAYS", 3),
     )
